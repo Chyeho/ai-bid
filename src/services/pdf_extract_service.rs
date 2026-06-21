@@ -31,7 +31,7 @@ use crate::domain::raw_document::{
 
 /// 匹配"汉字后跟空白再跟汉字"的模式，用于合并被空格拆散的中文词组。
 static CJK_SPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"([一-鿿])\s+(?=[一-鿿])").expect("CJK regex 编译失败")
+    Regex::new(r"([一-鿿])\s+([一-鿿])").expect("CJK regex 编译失败")
 });
 
 /// 匹配 2 个及以上的连续空格
@@ -48,7 +48,7 @@ fn clean_layout_text(text: &str) -> String {
 
     for line in &mut lines {
         for _ in 0..5 {
-            let new_s = CJK_SPACE_RE.replace_all(line, "$1").to_string();
+            let new_s = CJK_SPACE_RE.replace_all(line, "$1$2").to_string();
             if new_s == *line {
                 break;
             }
