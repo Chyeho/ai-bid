@@ -33,6 +33,12 @@ use crate::domain::raw_document::RawDocument;
 /// 标题匹配模式。patterns 按优先级排列，靠前的优先匹配。
 static HEADING_PATTERNS: LazyLock<Vec<HeadingPattern>> = LazyLock::new(|| {
     vec![
+        // Level 1: 第X部分（标书顶层结构）
+        HeadingPattern {
+            pattern_type: "part",
+            level: 1,
+            regex: Regex::new(r"^第[一二三四五六七八九十百千]+部分").expect("part regex"),
+        },
         // Level 1: 第X章
         HeadingPattern {
             pattern_type: "chapter",
@@ -184,8 +190,8 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
                 continue;
             }
 
-            // 过滤纯数字行（页码），长度 ≤ 3 且全为数字/空格
-            if is_page_number(line) {
+            // 过滤 PDF 噪声行（页码、"第X页共Y页"、控制字符）
+            if is_page_noise(line) {
                 continue;
             }
 
@@ -212,8 +218,27 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
                             test_line[mat.start()..].to_string()
                         };
 
-                        // 数字序号模式：标题过长 → 可能是条款正文，跳过
-                        if pattern.level >= 4 && title.chars().count() > 80 {
+                        // 标题长度上限过滤：过长的"标题"大概率是正文误匹配
+                        // 层级越高（数字越小）标题应越短
+                        let max_title_len = match pattern.level {
+                            1 => 40,  // 章/部分标题 ≤ 40 字符
+                            2 => {
+                                // cjk_numbered 易将法律条款长句误匹配为标题
+                                // （如 "一、《深圳经济特区政府采购条例》第五十七条..."）
+                                // 真实的中文序号标题（"一、技术要求"）均 ≤ 25 字
+                                if pattern.pattern_type == "cjk_numbered" { 25 } else { 40 }
+                            }
+                            3 => 60,  // 括号中文序号 ≤ 60 字符
+                            _ => 40,  // Level 4+ 数字/条款序号 ≤ 40 字符
+                        };
+                        if title.chars().count() > max_title_len {
+                            continue;
+                        }
+
+                        // 规则 A：句末标点排除 — Level 4 digit_dot 标题含 。！？ → 跳过
+                        // 中文完整句子必然以句号结尾，而真实标题不会。
+                        // 精确打击被误匹配的完整句子（如 "1.1本招标文件适用于..."）
+                        if pattern.pattern_type == "digit_dot" && title.contains(['。', '！', '？']) {
                             continue;
                         }
 
@@ -254,13 +279,39 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
 
 // ─── 辅助函数 ────────────────────────────────────────────────
 
-/// 判断一行是否为页码（纯数字，短行）。
-fn is_page_number(line: &str) -> bool {
+/// 判断一行是否为 PDF 噪声（页码行、私有区控制字符等）。
+///
+/// 过滤三类噪声：
+/// 1. 纯数字短行（原有逻辑，如 "1"、"92"）
+/// 2. "第X页共Y页" 格式的页码行（含残缺变体如 "78第72页共页"）
+/// 3. 含 Unicode 私有区字符（U+E000–U+F8FF）的行，这些是 PDF 渲染产生的控制字符（如 ）
+fn is_page_noise(line: &str) -> bool {
     let trimmed = line.trim();
-    if trimmed.len() > 3 {
-        return false;
+    if trimmed.is_empty() {
+        return true;
     }
-    trimmed.chars().all(|c| c.is_ascii_digit() || c == ' ')
+
+    // 1. 纯数字短行（页码），长度 ≤ 3 且全为 ASCII 数字/空格
+    if trimmed.len() <= 3 && trimmed.chars().all(|c| c.is_ascii_digit() || c == ' ') {
+        return true;
+    }
+
+    // 2. "第X页共Y页" 格式页码行
+    //    匹配模式: [可选前缀数字] "第" 数字 "页共" [可选数字] "页" [可选后缀]
+    //    使用简单的子串匹配：含 "第" + "页" + "共" + "页" 的结构
+    if trimmed.contains('第') && trimmed.contains('页') && trimmed.contains("共") {
+        // 进一步确认非正文：行长度 ≤ 20 字符（正常页码行 < 15 字符）
+        if trimmed.chars().count() <= 20 {
+            return true;
+        }
+    }
+
+    // 3. 含 Unicode 私有区字符（U+E000–U+F8FF），如 PDF bullet 符号 
+    if trimmed.contains(|c: char| ('\u{E000}'..='\u{F8FF}').contains(&c)) {
+        return true;
+    }
+
+    false
 }
 
 /// 去除行首的强调符号（★▲●■ 等），用于标题模式匹配前的归一化。
@@ -282,13 +333,24 @@ fn strip_emphasis_prefix(s: &str) -> &str {
 }
 
 /// 检查一行文本是否匹配任何标题模式（用于在正文提取中识别子标题边界）。
-/// 使用与主扫描一致的过滤规则：level >= 4 且标题 > 80 字符 → 不视为标题。
+/// 使用与主扫描一致的过滤规则：标题过长视为正文误匹配。
 fn matches_heading_pattern(line: &str) -> bool {
     for pattern in HEADING_PATTERNS.iter() {
         if let Some(mat) = pattern.regex.find(line) {
             let title = &line[mat.start()..];
-            // level >= 4 的短标题检查：过长则可能是条款正文
-            if pattern.level >= 4 && title.chars().count() > 80 {
+            let max_title_len = match pattern.level {
+                1 => 40,
+                2 => {
+                    if pattern.pattern_type == "cjk_numbered" { 25 } else { 40 }
+                }
+                3 => 60,
+                _ => 40,
+            };
+            if title.chars().count() > max_title_len {
+                continue;
+            }
+            // 规则 A：句末标点排除 — 完整句子误匹配的精确打击
+            if pattern.pattern_type == "digit_dot" && title.contains(['。', '！', '？']) {
                 continue;
             }
             return true;
@@ -488,8 +550,8 @@ fn extract_section_body(
             }
             let trimmed = line.trim();
 
-            // 跳过空行和页码（中文 PDF 块内换行均为物理折行伪影，不保留）
-            if trimmed.is_empty() || is_page_number(trimmed) {
+            // 跳过空行和 PDF 噪声（中文 PDF 块内换行均为物理折行伪影，不保留）
+            if trimmed.is_empty() || is_page_noise(trimmed) {
                 continue;
             }
 
@@ -643,18 +705,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_page_number() {
-        assert!(is_page_number("1"));
-        assert!(is_page_number("92"));
-        assert!(is_page_number(" 5 "));
-        assert!(!is_page_number("第一章"));
-        assert!(!is_page_number("1. 供应商资格"));
-        assert!(!is_page_number("1234"));
+    fn test_is_page_noise() {
+        // 纯数字页码
+        assert!(is_page_noise("1"));
+        assert!(is_page_noise("92"));
+        assert!(is_page_noise(" 5 "));
+        // "第X页共Y页" 格式
+        assert!(is_page_noise("第1页共78页"));
+        assert!(is_page_noise("第11页共78页"));
+        assert!(is_page_noise("第2页共78页温馨提示")); // 短后缀也过滤
+        assert!(is_page_noise("78第72页共页")); // 残缺变体
+        // Unicode 私有区控制字符 (U+F06E)
+        assert!(is_page_noise("系统架构要求应用系统采用浏览器/服务器架构，如无特殊原因，禁止要求终端用户安装客\u{F06E}"));
+        // 非噪声
+        assert!(!is_page_noise("第一章"));
+        assert!(!is_page_noise("1. 供应商资格"));
+        assert!(!is_page_noise("1234")); // 纯数字但超过3位
+        assert!(!is_page_noise("供应商应具备以下条件：")); // 正常正文
+    }
+
+    #[test]
+    fn test_part_pattern() {
+        let pat = &HEADING_PATTERNS[0];
+        assert!(pat.regex.is_match("第一部分投标邀请函"));
+        assert!(pat.regex.is_match("第五部分投标文件格式"));
+        assert!(!pat.regex.is_match("第一章磋商邀请"));
+        assert!(!pat.regex.is_match("一、项目概况"));
     }
 
     #[test]
     fn test_chapter_pattern() {
-        let pat = &HEADING_PATTERNS[0];
+        let pat = &HEADING_PATTERNS[1];
         assert!(pat.regex.is_match("第一章磋商邀请"));
         assert!(pat.regex.is_match("第五章合同文本"));
         assert!(!pat.regex.is_match("一、项目概况"));
@@ -663,7 +744,7 @@ mod tests {
 
     #[test]
     fn test_cjk_numbered_pattern() {
-        let pat = &HEADING_PATTERNS[2];
+        let pat = &HEADING_PATTERNS[3];
         assert!(pat.regex.is_match("一、项目概况"));
         assert!(pat.regex.is_match("二.供应商的资格要求"));
         assert!(!pat.regex.is_match("第一章"));
@@ -671,14 +752,14 @@ mod tests {
 
     #[test]
     fn test_paren_cjk_pattern() {
-        let pat = &HEADING_PATTERNS[3];
+        let pat = &HEADING_PATTERNS[4];
         assert!(pat.regex.is_match("（一）资格要求"));
         assert!(pat.regex.is_match("(二) 评审标准"));
     }
 
     #[test]
     fn test_digit_dot_pattern() {
-        let pat = &HEADING_PATTERNS[4];
+        let pat = &HEADING_PATTERNS[5];
         assert!(pat.regex.is_match("1. 供应商资格"));
         assert!(pat.regex.is_match("2、项目概况"));
         assert!(pat.regex.is_match("3)其他要求"));
@@ -686,14 +767,14 @@ mod tests {
 
     #[test]
     fn test_paren_digit_pattern() {
-        let pat = &HEADING_PATTERNS[5];
+        let pat = &HEADING_PATTERNS[6];
         assert!(pat.regex.is_match("（1）营业执照副本"));
         assert!(pat.regex.is_match("(2) 法定代表人证明"));
     }
 
     #[test]
     fn test_article_pattern() {
-        let pat = &HEADING_PATTERNS[6];
+        let pat = &HEADING_PATTERNS[7];
         assert!(pat.regex.is_match("第九条工程的支付、结算"));
     }
 }
