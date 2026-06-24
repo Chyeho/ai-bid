@@ -204,6 +204,8 @@ fn try_chunk_leaf(
 /// - 叶子的完整文本（标题 + 正文）< `merge_min_len` → 放入合并缓冲区
 /// - 叶子够长 → 先消化缓冲区（flush），再单独成 chunk
 /// - 缓冲区累计长度 > `split_max_len` → 提前 flush，避免合并后过大
+/// - 叶子与缓冲区页面间隙 > `MAX_MERGE_PAGE_GAP` → 提前 flush，
+///   避免远距离格式模板页被合并进同一 chunk 导致 page span 膨胀
 fn merge_adjacent_leaves(
     leaves: &[&Section],
     parent_path: &Vec<String>,
@@ -212,26 +214,45 @@ fn merge_adjacent_leaves(
 ) {
     let mut merge_buffer: Vec<&Section> = Vec::new();
     let mut merge_len: usize = 0;
+    // 追踪缓冲区当前的页面范围，用于检测 page gap
+    let mut buffer_page_end: Option<usize> = None;
 
     for leaf in leaves {
         let leaf_text = format!("{}\n{}", leaf.title, leaf.body_text);
         let leaf_len = leaf_text.chars().count();
 
         if leaf_len < config.merge_min_len {
+            // 页面间隙过大 → 先消化当前缓冲区，再开启新的合并组
+            if let Some(buf_end) = buffer_page_end {
+                let page_gap = leaf.body_page_start.saturating_sub(buf_end);
+                if page_gap > MAX_MERGE_PAGE_GAP {
+                    flush_merge_buffer(&merge_buffer, parent_path, config, chunks);
+                    merge_buffer.clear();
+                    merge_len = 0;
+                    buffer_page_end = None;
+                }
+            }
             // 短叶子 → 进入合并缓冲区
             merge_buffer.push(*leaf);
             merge_len += leaf_len;
+            buffer_page_end = Some(
+                buffer_page_end
+                    .unwrap_or(leaf.body_page_start)
+                    .max(leaf.body_page_end),
+            );
             // 合并后过长 → 先消化当前缓冲区
             if merge_len > config.split_max_len {
                 flush_merge_buffer(&merge_buffer, parent_path, config, chunks);
                 merge_buffer.clear();
                 merge_len = 0;
+                buffer_page_end = None;
             }
         } else {
             // 够长 → 先消化缓冲区，再单独成 chunk
             flush_merge_buffer(&merge_buffer, parent_path, config, chunks);
             merge_buffer.clear();
             merge_len = 0;
+            buffer_page_end = None;
             // 单独成 chunk（可能过长触发规则4）
             let mut path = parent_path.clone();
             path.push(leaf.title.clone());
@@ -294,7 +315,17 @@ fn flush_merge_buffer(
     // 确定合并后 chunk 的起始页、结束页和所有 block_ids
     // 使用 body 实际页范围，避免容器节点页跨度膨胀
     let page_start = buffer.iter().map(|s| s.body_page_start).min().unwrap_or(0);
-    let page_end = buffer.iter().map(|s| s.body_page_end).max().unwrap_or(0);
+    // 锚点式 page 范围上限：从第一个 leaf 的 page 开始，
+    // 仅当后续 leaf 与当前范围间隙 ≤ MAX_MERGE_PAGE_GAP 时才扩展，
+    // 防止远距离格式模板页撑大 chunk 的 page span（如 33→76）。
+    let mut capped_page_end = buffer[0].body_page_end;
+    for leaf in &buffer[1..] {
+        let gap = leaf.body_page_start.saturating_sub(capped_page_end);
+        if gap <= MAX_MERGE_PAGE_GAP {
+            capped_page_end = capped_page_end.max(leaf.body_page_end);
+        }
+    }
+    let page_end = capped_page_end;
     let mut all_block_ids: Vec<String> = Vec::new();
     let mut merged_text_parts: Vec<String> = Vec::new();
 
@@ -591,6 +622,10 @@ fn find_para_boundaries(text: &str) -> Vec<usize> {
 
 // ─── 后处理：Chunk 去重 ───────────────────────────────────────
 
+/// 合并时允许的最大页面间隙。相邻 chunk/page 差距 ≤ 此值时才扩展
+/// page 范围，防止合并后的 chunk 页面跨度膨胀（如 43 页的格式模板合并）。
+const MAX_MERGE_PAGE_GAP: usize = 2;
+
 /// 精确去重：移除内容完全相同的重复 chunk。
 ///
 /// 保留第一个出现的 chunk（页面顺序），移除后续重复项。
@@ -644,18 +679,41 @@ fn same_parent(a: &[String], b: &[String]) -> bool {
 /// - Pass 2（后向合并）：对 Pass 1 未能合并的碎片，尝试合并到后一个相邻 chunk
 ///
 /// 合并前检查两个 chunk 是否共享同一顶级章节，避免跨主题合并。
+///
+/// ## 页面范围膨胀控制
+///
+/// 合并时检查页面间隙：比较碎片与 anchor 的**原始** page 范围（即首次
+/// tiny_merge 之前的 page_end / page_start）。仅当 gap ≤ 2 时才扩展
+/// page 范围。否则仍然合并文本（语义归拢），但保持 page 范围不变。
+///
+/// 关键设计：对比 anchor 的原始范围而非逐步扩展后的范围，防止链式合并
+/// 逐页推进最终膨胀到数十页。例如 ch_114 原先因连续合并 14 个格式模板
+/// 碎片而膨胀到 43 页跨度（33-76），修复后应限制在原始 anchor 附近。
 fn merge_tiny_chunks(chunks: Vec<Chunk>, config: &ChunkingConfig) -> Vec<Chunk> {
     let min = config.min_chunk_size;
     let mut result: Vec<Chunk> = Vec::new();
 
     // ── Pass 1: 前向合并（合并到 prev chunk）──
+    // anchor_page_end: 记录 anchor 在首次 tiny_merge 之前的原始 page_end，
+    // 用于所有后续 gap 检查。永不更新，确保不会逐页链式膨胀。
+    let mut anchor_page_end: Option<usize> = None;
+
     for chunk in chunks {
         if chunk.text.chars().count() < min {
             if let Some(prev) = result.last_mut() {
                 if same_parent(&prev.section_path, &chunk.section_path) {
-                    // 合并 chunk → prev
+                    // 合并 chunk → prev（文本始终合并）
                     prev.text = format!("{}\n\n{}", prev.text, chunk.text);
-                    prev.page_end = prev.page_end.max(chunk.page_end);
+                    // 对比 anchor 原始 page_end 而非逐步扩展后的值
+                    let anchor_end = anchor_page_end.unwrap_or(prev.page_end);
+                    let page_gap = chunk.page_start.saturating_sub(anchor_end);
+                    if page_gap <= MAX_MERGE_PAGE_GAP {
+                        prev.page_end = prev.page_end.max(chunk.page_end);
+                    }
+                    // 首次合并时锁定 anchor 原始范围
+                    if anchor_page_end.is_none() {
+                        anchor_page_end = Some(anchor_end);
+                    }
                     for bid in &chunk.source_block_ids {
                         if !prev.source_block_ids.contains(bid) {
                             prev.source_block_ids.push(bid.clone());
@@ -675,29 +733,40 @@ fn merge_tiny_chunks(chunks: Vec<Chunk>, config: &ChunkingConfig) -> Vec<Chunk> 
             }
         }
         result.push(chunk);
+        anchor_page_end = None; // chunk 进入 result → 重置 anchor 追踪
     }
 
     // ── Pass 2: 后向合并（合并到 next chunk）──
-    // 对 Pass 1 未能合并的碎片，尝试合并到后一个相邻 chunk。
-    // 从后向前扫描，确保 remove 不影响后续索引。
     let mut remove_indices: Vec<usize> = Vec::new();
+    let mut anchor_page_start: Vec<Option<usize>> = vec![None; result.len()];
+
     for i in 0..result.len() {
         if result[i].text.chars().count() >= min {
-            continue; // 不是碎片，跳过
+            continue;
         }
-        // 尝试合并到 next chunk (i+1)
         if i + 1 < result.len()
             && same_parent(&result[i].section_path, &result[i + 1].section_path)
         {
-            // 先提取碎片数据，避免同时持有 result[i] 和 result[i+1] 的引用
             let tiny_text = result[i].text.clone();
             let tiny_page_start = result[i].page_start;
+            let tiny_page_end = result[i].page_end;
             let tiny_block_ids: Vec<String> = result[i].source_block_ids.clone();
 
             let next = &mut result[i + 1];
-            // 将碎片内容前置到 next chunk
             next.text = format!("{}\n\n{}", tiny_text, next.text);
-            next.page_start = tiny_page_start; // 扩展起始页
+            // 对比 anchor 原始 page_start 而非逐步回退后的值
+            let anchor_start = anchor_page_start[i + 1].unwrap_or(next.page_start);
+            let page_gap = if tiny_page_end < anchor_start {
+                anchor_start - tiny_page_end
+            } else {
+                0 // overlap
+            };
+            if page_gap <= MAX_MERGE_PAGE_GAP {
+                next.page_start = tiny_page_start;
+            }
+            if anchor_page_start[i + 1].is_none() {
+                anchor_page_start[i + 1] = Some(anchor_start);
+            }
             for bid in &tiny_block_ids {
                 if !next.source_block_ids.contains(bid) {
                     next.source_block_ids.insert(0, bid.clone());
@@ -713,11 +782,8 @@ fn merge_tiny_chunks(chunks: Vec<Chunk>, config: &ChunkingConfig) -> Vec<Chunk> 
             };
             remove_indices.push(i);
         }
-        // ← 双向都失败：保留独立碎片（极少发生，仅在两个不同 top-level
-        //   section 之间出现孤立标题碎片时）
     }
 
-    // 安全移除（降序）
     for &idx in remove_indices.iter().rev() {
         result.remove(idx);
     }
