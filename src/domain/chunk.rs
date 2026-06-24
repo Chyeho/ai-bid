@@ -84,11 +84,11 @@ pub struct ChunkingConfig {
 impl Default for ChunkingConfig {
     fn default() -> Self {
         Self {
-            merge_min_len: 100,
+            merge_min_len: 120,
             split_max_len: 1500,
             split_overlap: 200,
             embed_ctx_depth: 2,
-            min_chunk_size: 30,
+            min_chunk_size: 50,
             embed_path_max_len: 40,
         }
     }

@@ -26,7 +26,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
-use crate::domain::raw_document::RawDocument;
+use crate::domain::raw_document::{BlockType, RawDocument, RawTable};
 
 // ─── 标题模式定义 ─────────────────────────────────────────────
 
@@ -101,12 +101,21 @@ pub struct Section {
     pub title: String,
     /// 匹配的标题模式类型
     pub pattern: String,
-    /// 起始页码 (0-based)
+    /// 起始页码 (0-based) — 标题所在页
     pub page_start: usize,
-    /// 结束页码 (0-based，包含)
+    /// 结束页码 (0-based，包含) — section 子树涵盖的最大页码
     pub page_end: usize,
     /// 本节包含的所有 block ID（用于回溯高亮）
     pub block_ids: Vec<String>,
+    /// body_text 实际来源的起始页 (0-based)。
+    /// 对于叶子 section，通常等于 page_start；
+    /// 对于容器 section，是引文/说明文字的实际起始页，
+    /// 可远小于 page_end（子节点页码范围）。
+    #[serde(default)]
+    pub body_page_start: usize,
+    /// body_text 实际来源的结束页 (0-based)。
+    #[serde(default)]
+    pub body_page_end: usize,
     /// 本节的主体文本内容（不含标题行本身），从关联 blocks 中提取。
     /// 包含子章节标题行，但不包含子章节标题之下的正文。
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -257,6 +266,11 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
         }
     }
 
+    // 2.5 启发式过滤：排除封面法律条款/提示列表伪装成的伪章节
+    //     标书封面后常出现《采购条例》等法律条文列举（如"（一）...；"），
+    //     其编号模式与真实章节标题相同但语义是列表项而非章节结构。
+    let candidates = filter_pseudo_section_candidates(candidates);
+
     // 3. 构建章节树
     let (sections, orphan_blocks) = build_section_tree(&candidates, &all_blocks);
 
@@ -312,6 +326,89 @@ fn is_page_noise(line: &str) -> bool {
     }
 
     false
+}
+
+/// 启发式过滤：排除封面法律条款/提示列表伪装成的伪章节。
+///
+/// 标书封面后常出现《采购条例》等法律条文列举（如"（一）在采购活动中应当回避而未回避的；"），
+/// 以及"温馨提示"列表（如"二、为避免因迟到而失去投标资格，请适当提前到达。"）。
+/// 这些文本的编号模式与真实章节标题相同，但语义是列表项而非章节结构。
+///
+/// 过滤规则（仅在第一个 Level-1 候选出现之前生效）：
+/// 1. 连续 ≥3 个 `paren_cjk`，全部以 `；` 或 `。` 结尾 → 法律条款列举 → 移除
+/// 2. 单个 `cjk_numbered` 以 `。！？` 结尾 → 完整句子伪标题 → 移除
+fn filter_pseudo_section_candidates(
+    mut candidates: Vec<HeadingCandidate>,
+) -> Vec<HeadingCandidate> {
+    if candidates.is_empty() {
+        return candidates;
+    }
+
+    // 找到第一个 level-1 候选的索引（"第X部分"/"第X章" 等）
+    let first_l1 = match candidates.iter().position(|c| c.level == 1) {
+        Some(idx) => idx,
+        None => return candidates, // 无 level-1 章节，保守不执行过滤
+    };
+
+    // 仅对第一个 level-1 之前的候选执行过滤
+    if first_l1 == 0 {
+        return candidates;
+    }
+
+    let mut remove_indices: Vec<usize> = Vec::new();
+
+    // ── 规则 1: 连续 paren_cjk 组（≥3 个），全部以 ；或。 结尾 → 法律条款枚举 ──
+    let mut i = 0;
+    while i < first_l1 {
+        if candidates[i].pattern == "paren_cjk" {
+            let group_start = i;
+            let mut group_end = i;
+            while group_end < first_l1 && candidates[group_end].pattern == "paren_cjk" {
+                group_end += 1;
+            }
+            let group_size = group_end - group_start;
+            if group_size >= 3 {
+                // 比例匹配而非全量匹配：PDF 提取可能导致个别长标题被截断，
+                // 丢失结尾的 ；或。，因此用 ≥70% 阈值容忍提取噪声。
+                let clause_count = candidates[group_start..group_end]
+                    .iter()
+                    .filter(|c| {
+                        let t = c.title.trim();
+                        t.ends_with('；') || t.ends_with('。')
+                    })
+                    .count();
+                let ratio = clause_count as f64 / group_size as f64;
+                if ratio >= 0.7 {
+                    for j in group_start..group_end {
+                        remove_indices.push(j);
+                    }
+                }
+            }
+            i = group_end;
+        } else {
+            i += 1;
+        }
+    }
+
+    // ── 规则 2: cjk_numbered 以 。！？ 结尾 → 完整句子，非章节标题 ──
+    //           （真实标题如 "一、技术要求" 不会以句末标点结尾）
+    for idx in 0..first_l1 {
+        if candidates[idx].pattern == "cjk_numbered" {
+            let t = candidates[idx].title.trim();
+            if t.ends_with('。') || t.ends_with('！') || t.ends_with('？') {
+                remove_indices.push(idx);
+            }
+        }
+    }
+
+    // 按索引降序安全移除
+    remove_indices.sort_unstable();
+    remove_indices.dedup();
+    for &idx in remove_indices.iter().rev() {
+        candidates.remove(idx);
+    }
+
+    candidates
 }
 
 /// 去除行首的强调符号（★▲●■ 等），用于标题模式匹配前的归一化。
@@ -391,14 +488,25 @@ fn build_section_tree(
             .max()
             .unwrap_or(candidate.page);
 
-        let body_text = extract_section_body(candidate, next_boundary, all_blocks, &block_ids);
+        let (body_text, body_page_start, body_page_end) =
+            extract_section_body(candidate, next_boundary, all_blocks, &block_ids);
         // Level 1-2（章/节标题）本身即为完整标题，不检测截断
         let title_truncated = candidate.level >= 3 && is_title_truncated(&candidate.title, &body_text);
 
         // 如果标题被 PDF 折行截断，将续接正文合并回标题，
         // 避免"标题 + 正文"的人为割裂。
         let (final_title, final_body_text) = if title_truncated {
-            merge_truncated_title(&candidate.title, &body_text)
+            let (merged_title, remaining_body) =
+                merge_truncated_title(&candidate.title, &body_text);
+            // 二次防御：合并后标题若含句末标点（。！？），说明"标题"
+            // 实际是完整句子的前半段（如 "5）参加采购活动前3年内..." +
+            // "。重大违法记录是指..."），而非真实被截断的标题。
+            // 此时回退合并，保留原标题和完整 body_text。
+            if merged_title.contains(['。', '！', '？']) {
+                (candidate.title.clone(), body_text)
+            } else {
+                (merged_title, remaining_body)
+            }
         } else {
             (candidate.title.clone(), body_text)
         };
@@ -410,6 +518,8 @@ fn build_section_tree(
             page_start: candidate.page,
             page_end,
             block_ids,
+            body_page_start,
+            body_page_end,
             body_text: final_body_text,
             children: Vec::new(),
         };
@@ -515,28 +625,36 @@ fn collect_blocks_between(
     ids
 }
 
-/// 从当前 section 关联的 blocks 中提取正文文本。
+/// 从当前 section 关联的 blocks 中提取正文文本，同时追踪正文的实际页码范围。
 ///
 /// 从 section 标题行之后开始收集，到下一个同级/上级标题出现时停止。
 /// 正文中会保留子章节的标题行，但跳过页码等噪声行。
+///
+/// # 返回值
+/// - `String`: 提取的正文文本（已 smart join）
+/// - `usize`: body_text 实际起始页 (0-based)
+/// - `usize`: body_text 实际结束页 (0-based)
 fn extract_section_body(
     candidate: &HeadingCandidate,
     next_boundary: Option<&HeadingCandidate>,
     all_blocks: &[(&crate::domain::raw_document::RawBlock, usize)],
     block_ids: &[String],
-) -> String {
+) -> (String, usize, usize) {
     let block_id_set: std::collections::HashSet<&str> =
         block_ids.iter().map(|s| s.as_str()).collect();
 
     if block_id_set.is_empty() {
-        return String::new();
+        return (String::new(), candidate.page, candidate.page);
     }
 
     let mut body_lines: Vec<String> = Vec::new();
+    let mut body_page_start: usize = candidate.page;
+    let mut body_page_end: usize = candidate.page;
     let mut found_title = false;
     let mut done = false;
+    let mut first_body_page_set = false;
 
-    for (block, _) in all_blocks {
+    for (block, page) in all_blocks {
         if done {
             break;
         }
@@ -577,6 +695,13 @@ fn extract_section_body(
                 }
             }
 
+            // 追踪正文来源的页码范围
+            if !first_body_page_set {
+                body_page_start = *page;
+                first_body_page_set = true;
+            }
+            body_page_end = *page;
+
             body_lines.push(trimmed.to_string());
         }
     }
@@ -586,7 +711,98 @@ fn extract_section_body(
         body_lines.pop();
     }
 
-    body_lines.join("")
+    let body_text = smart_join_body(&body_lines);
+    (body_text, body_page_start, body_page_end)
+}
+
+/// 智能拼接 body lines。
+///
+/// 核心思路：用通用的"行首语义单元检测" + "行尾句子边界检测"，
+/// 而非依赖特定关键词。使得方正排版 PDF 和标准 PDF 的表格/条目结构
+/// 都能被正确保留，同时正常段落的 PDF 物理折行仍被无缝拼接。
+///
+/// 断行条件（满足任一即断）：
+/// 1. 当前行是新的语义单元起始（数字开头、括号编号、特殊符号）
+/// 2. 前一行以句子结束标点（。！？）结尾
+///
+/// 默认：PDF 物理折行，用 "" 无缝拼接。
+fn smart_join_body(lines: &[String]) -> String {
+    let mut result = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 && should_break_before(&lines[i - 1], line) {
+            result.push('\n');
+        }
+        result.push_str(line);
+    }
+    result
+}
+
+/// 判断从前一行到当前行是否需要插入换行符。
+///
+/// 两套规则（满足任一即断行）：
+/// - 规则1：当前行以新语义单元标记开头 → 独立条目/表行/编号条款
+/// - 规则2：前一行以句子结束标点结尾 → 新句子开始
+fn should_break_before(prev: &str, curr: &str) -> bool {
+    let curr = curr.trim();
+    if curr.is_empty() {
+        return false;
+    }
+
+    // 规则1：新语义单元起始符
+    if is_new_semantic_unit(curr) {
+        return true;
+    }
+
+    // 规则2：前一行以句末标点结尾（仅 。！？ 三类无歧义标点；
+    // 不包含 ：；，（因为它们常出现在标签-值对或从句中）
+    let prev = prev.trim();
+    if prev.ends_with(['。', '！', '？']) {
+        return true;
+    }
+
+    // 默认：PDF 物理折行，无缝拼接
+    false
+}
+
+/// 检测一行是否为"新语义单元"的起始。
+///
+/// 三类标记：
+/// 1. ASCII 数字开头（覆盖 `digit_sep` 如 "1、" "2." 和 `digit_bare`
+///    如 "1PVC管材" "1-1教育用房"）
+/// 2. 括号编号开头（如 "（1）" "(2)" "（一）"）
+/// 3. 特殊符号标记（▲ ★ ● ■ ◆）
+fn is_new_semantic_unit(s: &str) -> bool {
+    let c0 = s.chars().next().unwrap_or('\0');
+
+    // 1. 数字开头 → 新编号条目 / 表格行
+    if c0.is_ascii_digit() {
+        return true;
+    }
+
+    // 2. 括号编号 → （1）（2）(1) (2)（一）（二）
+    if c0 == '\u{FF08}' || c0 == '(' {
+        // fullwidth left parenthesis （ 或 halfwidth (
+        return true;
+    }
+
+    // 3. 特殊符号标记 → ▲ ★ ● ■ ◆
+    if matches!(c0, '\u{25B2}' | '\u{2605}' | '\u{25CF}' | '\u{25A0}' | '\u{25C6}') {
+        return true;
+    }
+
+    false
+}
+
+/// 检测一行是否以 ASCII 数字紧接 CJK 汉字开头（如 "4驻场要求"、"7质量保证"）。
+/// 这是标书 PDF 提取中常见的独立编号条款模式。
+/// 注意：此函数已不再被 `smart_join_body` 直接调用（改用通用的
+/// `is_new_semantic_unit`），但保留作为独立检测工具供其他模块使用。
+fn is_digit_cjk_start(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().take(2).collect();
+    chars.len() == 2
+        && chars[0].is_ascii_digit()
+        && chars[1] >= '\u{4E00}'
+        && chars[1] <= '\u{9FFF}'
 }
 
 /// 检测标题是否因 PDF 物理折行而被截断。
@@ -596,6 +812,8 @@ fn extract_section_body(
 /// 判定条件：
 /// 1. 标题不以句号（。！？）、冒号（：）、逗号（，）或括号结尾
 /// 2. body_text 存在且首字符是 CJK 统一汉字或小写英文字母（续接特征）
+/// 3. 新增：如果 title + body_text 第一个句子能拼成以 。！？ 结尾的完整句
+///    （≤ 120 chars），说明 title 是完整句子的前半段而非被截断的标题 → 返回 false
 fn is_title_truncated(title: &str, body_text: &str) -> bool {
     if body_text.is_empty() {
         return false;
@@ -613,24 +831,47 @@ fn is_title_truncated(title: &str, body_text: &str) -> bool {
         return false;
     }
 
+    // ── 新增：句子完整性预判 ──
+    // 如果 title + body_text 的第一个句子能拼成以 。！？ 结尾的完整句，
+    // 说明 title 是完整句子的前半段（如 "5）参加采购活动前3年内..."），
+    // 而非被 PDF 折行截断的真实标题 → 不触发 merge
+    if let Some(end_byte) = body_text.find(['。', '！', '？']) {
+        // 取到第一个句末标点（含）为止
+        let end_char_len = body_text[end_byte..]
+            .chars()
+            .next()
+            .map_or(0, |c| c.len_utf8());
+        let first_sentence_end = end_byte + end_char_len;
+        let combined_len = title.chars().count()
+            + body_text[..first_sentence_end].chars().count();
+        // 组合后不超过 120 字符且以句号结尾 → title 是句子前半段
+        if combined_len <= 120 {
+            return false;
+        }
+    }
+
     // 跳过 body_text 开头的空白字符
     let body_first = body_text.chars().find(|c| !c.is_whitespace()).unwrap_or('\0');
     if body_first == '\0' {
         return false;
     }
-    // body 首字符是 CJK 汉字 或 小写字母 → 续接
+    // body 首字符是 CJK 汉字、小写字母或 ASCII 数字 → 续接
+    // ASCII 数字捕获 "4驻场要求"、"7质量保证" 等标书常见模式
     body_first >= '\u{4E00}' && body_first <= '\u{9FFF}'
         || body_first >= '\u{3400}' && body_first <= '\u{4DBF}'
         || body_first.is_ascii_lowercase()
+        || body_first.is_ascii_digit()
 }
 
 /// 将被 PDF 物理折行截断的标题与正文首段进行合并。
 ///
 /// 当标题行不以句子结束标点（。！？）结尾，且 body_text 首字符为 CJK
 /// 续接内容时，将 body_text 中的续接行合并回标题，直到遇到：
-/// 1. 句子结束标点
+/// 1. 句子结束标点（仅合并到第一个 。！？ 为止，不吞整行）
 /// 2. 另一个标题模式匹配
-/// 3. body_text 耗尽
+/// 3. 独立编号条款（digit+CJK 开头，如 "4驻场要求"）
+/// 4. 合并字符数超过上限（60 字符）
+/// 5. body_text 耗尽
 ///
 /// 返回 `(merged_title, remaining_body_text)`。
 fn merge_truncated_title(title: &str, body_text: &str) -> (String, String) {
@@ -638,7 +879,10 @@ fn merge_truncated_title(title: &str, body_text: &str) -> (String, String) {
         return (title.to_string(), String::new());
     }
 
+    const MAX_MERGE_CHARS: usize = 60; // 合并字符上限
+
     let mut merged = title.to_string();
+    let title_len = merged.chars().count();
     let mut remaining: Vec<&str> = Vec::new();
     let mut merge_done = false;
 
@@ -660,11 +904,62 @@ fn merge_truncated_title(title: &str, body_text: &str) -> (String, String) {
             continue;
         }
 
-        merged.push_str(line);
-
-        // 句子结束标点 → 当前行合并完成，后续行留给 body_text
-        if trimmed.ends_with('。') || trimmed.ends_with('！') || trimmed.ends_with('？') {
+        // 遇到独立编号条款（digit+CJK，如 "4驻场要求"）→ 停止合并
+        // 这是新的语义单元，不是标题续文
+        if is_digit_cjk_start(trimmed) {
+            remaining.push(line);
             merge_done = true;
+            continue;
+        }
+
+        // 统一 merge cap：所有 push_str 不得超过此配额
+        let cap = title_len + MAX_MERGE_CHARS - merged.chars().count();
+        if cap == 0 {
+            remaining.push(line);
+            merge_done = true;
+            continue;
+        }
+
+        // 句子级合并：只合并到第一个句末标点为止，且不超过 cap。
+        // 解决 smart join 将多句话合并成一行后，push_str(line) 一次吞入全部的问题。
+        if let Some(byte_pos) = trimmed.find(['。', '！', '？']) {
+            let char_len = trimmed[byte_pos..].chars().next().unwrap().len_utf8();
+            let end = byte_pos + char_len;
+            let merge_text = &trimmed[..end]; // 到第一个句末标点（含）
+            let take_count = merge_text.chars().count().min(cap);
+            let split_byte: usize = merge_text.char_indices()
+                .nth(take_count)
+                .map(|(i, _)| i)
+                .unwrap_or(merge_text.len());
+            merged.push_str(&merge_text[..split_byte]);
+            // 未合并完的部分（如果有）留在 body
+            if take_count < merge_text.chars().count() {
+                remaining.push(merge_text[split_byte..].trim());
+            }
+            // 同一行中句号之后的内容留在 body
+            let rest = trimmed[end..].trim();
+            if !rest.is_empty() {
+                remaining.push(rest);
+            }
+            merge_done = true;
+            continue;
+        }
+
+        // 无句末标点的行：仅合并不超过 cap 的字符数
+        let take_count = line.chars().count().min(cap);
+        if take_count < line.chars().count() {
+            let split_byte: usize = line.char_indices()
+                .nth(take_count)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+            merged.push_str(&line[..split_byte]);
+            let rest = line[split_byte..].trim();
+            if !rest.is_empty() {
+                remaining.push(rest);
+            }
+            merge_done = true;
+        } else {
+            merged.push_str(line);
         }
     }
 
@@ -696,6 +991,261 @@ fn count_levels(sections: &[Section], counts: &mut std::collections::HashMap<u8,
         *counts.entry(s.level).or_insert(0) += 1;
         count_levels(&s.children, counts);
     }
+}
+
+// ─── 启发式表格检测（方案五）─────────────────────────────────
+
+/// 从 blocks 中启发式检测纯文本型表格（`|` 分隔），补充到 raw_doc 的 tables 中。
+///
+/// 对每个页面，扫描 blocks 中连续含 `|` 分隔符且列数一致的段落组，
+/// 每组构造一个 RawTable，追加到对应 RawPage.tables。
+///
+/// # 检测条件
+///
+/// - 至少连续 2 行含 `|` 分隔符
+/// - 相邻行 `|` 分隔出的列数相同（≥2）
+/// - block 类型非 heading
+///
+/// # 返回
+///
+/// 检测到的伪表格数量（用于日志输出）。
+pub fn detect_pipe_tables(raw_doc: &mut RawDocument) -> usize {
+    let mut total_detected = 0;
+
+    for page in &mut raw_doc.pages {
+        let mut i = 0;
+        while i < page.blocks.len() {
+            let block = &page.blocks[i];
+
+            // 跳过非 paragraph 类型（降低误判）
+            if block.block_type != BlockType::Paragraph {
+                i += 1;
+                continue;
+            }
+
+            // 检查是否含 `|` 分隔符
+            let cols = block.text.split('|').count();
+            if cols < 2 {
+                i += 1;
+                continue;
+            }
+
+            // 收集连续且列数一致的 blocks
+            let mut table_block_indices: Vec<usize> = Vec::new();
+            let mut j = i;
+            while j < page.blocks.len() {
+                let next = &page.blocks[j];
+                if next.block_type != BlockType::Paragraph {
+                    break;
+                }
+                let next_cols = next.text.split('|').count();
+                if next_cols != cols {
+                    break;
+                }
+                table_block_indices.push(j);
+                j += 1;
+            }
+
+            // 至少 2 行才认为是表格
+            if table_block_indices.len() < 2 {
+                i = j;
+                continue;
+            }
+
+            // 构造 RawTable
+            let rows: Vec<Vec<Option<String>>> = table_block_indices
+                .iter()
+                .map(|&idx| {
+                    page.blocks[idx]
+                        .text
+                        .split('|')
+                        .map(|cell| {
+                            let trimmed = cell.trim().to_string();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let table_id = format!("t_{}_{}", page.page_index, page.tables.len());
+            let table = RawTable {
+                id: table_id,
+                bbox: None, // 启发式表格无精确定位 bbox
+                rows,
+            };
+            page.tables.push(table);
+            total_detected += 1;
+
+            i = j; // 跳过已消费的 blocks
+        }
+    }
+
+    total_detected
+}
+
+// ─── 表格内容注入（方案二）─────────────────────────────────────
+
+/// 将 RawDocument 中的表格内容注入到 Section 树的 body_text 中。
+///
+/// 对每个 Section，查找其 **body 实际页码范围**（body_page_start..=body_page_end）
+/// 覆盖的页面上的表格，将表格格式化为 Markdown 表格文本，追加到 body_text 末尾。
+/// 同时将表格 ID 追加到 block_ids 以便回溯。
+///
+/// # 去重策略
+///
+/// 使用全局 `visited_tables: HashSet<String>` 确保每张表格只注入一次——
+/// 注入到**最先遇到**的 Section（递归深度优先，即最深层级最精确的 Section）。
+/// 祖先 Section 不会重复注入已被子孙 Section 消费的表格。
+///
+/// # Markdown 表格格式
+///
+/// ```markdown
+/// | 品目号 | 品目名称 | 采购标的 | 数量 | 是否允许进口 |
+/// |--------|----------|----------|------|-------------|
+/// | 1-1    | 教育用房施工 | 东莞理工学院... | 1(项) | 否 |
+/// ```
+///
+/// - 单元格内的换行符替换为空格
+/// - 空单元格输出为空字符串
+/// - 表格之间用 `\n\n` 分隔
+pub fn inject_tables_into_sections(
+    sections: &mut [Section],
+    raw_doc: &RawDocument,
+) {
+    // 构建 page → tables 索引（只读，一次扫描）
+    let page_tables: std::collections::HashMap<usize, &[RawTable]> = raw_doc
+        .pages
+        .iter()
+        .map(|p| (p.page_index, p.tables.as_slice()))
+        .collect();
+
+    let mut visited_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
+    inject_tables_recursive(sections, &page_tables, &mut visited_tables);
+}
+
+fn inject_tables_recursive(
+    sections: &mut [Section],
+    page_tables: &std::collections::HashMap<usize, &[RawTable]>,
+    visited_tables: &mut std::collections::HashSet<String>,
+) {
+    for section in sections.iter_mut() {
+        // 先对子节点按 body_page_start 排序，确保页码小的 Section
+        // 优先认领边界页表格，行为确定化。
+        section.children.sort_by_key(|c| c.body_page_start);
+
+        // 先递归处理子节点（深度优先），确保表格优先归属到最深层 Section
+        inject_tables_recursive(&mut section.children, page_tables, visited_tables);
+
+        // 收集该 Section **body 实际页码范围**内的表格
+        // 使用 body_page_start..=body_page_end 而非 page_start..=page_end：
+        // 容器 Section 的 page_start..=page_end 涵盖所有子孙节点页面，
+        // 若用此范围会吞并属于子节点的表格。body_page 范围只反映 Section
+        // 自身正文的实际页面，精确归属。
+        let mut table_texts: Vec<String> = Vec::new();
+
+        for page_idx in section.body_page_start..=section.body_page_end {
+            if let Some(tables) = page_tables.get(&page_idx) {
+                for table in *tables {
+                    // 去重：跳过已被更深层 Section 消费的表格
+                    if visited_tables.contains(&table.id) {
+                        continue;
+                    }
+                    if let Some(md) = format_table_as_markdown(table) {
+                        table_texts.push(md);
+                        visited_tables.insert(table.id.clone());
+                        // 将 table ID 加入追溯链
+                        if !section.block_ids.contains(&table.id) {
+                            section.block_ids.push(table.id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Fallback: 纯容器 Section 的 page span 扫描 ──────────
+        // 纯容器 Section（无 body_text，body_page_start/end 通常为 0）
+        // 其子节点覆盖的页面范围可能存在间隙（如子节点 A 覆盖 30-35 页、
+        // 子节点 B 覆盖 40-60 页，第 36-39 页为容器过渡页）。
+        // 这些间隙页上的表格不被任何子节点认领，也不会被 body_page 扫描
+        // （body_page 为 0..=0），导致彻底丢失。
+        //
+        // 此处使用容器的完整 page_start..=page_end 范围做一次兜底扫描，
+        // 拾取子节点遗漏的表格。由于 visited_tables 已被子节点消费过，
+        // 不会造成重复注入。
+        if !section.children.is_empty() && section.body_text.is_empty() {
+            for page_idx in section.page_start..=section.page_end {
+                if let Some(tables) = page_tables.get(&page_idx) {
+                    for table in *tables {
+                        if visited_tables.contains(&table.id) {
+                            continue;
+                        }
+                        if let Some(md) = format_table_as_markdown(table) {
+                            table_texts.push(md);
+                            visited_tables.insert(table.id.clone());
+                            if !section.block_ids.contains(&table.id) {
+                                section.block_ids.push(table.id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !table_texts.is_empty() {
+            let table_section = table_texts.join("\n\n");
+            if section.body_text.is_empty() {
+                section.body_text = table_section;
+            } else {
+                section.body_text = format!("{}\n\n{}", section.body_text, table_section);
+            }
+        }
+    }
+}
+
+/// 将 RawTable 格式化为 Markdown 表格字符串。
+///
+/// 返回 None 如果表格为空（无行或无列）。
+fn format_table_as_markdown(table: &RawTable) -> Option<String> {
+    if table.rows.is_empty() {
+        return None;
+    }
+
+    // 计算列数（取最大行宽）
+    let col_count = table.rows.iter()
+        .map(|row| row.len())
+        .max()
+        .unwrap_or(0);
+
+    if col_count == 0 {
+        return None;
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+
+    for (row_idx, row) in table.rows.iter().enumerate() {
+        let cells: Vec<String> = (0..col_count)
+            .map(|col| {
+                row.get(col)
+                    .and_then(|opt| opt.as_ref())
+                    .map(|s| s.replace('\n', " ").trim().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        lines.push(format!("| {} |", cells.join(" | ")));
+
+        // 表头后添加分隔行
+        if row_idx == 0 {
+            let sep: Vec<String> = (0..col_count).map(|_| "---".to_string()).collect();
+            lines.push(format!("| {} |", sep.join(" | ")));
+        }
+    }
+
+    Some(lines.join("\n"))
 }
 
 // ─── 测试 ────────────────────────────────────────────────────

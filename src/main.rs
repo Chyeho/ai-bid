@@ -211,7 +211,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("无法创建输出目录: {}", raw_json_dir))?;
     let raw_json_path = format!("{}/{}_raw.json", raw_json_dir, stem);
 
-    let raw_doc: RawDocument = match extract_pdf_to_raw_json(&pdf_path) {
+    let mut raw_doc: RawDocument = match extract_pdf_to_raw_json(&pdf_path) {
         Ok(doc) => {
             println!("Rust pdfplumber 解析成功");
             let json = serde_json::to_string_pretty(&doc)?;
@@ -254,85 +254,136 @@ fn main() -> Result<()> {
         println!("    Level {}: {} 个", level, count);
     }
 
-    // ─── 阶段 3: Sections → Chunks ────────────────────────────
+    // ─── 阶段 2.4: 启发式表格检测（`|` 分隔符）─────────────────
+    // 在 sectionize 之后、表格注入之前执行，确保后续 inject_tables_into_sections
+    // 能消费这些补充表格。对于 pdfplumber 已检测到表格的标书，此步骤通常为无操作。
 
-    println!("正在进行条款级 Chunk 切分 (chunking)...");
+    println!("正在启发式检测纯文本表格...");
+    let pipe_table_count = ai_bid::services::sectionize_service::detect_pipe_tables(&mut raw_doc);
+    println!("  已启发式检测到 {} 张纯文本表格", pipe_table_count);
+
+    // ─── 阶段 2.5: Orphan blocks → Section（在表格注入之前）──────
+    // 将孤儿块按连续页码分组构造临时 Section，追加到 sections 列表，
+    // 使其走完整的 chunking 管线（含 split_long_chunk + merge_tiny_chunks）。
+
     let chunking_config = ChunkingConfig::default();
-    let mut chunks = chunk_sections(&sections_output.sections, &chunking_config);
 
-    // ─── 3.5: Orphan blocks 兜底 ───────────────────────────────
+    // 收集所有已分配的 block_id
+    let assigned: std::collections::HashSet<&str> = sections_output
+        .sections
+        .iter()
+        .flat_map(|s| collect_all_block_ids(s))
+        .collect();
 
-    if sections_output.stats.orphan_blocks > 0 {
-        // 收集所有已分配的 block_id
-        let assigned: std::collections::HashSet<&str> = sections_output
-            .sections
-            .iter()
-            .flat_map(|s| collect_all_block_ids(s))
-            .collect();
+    // 找出未分配的 orphan blocks
+    let orphan_blocks: Vec<&ai_bid::domain::raw_document::RawBlock> = raw_doc
+        .pages
+        .iter()
+        .flat_map(|p| p.blocks.iter())
+        .filter(|b| !assigned.contains(b.id.as_str()))
+        .collect();
 
-        // 找出未分配的 orphan blocks
-        let orphan_blocks: Vec<&ai_bid::domain::raw_document::RawBlock> = raw_doc
+    let mut all_sections = sections_output.sections.clone();
+
+    if !orphan_blocks.is_empty() {
+        // 构建 block_id → page_index 索引（避免 O(P×B×O) 嵌套扫描）
+        let block_page: std::collections::HashMap<&str, usize> = raw_doc
             .pages
             .iter()
-            .flat_map(|p| p.blocks.iter())
-            .filter(|b| !assigned.contains(b.id.as_str()))
+            .flat_map(|p| p.blocks.iter().map(move |b| (b.id.as_str(), p.page_index as usize)))
             .collect();
 
-        if !orphan_blocks.is_empty() {
-            let orphan_text = orphan_blocks
+        // 按页码分组 orphan blocks
+        let mut page_to_blocks: std::collections::BTreeMap<
+            usize,
+            Vec<&ai_bid::domain::raw_document::RawBlock>,
+        > = std::collections::BTreeMap::new();
+        for block in &orphan_blocks {
+            if let Some(&page_idx) = block_page.get(block.id.as_str()) {
+                page_to_blocks.entry(page_idx).or_default().push(*block);
+            }
+        }
+
+        // 将连续页码合并为组（相邻页码 → 同一组）
+        let sorted_pages: Vec<usize> = page_to_blocks.keys().copied().collect();
+        let mut page_groups: Vec<Vec<usize>> = Vec::new();
+        let mut current_group: Vec<usize> = Vec::new();
+        for &p in &sorted_pages {
+            if current_group.is_empty() || p == current_group.last().unwrap() + 1 {
+                current_group.push(p);
+            } else {
+                page_groups.push(std::mem::take(&mut current_group));
+                current_group.push(p);
+            }
+        }
+        if !current_group.is_empty() {
+            page_groups.push(current_group);
+        }
+
+        // 每组构造一个临时 Section
+        for group in &page_groups {
+            let group_start = *group.first().unwrap();
+            let group_end = *group.last().unwrap();
+            let group_blocks: Vec<&&ai_bid::domain::raw_document::RawBlock> = group
+                .iter()
+                .flat_map(|p| page_to_blocks[p].iter())
+                .collect();
+            let orphan_ids: Vec<String> = group_blocks.iter().map(|b| b.id.clone()).collect();
+            let orphan_text = group_blocks
                 .iter()
                 .map(|b| b.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            let orphan_page_start = orphan_blocks
-                .iter()
-                .filter_map(|b| {
-                    raw_doc
-                        .pages
-                        .iter()
-                        .find(|p| p.blocks.iter().any(|pb| pb.id == b.id))
-                        .map(|p| p.page_index as usize)
-                })
-                .min()
-                .unwrap_or(0);
+            let orphan_section = ai_bid::services::sectionize_service::Section {
+                level: 0, // 特殊层级：未归类内容
+                title: format!("未归类内容 (第{}-{}页)", group_start + 1, group_end + 1),
+                pattern: "orphan".to_string(),
+                page_start: group_start,
+                page_end: group_end,
+                block_ids: orphan_ids,
+                body_text: orphan_text,
+                children: Vec::new(),
+                body_page_start: group_start,
+                body_page_end: group_end,
+            };
 
-            let orphan_page_end = orphan_blocks
-                .iter()
-                .filter_map(|b| {
-                    raw_doc
-                        .pages
-                        .iter()
-                        .find(|p| p.blocks.iter().any(|pb| pb.id == b.id))
-                        .map(|p| p.page_index as usize)
-                })
-                .max()
-                .unwrap_or(0);
-
-            let orphan_ids: Vec<String> = orphan_blocks.iter().map(|b| b.id.clone()).collect();
-
-            chunks.push(ai_bid::domain::chunk::Chunk {
-                chunk_id: String::new(),
-                chunk_type: ai_bid::domain::chunk::ChunkType::Leaf,
-                section_path: vec!["未归类内容".to_string()],
-                text: orphan_text,
-                page_start: orphan_page_start,
-                page_end: orphan_page_end,
-                source_block_ids: orphan_ids,
-            });
-
-            println!(
-                "  已补充 {} 个 orphan block 兜底 chunk",
-                sections_output.stats.orphan_blocks
-            );
+            all_sections.push(orphan_section);
         }
+
+        println!(
+            "  已补充 {} 个 orphan block（{} 个连续页码组）兜底 Section",
+            orphan_blocks.len(),
+            page_groups.len()
+        );
     }
 
-    // 重新排序并分配 ID
-    chunks.sort_by_key(|c| c.page_start);
-    for (i, chunk) in chunks.iter_mut().enumerate() {
-        chunk.chunk_id = format!("ch_{:03}", i);
+    // ─── 阶段 2.6: 表格内容注入 Sections ───────────────────────
+    // 注意：此处使用 all_sections（含孤儿 Section），而非 sections_output.sections，
+    // 确保孤儿 Section 也能接收表格内容注入。
+
+    println!("正在注入表格内容到章节结构...");
+    ai_bid::services::sectionize_service::inject_tables_into_sections(
+        &mut all_sections,
+        &raw_doc,
+    );
+    // 递归统计所有 section（含子节点）中 t_ 前缀的 block_id 数量
+    fn count_table_ids(sections: &[ai_bid::services::sectionize_service::Section]) -> usize {
+        sections
+            .iter()
+            .map(|s| {
+                s.block_ids.iter().filter(|id| id.starts_with("t_")).count()
+                    + count_table_ids(&s.children)
+            })
+            .sum()
     }
+    let injected_table_count = count_table_ids(&all_sections);
+    println!("  已注入 {} 张表格到对应章节", injected_table_count);
+
+    // ─── 阶段 3: Sections → Chunks ────────────────────────────
+
+    println!("正在进行条款级 Chunk 切分 (chunking)...");
+    let chunks = chunk_sections(&all_sections, &chunking_config);
 
     let chunks_dir = "output/chunks".to_string();
     fs::create_dir_all(&chunks_dir)

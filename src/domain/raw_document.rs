@@ -90,7 +90,7 @@ pub struct RawBlock {
 }
 
 /// 块类型枚举。
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockType {
     /// 标题（字号大 / 加粗 / 居中）
