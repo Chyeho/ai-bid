@@ -52,13 +52,6 @@ pub fn chunk_sections(sections: &[Section], config: &ChunkingConfig) -> Vec<Chun
         }
     }
 
-    // 后处理：精确去重（移除内容完全相同的 chunk）
-    chunks = dedup_chunks(chunks);
-    // 重新分配 ID
-    for (i, chunk) in chunks.iter_mut().enumerate() {
-        chunk.chunk_id = format!("ch_{:03}", i);
-    }
-
     chunks
 }
 
@@ -86,50 +79,9 @@ fn traverse_and_chunk(
     let mut new_path = parent_path.clone();
     new_path.push(section.title.clone());
 
-    // 纯标题占位（无 body_text 且无子节点）
+    // 纯标题占位（无 body_text 且无子节点）→ 跳过
     if section.children.is_empty() {
-        // 标题非空 → 生成最小 Leaf chunk，保留模板结构信息
-        // （如"格式自拟"占位页）。后续会被 merge_tiny_chunks 合并到
-        // 相邻同路径 chunk，不会产生碎片污染。
-        //
-        // 注意：page 元数据使用 section.page_start / page_end（标题所在页），
-        // 而非 body_page_start / body_page_end。纯标题 Section 无 body_text，
-        // 其 body_page_start/end 经 #[serde(default)] 会被设为 0，
-        // 若使用 body 范围会导致 chunk 被错误排到文档开头。
-        if !section.title.trim().is_empty() {
-            let mut path = parent_path.clone();
-            path.push(section.title.clone());
-            chunks.push(Chunk {
-                chunk_id: String::new(),
-                chunk_type: ChunkType::Leaf,
-                section_path: path,
-                text: section.title.trim().to_string(),
-                page_start: section.page_start,
-                page_end: section.page_end,
-                source_block_ids: section.block_ids.clone(),
-            });
-        }
         return;
-    }
-
-    // 规则 1.5: 容器节点自身 body_text → 单独生成 chunk
-    // （如"第五章 合同文本"的引言说明文字，pages 为 body 实际页范围而非
-    // 到子节点末尾的宽泛 span，避免 22 页/44 页的 page span 膨胀）
-    if !section.body_text.is_empty() {
-        let text = format!("{}\n{}", section.title, section.body_text);
-        if text.chars().count() > config.split_max_len {
-            split_long_chunk(&new_path, &text, section, config, chunks);
-        } else {
-            chunks.push(Chunk {
-                chunk_id: String::new(),
-                chunk_type: ChunkType::Leaf,
-                section_path: new_path.clone(),
-                text,
-                page_start: section.body_page_start,
-                page_end: section.body_page_end,
-                source_block_ids: section.block_ids.clone(),
-            });
-        }
     }
 
     // 规则2: 容器节点 → 向下传递路径（不单独成 chunk）
@@ -187,10 +139,8 @@ fn try_chunk_leaf(
         chunk_type: ChunkType::Leaf,
         section_path: path,
         text,
-        // 使用 body 实际页范围：对于叶子节点，body_page_start/end
-        // 精确反映正文所在的页码范围，而非标题页到末尾的宽泛 span
-        page_start: section.body_page_start,
-        page_end: section.body_page_end,
+        page_start: section.page_start,
+        page_end: section.page_end,
         source_block_ids: section.block_ids.clone(),
     });
     true
@@ -244,8 +194,8 @@ fn merge_adjacent_leaves(
                     chunk_type: ChunkType::Leaf,
                     section_path: path,
                     text,
-                    page_start: leaf.body_page_start,
-                    page_end: leaf.body_page_end,
+                    page_start: leaf.page_start,
+                    page_end: leaf.page_end,
                     source_block_ids: leaf.block_ids.clone(),
                 });
             }
@@ -283,8 +233,8 @@ fn flush_merge_buffer(
                 chunk_type: ChunkType::Leaf,
                 section_path: path,
                 text,
-                page_start: leaf.body_page_start,
-                page_end: leaf.body_page_end,
+                page_start: leaf.page_start,
+                page_end: leaf.page_end,
                 source_block_ids: leaf.block_ids.clone(),
             });
         }
@@ -292,9 +242,8 @@ fn flush_merge_buffer(
     }
 
     // 确定合并后 chunk 的起始页、结束页和所有 block_ids
-    // 使用 body 实际页范围，避免容器节点页跨度膨胀
-    let page_start = buffer.iter().map(|s| s.body_page_start).min().unwrap_or(0);
-    let page_end = buffer.iter().map(|s| s.body_page_end).max().unwrap_or(0);
+    let page_start = buffer.iter().map(|s| s.page_start).min().unwrap_or(0);
+    let page_end = buffer.iter().map(|s| s.page_end).max().unwrap_or(0);
     let mut all_block_ids: Vec<String> = Vec::new();
     let mut merged_text_parts: Vec<String> = Vec::new();
 
@@ -321,8 +270,6 @@ fn flush_merge_buffer(
             block_ids: all_block_ids.clone(),
             body_text: String::new(),
             children: Vec::new(),
-            body_page_start: page_start,
-            body_page_end: page_end,
         };
         split_long_chunk(parent_path, &merged_text, &temp_section, config, chunks);
         return;
@@ -364,8 +311,8 @@ fn split_long_chunk(
             chunk_type: ChunkType::Leaf,
             section_path: path.to_vec(),
             text: text.to_string(),
-            page_start: section.body_page_start,
-            page_end: section.body_page_end,
+            page_start: section.page_start,
+            page_end: section.page_end,
             source_block_ids: section.block_ids.clone(),
         });
         return;
@@ -375,18 +322,8 @@ fn split_long_chunk(
 
     let mut parts: Vec<String> = Vec::new();
     let mut pos = 0;
-    // 迭代计数防护：防止边界条件导致的死循环（最多 total/50 + 2 次迭代）
-    let max_iterations = (total / 50).max(2) + 2;
-    let mut iteration = 0;
 
     while pos < total {
-        iteration += 1;
-        if iteration > max_iterations {
-            // 安全阀：超过合理迭代次数，收集剩余文本直接退出
-            parts.push(text.chars().skip(pos).collect());
-            break;
-        }
-        let prev_pos = pos;
         let end_candidate = (pos + config.split_max_len).min(total);
 
         if end_candidate >= total {
@@ -405,24 +342,10 @@ fn split_long_chunk(
 
         parts.push(text.chars().skip(pos).take(split_point - pos).collect());
 
-        // 下一片段起点 = 安全断点（在 overlap 窗口内搜索最近的语义边界）
-        // 而非机械地回退固定字符数。
-        // 参考 LangChain RecursiveCharacterTextSplitter 的做法：
-        // 在 split_point - overlap 附近搜索安全断点，避免 overlap
-        // 起始位置落在编号条目或句子中间。
-        let safe_start = find_safe_overlap_start(text, split_point, config.split_overlap);
-        // 确保向前推进：安全起点不能超过切分点（防死循环）
-        pos = if safe_start >= split_point {
-            split_point
-        } else {
-            safe_start
-        };
-        // 确保 pos 至少推进了 split_overlap/2（防止在极小文本窗口中振荡）
-        if pos <= split_point.saturating_sub(config.split_overlap / 2) {
-            pos = split_point.saturating_sub(config.split_overlap);
-        }
-        // 确保 pos 向前推进（最终安全阀）
-        if pos <= prev_pos {
+        // 下一片段起点 = 切分点 - overlap，保证重叠区域语义连续
+        pos = split_point.saturating_sub(config.split_overlap);
+        // 确保 pos 向前推进（防止死循环）
+        if pos <= 0 || pos >= split_point {
             pos = split_point;
         }
     }
@@ -436,115 +359,17 @@ fn split_long_chunk(
             },
             section_path: path.to_vec(),
             text: part.clone(),
-            page_start: section.body_page_start,
-            page_end: section.body_page_end,
+            page_start: section.page_start,
+            page_end: section.page_end,
             source_block_ids: section.block_ids.clone(),
         });
     }
-}
-
-/// 在 overlap 窗口内搜索安全的 overlap 起点。
-///
-/// 从 `split_point` 向前搜索，找到最近的语义安全断点：
-/// 1. 句末标点（。！？）后紧跟换行符 → 句子边界
-/// 2. 段落边界 `\n\n` → 段落边界
-/// 3. 章节编号起始（`（一）`、`1.` 等）→ 语义单元边界
-///
-/// 搜索范围：[split_point - overlap, split_point]。
-/// 找不到安全断点时回退到 `split_point - overlap`。
-///
-/// # 复杂度
-///
-/// 单次遍历 O(overlap) 个字符，在一次循环中按优先级查找最佳候选。
-fn find_safe_overlap_start(text: &str, split_point: usize, overlap: usize) -> usize {
-    let chars: Vec<char> = text.chars().collect();
-    let total = chars.len();
-    if total == 0 || split_point >= total {
-        return split_point;
-    }
-
-    let search_start = split_point.saturating_sub(overlap);
-    let search_end = split_point;
-
-    // 单次扫描，记录三个优先级的最佳候选位置
-    let mut best_sentence: Option<usize> = None;   // 句末标点后换行
-    let mut best_para: Option<usize> = None;        // \n\n 后
-    let mut best_section: Option<usize> = None;     // 编号起始
-    let mut best_newline: Option<usize> = None;     // 任意换行（最后手段）
-
-    let cjk_numerals: &[char] = &[
-        '一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
-    ];
-
-    for i in search_start..search_end {
-        if i + 1 >= total {
-            continue;
-        }
-
-        // 优先级1：。！？后紧跟 \n
-        if best_sentence.is_none()
-            && (chars[i] == '。' || chars[i] == '！' || chars[i] == '？')
-            && chars[i + 1] == '\n'
-        {
-            let mut start = i + 1;
-            if start + 1 < total && chars[start] == '\n' {
-                start += 1; // 跳过 \n\n 的第二个 \n
-            }
-            if start < split_point {
-                best_sentence = Some(start);
-            }
-        }
-
-        // 优先级2：\n\n
-        if best_para.is_none()
-            && chars[i] == '\n' && chars[i + 1] == '\n'
-        {
-            let start = i + 2;
-            if start < split_point {
-                best_para = Some(start);
-            }
-        }
-
-        // 优先级3：\n 后跟编号
-        if best_section.is_none()
-            && chars[i] == '\n'
-            && i + 1 < total
-            && {
-                let next = chars[i + 1];
-                cjk_numerals.contains(&next)
-                    || next == '（' || next == '('
-                    || next.is_ascii_digit()
-            }
-        {
-            let start = i + 1;
-            if start < split_point {
-                best_section = Some(start);
-            }
-        }
-
-        // 最后手段：任意换行
-        if best_newline.is_none() && chars[i] == '\n' {
-            let start = i + 1;
-            if start < split_point {
-                best_newline = Some(start);
-            }
-        }
-    }
-
-    // 按优先级返回最佳候选
-    best_sentence
-        .or(best_para)
-        .or(best_section)
-        .or(best_newline)
-        .unwrap_or_else(|| split_point.saturating_sub(overlap))
 }
 
 /// 查找文本中的段落边界位置（字符偏移）。
 ///
 /// 段落边界定义：
 /// - `\n\n`（显式段落分隔）
-/// - `\n\n|` 模式（Markdown 表格行前的空行）→ 确保切分点不落入表格内部
-/// - `|\n\n` 模式（Markdown 表格行后的空行）→ 确保切分点不落入表格内部
 /// - `\n` 后紧跟中文序号（一～十），表示新段落开始
 fn find_para_boundaries(text: &str) -> Vec<usize> {
     let mut boundaries: Vec<usize> = Vec::new();
@@ -560,17 +385,6 @@ fn find_para_boundaries(text: &str) -> Vec<usize> {
     for i in 0..chars.len() {
         // \n\n — 双换行段落分隔
         if chars[i] == '\n' && i + 1 < chars.len() && chars[i + 1] == '\n' {
-            // Markdown 表格行前空行：\n\n| 模式 → 强制段落边界
-            // 确保 split_long_chunk 不会在表格行中间切分
-            if i + 2 < chars.len() && chars[i + 2] == '|' {
-                boundaries.push(i + 1); // 在第二个 \n 之后
-                continue;
-            }
-            // Markdown 表格行后空行：|\n\n 模式 → 强制段落边界
-            if i > 0 && chars[i - 1] == '|' {
-                boundaries.push(i + 1); // 在第二个 \n 之后
-                continue;
-            }
             boundaries.push(i + 1); // 在第二个 \n 之后
             continue;
         }
@@ -589,71 +403,35 @@ fn find_para_boundaries(text: &str) -> Vec<usize> {
     boundaries
 }
 
-// ─── 后处理：Chunk 去重 ───────────────────────────────────────
-
-/// 精确去重：移除内容完全相同的重复 chunk。
-///
-/// 保留第一个出现的 chunk（页面顺序），移除后续重复项。
-/// 使用文本内容的哈希进行高效去重。
-fn dedup_chunks(chunks: Vec<Chunk>) -> Vec<Chunk> {
-    use std::collections::HashSet;
-    let mut seen: HashSet<String> = HashSet::with_capacity(chunks.len());
-    let mut result: Vec<Chunk> = Vec::with_capacity(chunks.len());
-
-    for chunk in chunks {
-        // 使用文本内容的简单哈希作为去重键
-        // 对极短文本（< 20 chars）不执行去重，避免误删不同的短标题
-        if chunk.text.chars().count() < 20 {
-            result.push(chunk);
-            continue;
-        }
-        let key = &chunk.text;
-        if !seen.contains(key) {
-            seen.insert(key.clone());
-            result.push(chunk);
-        }
-    }
-
-    result
-}
-
 // ─── 后处理：碎片 Chunk 合并 ─────────────────────────────────
 
-/// 检查两个 chunk 是否共享同一个顶级章节（第一位路径元素）。
+/// 检查两个 chunk 是否共享同一个直接父路径。
 ///
-/// 原先要求直接父路径完全一致，但标书中"第X部分"下的不同子节
-/// （如"八、适用法律"与"九、资格审查"）在页面流中相邻时，其碎片 chunk
-/// 语义同属一个大部分，合并不会造成跨主题混淆。
-///
-/// 放宽到 top-1 匹配后，原先因父路径不同而无法合并的孤立极小 chunk
-/// （如评标标准碎片、法律条款碎片）可被正确吸收到相邻 chunk。
-///
-/// 返回 `true` 表示两个 chunk 属于同一顶级章节（可以合并）。
+/// 防止 tiny_merge 将不同章节层级下的碎片内容跨主题合并。
+/// 返回 `true` 表示两个 chunk 属于同一父节点（可以合并）。
 fn same_parent(a: &[String], b: &[String]) -> bool {
-    match (a.first(), b.first()) {
-        (Some(a_top), Some(b_top)) => a_top == b_top,
-        // 空路径 → 保守允许合并（极少发生）
-        _ => true,
+    if a.len() < 2 || b.len() < 2 {
+        // 顶层 chunk（仅 0-1 级路径）：保守允许合并
+        return true;
     }
+    // 比较去掉最后一个元素（各自标题）后的父路径
+    a[..a.len() - 1] == b[..b.len() - 1]
 }
 
 /// 合并过短的碎片 chunk 到相邻 chunk。
 ///
-/// 两阶段处理：
-/// - Pass 1（前向合并）：将碎片 chunk 合并到前一个相邻 chunk
-/// - Pass 2（后向合并）：对 Pass 1 未能合并的碎片，尝试合并到后一个相邻 chunk
-///
-/// 合并前检查两个 chunk 是否共享同一顶级章节，避免跨主题合并。
+/// 遍历已排序的 chunk 列表，将 `text.chars().count() < min_chunk_size`
+/// 的 chunk 合并到前一个（或后一个）相邻 chunk。
+/// 合并前检查两个 chunk 是否共享同一父路径，避免跨主题合并。
 fn merge_tiny_chunks(chunks: Vec<Chunk>, config: &ChunkingConfig) -> Vec<Chunk> {
     let min = config.min_chunk_size;
     let mut result: Vec<Chunk> = Vec::new();
 
-    // ── Pass 1: 前向合并（合并到 prev chunk）──
     for chunk in chunks {
         if chunk.text.chars().count() < min {
             if let Some(prev) = result.last_mut() {
+                // 仅当共享同一父路径时才合并，避免跨主题合并
                 if same_parent(&prev.section_path, &chunk.section_path) {
-                    // 合并 chunk → prev
                     prev.text = format!("{}\n\n{}", prev.text, chunk.text);
                     prev.page_end = prev.page_end.max(chunk.page_end);
                     for bid in &chunk.source_block_ids {
@@ -661,6 +439,7 @@ fn merge_tiny_chunks(chunks: Vec<Chunk>, config: &ChunkingConfig) -> Vec<Chunk> 
                             prev.source_block_ids.push(bid.clone());
                         }
                     }
+                    // 更新为 Merged 类型
                     let child_count = match &prev.chunk_type {
                         ChunkType::Merged { child_count: c, .. } => c + 1,
                         _ => 2,
@@ -669,57 +448,40 @@ fn merge_tiny_chunks(chunks: Vec<Chunk>, config: &ChunkingConfig) -> Vec<Chunk> 
                         rule: "tiny_merge".to_string(),
                         child_count,
                     };
-                    continue; // 已合并，跳过 push
+                } else {
+                    // 不同父路径 → 不合并，独立保留
+                    result.push(chunk);
                 }
-                // ← 前向合并失败：继续执行 push，由 Pass 2 处理
+            } else {
+                // 第一个 chunk 就是碎片 → 保留（后续 chunk 会合并它）
+                result.push(chunk);
             }
+        } else {
+            result.push(chunk);
         }
-        result.push(chunk);
     }
 
-    // ── Pass 2: 后向合并（合并到 next chunk）──
-    // 对 Pass 1 未能合并的碎片，尝试合并到后一个相邻 chunk。
-    // 从后向前扫描，确保 remove 不影响后续索引。
-    let mut remove_indices: Vec<usize> = Vec::new();
-    for i in 0..result.len() {
-        if result[i].text.chars().count() >= min {
-            continue; // 不是碎片，跳过
-        }
-        // 尝试合并到 next chunk (i+1)
-        if i + 1 < result.len()
-            && same_parent(&result[i].section_path, &result[i + 1].section_path)
-        {
-            // 先提取碎片数据，避免同时持有 result[i] 和 result[i+1] 的引用
-            let tiny_text = result[i].text.clone();
-            let tiny_page_start = result[i].page_start;
-            let tiny_block_ids: Vec<String> = result[i].source_block_ids.clone();
-
-            let next = &mut result[i + 1];
-            // 将碎片内容前置到 next chunk
-            next.text = format!("{}\n\n{}", tiny_text, next.text);
-            next.page_start = tiny_page_start; // 扩展起始页
-            for bid in &tiny_block_ids {
-                if !next.source_block_ids.contains(bid) {
-                    next.source_block_ids.insert(0, bid.clone());
+    // 如果第一个 chunk 仍是碎片且后面有 chunk → 合并到第二个（需同父路径）
+    if result.len() >= 2 && result[0].text.chars().count() < min {
+        if same_parent(&result[0].section_path, &result[1].section_path) {
+            let first = result.remove(0);
+            let second = &mut result[0];
+            second.text = format!("{}\n\n{}", first.text, second.text);
+            second.page_start = first.page_start;
+            for bid in &first.source_block_ids {
+                if !second.source_block_ids.contains(bid) {
+                    second.source_block_ids.insert(0, bid.clone());
                 }
             }
-            let child_count = match &next.chunk_type {
+            let child_count = match &second.chunk_type {
                 ChunkType::Merged { child_count: c, .. } => c + 1,
                 _ => 2,
             };
-            next.chunk_type = ChunkType::Merged {
+            second.chunk_type = ChunkType::Merged {
                 rule: "tiny_merge".to_string(),
                 child_count,
             };
-            remove_indices.push(i);
         }
-        // ← 双向都失败：保留独立碎片（极少发生，仅在两个不同 top-level
-        //   section 之间出现孤立标题碎片时）
-    }
-
-    // 安全移除（降序）
-    for &idx in remove_indices.iter().rev() {
-        result.remove(idx);
     }
 
     result
@@ -787,8 +549,6 @@ mod tests {
             block_ids: vec![format!("b_0_{}", level)],
             body_text: body.to_string(),
             children: Vec::new(),
-            body_page_start: 0,
-            body_page_end: 0,
         }
     }
 
@@ -803,8 +563,6 @@ mod tests {
             block_ids: Vec::new(),
             body_text: String::new(),
             children,
-            body_page_start: 0,
-            body_page_end: 0,
         }
     }
 
@@ -973,14 +731,13 @@ mod tests {
     #[test]
     fn test_chunk_id_ordering() {
         // 使用足够长的 body_text 以避免被 merge_tiny_chunks 合并
-        // min_chunk_size 默认 50，此处确保正文远超此阈值
-        let body_long = "这是足够长的正文内容，确保超过 min_chunk_size 的默认阈值五十个字符以上就是如此。";
+        let body_long = "这是足够长的正文内容，确保超过 min_chunk_size 的默认阈值30个字符。";
         let s1 = make_leaf(4, "A. 条款", body_long);
         let s2 = make_leaf(4, "B. 条款", body_long);
-        // 手动设置不同页码测试排序（同时设 body_page_start 与 page_start 一致）
+        // 手动设置不同页码测试排序
         let sections = vec![
-            Section { page_start: 3, body_page_start: 3, body_page_end: 3, ..s1 },
-            Section { page_start: 1, body_page_start: 1, body_page_end: 1, ..s2 },
+            Section { page_start: 3, ..s1 },
+            Section { page_start: 1, ..s2 },
         ];
 
         let config = ChunkingConfig::default();
@@ -1034,8 +791,6 @@ mod tests {
             block_ids: vec!["b_10_3".to_string()],
             body_text: String::new(),
             children: Vec::new(),
-            body_page_start: 10,
-            body_page_end: 10,
         };
         let config = ChunkingConfig::default();
         let mut chunks = Vec::new();
@@ -1058,8 +813,6 @@ mod tests {
             block_ids: vec!["b_5_0".to_string()],
             body_text: "这是引言文本。".to_string(),
             children: vec![child],
-            body_page_start: 5,
-            body_page_end: 5,
         };
         let config = ChunkingConfig::default();
         let mut chunks = Vec::new();
@@ -1562,8 +1315,6 @@ mod tests {
             block_ids: vec!["b_1_0".to_string()],
             body_text: String::new(),
             children: Vec::new(),
-            body_page_start: 1,
-            body_page_end: 1,
         };
         let container = make_container(4, "1. 容器", vec![empty_leaf]);
         let root = make_container(2, "一、章节", vec![container]);

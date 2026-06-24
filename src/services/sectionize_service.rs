@@ -271,6 +271,17 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
     //     其编号模式与真实章节标题相同但语义是列表项而非章节结构。
     let candidates = filter_pseudo_section_candidates(candidates);
 
+    // 2.6 链式验证：按编号家族+深度分组，验证编号连续性。
+    //     真实章节标题（如 "1. 供应商资格"、"2. 项目概况"）形成连续编号链；
+    //     正文编号内容（如 "1.项目编号：0724-..."）是孤立项，移除。
+    //     参考 Oracle 专利 US 11468346 的"链式验证"方法。
+    let candidates = validate_numbering_chains(candidates);
+
+    // 2.7 TOC 目录页检测：同一页出现 ≥3 个 level-1 候选且均无 body_text
+    //     → 判定为目录页 → 移除这些候选，避免产生幽灵 Section。
+    //     参考 LlamaIndex 的"层级密度检测"方法。
+    let candidates = filter_toc_page_candidates(candidates, &all_blocks);
+
     // 3. 构建章节树
     let (sections, orphan_blocks) = build_section_tree(&candidates, &all_blocks);
 
@@ -402,6 +413,273 @@ fn filter_pseudo_section_candidates(
     }
 
     // 按索引降序安全移除
+    remove_indices.sort_unstable();
+    remove_indices.dedup();
+    for &idx in remove_indices.iter().rev() {
+        candidates.remove(idx);
+    }
+
+    candidates
+}
+
+// ─── 链式验证（Oracle 专利 US 11468346 方法）────────────────────
+
+/// 对 `digit_dot` 和 `paren_digit` 候选按编号家族+深度分组，
+/// 验证编号连续性。孤立或断链的低置信度候选 → 移除。
+///
+/// # 核心思想
+///
+/// 真实章节标题形成跨页连续编号链（"1.", "2.", "3." ...），
+/// 而正文编号（"1.项目编号：0724-..."）是孤立的、不成链的。
+///
+/// # 算法
+///
+/// 1. 按 (pattern_type, rank) 分组
+/// 2. 每组内按文档位置排序
+/// 3. 检测连续性：成员数 ≥2 且编号递增 → 保留组；孤立成员 → 移除
+/// 4. 额外信号：标题过长（>35 chars for digit_dot / >50 for paren_digit）的孤立候选
+///    → 确认为正文内容泄漏 → 移除
+fn validate_numbering_chains(
+    mut candidates: Vec<HeadingCandidate>,
+) -> Vec<HeadingCandidate> {
+    if candidates.is_empty() {
+        return candidates;
+    }
+
+    // 只对 digit_dot (level 4) 和 paren_digit (level 5) 做链式验证
+    // 更高层级的 pattern (part/chapter/cjk_numbered/paren_cjk) 由其他过滤器处理
+    let target_patterns: &[&str] = &["digit_dot", "paren_digit"];
+
+    // 为每个候选分配全局索引（用于后续稳定排序和移除）
+    // 提取编号序列和 rank
+    #[derive(Debug, Clone)]
+    struct IndexedCandidate {
+        global_idx: usize,
+        rank: usize,        // 编号深度: "1." = 1, "1.1" = 2
+        num_prefix: Vec<u32>, // 编号序列: "1.2.3" → [1, 2, 3]
+        title_len: usize,   // 标题字符数
+    }
+
+    let mut indexed: Vec<IndexedCandidate> = Vec::new();
+    for (idx, c) in candidates.iter().enumerate() {
+        if !target_patterns.contains(&c.pattern) {
+            continue;
+        }
+        let (rank, num_prefix) = extract_numbering_info(&c.title, c.pattern);
+        indexed.push(IndexedCandidate {
+            global_idx: idx,
+            rank,
+            num_prefix,
+            title_len: c.title.chars().count(),
+        });
+    }
+
+    if indexed.is_empty() {
+        return candidates;
+    }
+
+    // 按 (pattern_type, rank) 分组
+    use std::collections::HashMap;
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new(); // key → Vec<index_into_indexed>
+    for (i, ic) in indexed.iter().enumerate() {
+        let key = format!("{}_{}", candidates[ic.global_idx].pattern, ic.rank);
+        groups.entry(key).or_default().push(i);
+    }
+
+    let mut remove_indices: Vec<usize> = Vec::new();
+
+    for (_key, member_indices) in &groups {
+        if member_indices.len() < 2 {
+            // 孤立候选（该 pattern+rank 组只有 1 个成员）→ 额外检查
+            for &mi in member_indices {
+                let ic = &indexed[mi];
+                let c = &candidates[ic.global_idx];
+
+                // 信号1：标题过长 → 大概率是正文内容
+                let long_title = match c.pattern {
+                    "digit_dot" => ic.title_len > 35,
+                    "paren_digit" => ic.title_len > 50,
+                    _ => false,
+                };
+
+                // 信号2：标题含冒号 → 正文特征（如 "1.项目编号：..."）
+                let has_colon = c.title.contains('：') || c.title.contains(':');
+
+                if long_title || has_colon {
+                    remove_indices.push(ic.global_idx);
+                }
+            }
+            continue;
+        }
+
+        // 组内按编号序列排序
+        let mut sorted_members: Vec<usize> = member_indices.clone();
+        sorted_members.sort_by_key(|&mi| &indexed[mi].num_prefix);
+
+        // 验证编号连续性：检查相邻成员的编号是否递增
+        let mut chain_breaks: Vec<usize> = Vec::new(); // 断链成员的 global_idx
+        for w in sorted_members.windows(2) {
+            let prev = &indexed[w[0]];
+            let curr = &indexed[w[1]];
+
+            // 检查 prev.num_prefix < curr.num_prefix (字典序)
+            if prev.num_prefix >= curr.num_prefix {
+                // 编号不连续或重复 → mark curr as suspicious
+                chain_breaks.push(curr.global_idx);
+            }
+        }
+
+        // 对断链成员做二次判断
+        for &gb_idx in &chain_breaks {
+            let ic = indexed.iter().find(|x| x.global_idx == gb_idx).unwrap();
+            let c = &candidates[gb_idx];
+
+            // 以句末标点结尾 → 完整句子，确认为正文泄漏
+            let ends_with_sentence = {
+                let t = c.title.trim();
+                t.ends_with('。') || t.ends_with('！') || t.ends_with('？')
+            };
+
+            // 标题过长 → 大概率正文
+            let too_long = match c.pattern {
+                "digit_dot" => ic.title_len > 40,
+                "paren_digit" => ic.title_len > 55,
+                _ => false,
+            };
+
+            if ends_with_sentence || too_long {
+                remove_indices.push(gb_idx);
+            }
+        }
+    }
+
+    // 安全移除（降序）
+    remove_indices.sort_unstable();
+    remove_indices.dedup();
+    for &idx in remove_indices.iter().rev() {
+        candidates.remove(idx);
+    }
+
+    candidates
+}
+
+/// 从标题文本中提取编号信息：(rank, number_sequence)。
+///
+/// - `digit_dot`: "1." → rank=1, [1]; "1.2.3" → rank=3, [1,2,3]
+/// - `paren_digit`: "（1）" → rank=2, [1]; "(2)" → rank=2, [2]
+fn extract_numbering_info(title: &str, pattern: &str) -> (usize, Vec<u32>) {
+    match pattern {
+        "digit_dot" => {
+            // 匹配开头的数字序列: "1.2.3" → [1,2,3], "1、" → [1]
+            let prefix = title
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect::<String>();
+            let nums: Vec<u32> = prefix
+                .split('.')
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect();
+            let rank = nums.len();
+            (rank, nums)
+        }
+        "paren_digit" => {
+            // 匹配括号内的数字: "（1）" → [1], "(2)" → [2]
+            let inner: String = title
+                .chars()
+                .skip_while(|c| *c != '（' && *c != '(')
+                .skip(1)
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            let num = inner.parse::<u32>().unwrap_or(0);
+            (2, vec![num]) // paren_digit 默认 rank=2（嵌套在 digit_dot 之下）
+        }
+        _ => (1, vec![0]),
+    }
+}
+
+// ─── TOC 目录页检测（LlamaIndex 层级密度检测方法）───────────────
+
+/// 检测目录页产生的伪标题候选并移除。
+///
+/// # 判定条件
+///
+/// 同一页内，如果 level=1 的候选密度 ≥ 3 个，且这些候选的 block 均为
+/// Heading 类型且该 block 是页面上唯一的 Heading（无 body text 跟随）→ TOC 页。
+///
+/// # 原理
+///
+/// 标书目录页将文档所有 "第X部分" 集中列在一页上，每个都是独立的 Heading block，
+/// 不含正文。而真实章节标题分布在不同页，每页最多 1-2 个 level-1 标题，
+/// 且标题后有 body text。
+fn filter_toc_page_candidates(
+    mut candidates: Vec<HeadingCandidate>,
+    all_blocks: &[(&crate::domain::raw_document::RawBlock, usize)],
+) -> Vec<HeadingCandidate> {
+    if candidates.is_empty() {
+        return candidates;
+    }
+
+    // 统计每页的 level-1 候选数量
+    use std::collections::HashMap;
+    let mut l1_per_page: HashMap<usize, Vec<usize>> = HashMap::new(); // page → Vec<candidate_idx>
+    for (idx, c) in candidates.iter().enumerate() {
+        if c.level == 1 {
+            l1_per_page.entry(c.page).or_default().push(idx);
+        }
+    }
+
+    let mut remove_indices: Vec<usize> = Vec::new();
+
+    for (page, cand_indices) in &l1_per_page {
+        // 阈值：同一页 ≥ 3 个 level-1 候选 → 疑似目录页
+        if cand_indices.len() < 3 {
+            continue;
+        }
+
+        // 进一步确认：检查这些候选所在的 block 周围是否有 body text
+        // 目录页的 level-1 block 通常孤立（页面内无 body text 跟随）
+        let page_block_ids: Vec<&str> = all_blocks
+            .iter()
+            .filter(|(_, p)| *p == *page)
+            .map(|(b, _)| b.id.as_str())
+            .collect();
+
+        let toc_l1_count = cand_indices
+            .iter()
+            .filter(|&&ci| {
+                let c = &candidates[ci];
+                // 检查该候选的 block 在页面内是否是孤立的 Heading
+                // （后续 block 都不是同级的 Paragraph body）
+                let block_pos = page_block_ids.iter().position(|&id| id == c.block_id);
+                match block_pos {
+                    Some(pos) => {
+                        // 该 block 之后还有 block → 检查是否有紧邻的 Paragraph
+                        let has_body_after = page_block_ids[pos..].iter().any(|&id| {
+                            all_blocks
+                                .iter()
+                                .any(|(b, _)| {
+                                    b.id == id
+                                        && b.block_type
+                                            == crate::domain::raw_document::BlockType::Paragraph
+                                })
+                        });
+                        // 目录页 level-1 标题后不应有紧邻的 Paragraph body
+                        !has_body_after
+                    }
+                    None => true,
+                }
+            })
+            .count();
+
+        // 如果 ≥3 个 level-1 都是孤立的（无 body 跟随）→ 确认是目录页
+        if toc_l1_count >= 3 {
+            for &ci in cand_indices {
+                remove_indices.push(ci);
+            }
+        }
+    }
+
+    // 安全移除（降序）
     remove_indices.sort_unstable();
     remove_indices.dedup();
     for &idx in remove_indices.iter().rev() {
