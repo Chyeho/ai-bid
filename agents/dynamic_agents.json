@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "Dynamic_Inactive",
+      "display_name": "非活跃",
+      "system_prompt": "你是测试Agent",
+      "default_max_turns": 8,
+      "complexity": "Medium",
+      "section_keywords": [
+        "测试"
+      ],
+      "tool_names": [
+        "web_search"
+      ],
+      "created_at": "2026-01-01T00:00:00Z",
+      "created_by": "BlindSpotAgent",
+      "reason": "test",
+      "active": false
+    },
+    {
+      "id": "Dynamic_Unknown",
+      "display_name": "现场踏勘合规检测Agent",
+      "system_prompt": "你是现场踏勘合规检测Agent。你的职责是审查招标文件中关于现场踏勘的要求是否符合政府采购法规。重点检查是否存在强制要求'必须自行踏勘现场'、将踏勘作为资格条件、实质性条款或评审因素等违规情形。知识库来源：《政府采购货物和服务招标投标管理办法》（财政部令第87号）第二十六条、《政府采购法》第四条。搜索指引：查找'踏勘'、'现场考察'、'自行踏勘'等关键词，检查其表述是否包含'必须'、'须'、'强制'等强制性用语，以及是否与资格条件、评审因素相关联。output_finding格式要求：包含clause_ids、confidence、legal_basis、no_risk、reason、risk_type、severity、source_quote、suggestion字段。",
+      "default_max_turns": 8,
+      "complexity": "Medium",
+      "section_keywords": [
+        "踏勘",
+        "现场考察",
+        "自行踏勘",
+        "现场",
+        "考察"
+      ],
+      "tool_names": [
+        "web_search",
+        "search_document",
+        "read_section",
+        "output_finding"
+      ],
+      "created_at": "2026-06-26T14:39:26.277689200+00:00",
+      "created_by": "BlindSpotAgent",
+      "reason": "现有SemanticRiskAgent关注品牌指定，FactCheckAgent关注事实核查，其他Agent未覆盖现场踏勘合规性审查这一特定程序违规模式。该模式具有通用性，会在各类政府采购项目中重复出现。",
+      "active": false
+    }
+  ]
+}

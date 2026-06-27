@@ -11,6 +11,26 @@ use ai_bid::services::pdf_extract_service::{extract_pdf_to_raw_json, extract_wit
 use ai_bid::services::sectionize_service::sectionize;
 use serde::Serialize;
 
+// Agent 框架
+use ai_bid::agents::bus::AgentBus;
+use ai_bid::agents::coordinator::Coordinator;
+use ai_bid::agents::fact_check::create_fact_check_agent;
+use ai_bid::services::llm_client::create_llm_client;
+use ai_bid::agents::registry::AgentRegistry;
+use ai_bid::agents::session_graph::SessionGraph;
+use ai_bid::agents::tools::search_document::SearchDocumentTool;
+use ai_bid::agents::tools::search_knowledge::{
+    DashScopeSearchBackend, SearchBuffer, SearchKnowledgeTool,
+};
+use ai_bid::agents::tools::read_section::ReadSectionTool;
+use ai_bid::agents::tools::output_finding::OutputFindingTool;
+use ai_bid::agents::tools::ToolRegistry;
+use ai_bid::agents::trace::TraceLog;
+use ai_bid::agents::types::{CoordinatorConfig, CoordinatorOutput, ReviewClause};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 /// Chunk 切分完整输出（对应验证.md V4.8 格式）。
 #[derive(Debug, Serialize)]
 struct ChunkingOutput {
@@ -164,11 +184,15 @@ impl ChunkingOutput {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
+    // 加载 .env 文件（LLM API 密钥等配置）
+    dotenv::dotenv().ok();
+
     // 从命令行参数或默认值获取输入路径
     let input_path = env::args()
         .nth(1)
-        .unwrap_or_else(|| "tests/智慧教室环境改造工程.pdf".to_string());
+        .unwrap_or_else(|| "tests/file/智慧教室环境改造工程.pdf".to_string());
 
     let input = Path::new(&input_path);
     anyhow::ensure!(input.exists(), "文件不存在: {}", input.display());
@@ -411,6 +435,365 @@ fn main() -> Result<()> {
         "  大小 — 总计 {} 字符, 平均 {:.1}, 最小 {}, 最大 {}",
         stats.total_chars, stats.avg_chunk_size, stats.min_chunk_size, stats.max_chunk_size
     );
+
+    // ─── 阶段 4: Chunks → Embedding → DocumentVectorIndex ─────
+    //
+    // 通过 .env 中的 EMBED_ENGINE 切换嵌入引擎：
+    //   EMBED_ENGINE=local  → 本地 BGE-M3 数据并行（默认，需 models/ 缓存）
+    //   EMBED_ENGINE=remote → 远程 text-embedding-v4（需 DASHSCOPE_API_KEY）
+    //
+    // 本地模式 K 值（数据并行实例数）：
+    //   K=1 → ~1.2GB          K=2 → ~2.4GB, ~1.8×（推荐）
+    //   K=3 → ~3.6GB, ~2.5×   K=4 → ~4.8GB, ~3.2×
+    const EMBED_PARALLELISM: usize = 2;
+
+    let embed_engine = env::var("EMBED_ENGINE").unwrap_or_else(|_| "local".to_string());
+    let is_remote = embed_engine == "remote";
+    println!(
+        "嵌入引擎: {}",
+        if is_remote {
+            "远程 DashScope (text-embedding-v4)"
+        } else {
+            "本地 BGE-M3（数据并行）"
+        }
+    );
+
+    let doc_index = if is_remote {
+        let api_client =
+            ai_bid::services::embedding_api_client::EmbeddingApiClient::from_env()?;
+        ai_bid::services::embedding_service::embed_chunks_remote(
+            &chunks,
+            &chunking_config,
+            &sections_output.document_id,
+            &api_client,
+        )?
+    } else {
+        println!(
+            "正在生成 BGE-M3 Embedding（数据并行: {} 实例）...",
+            EMBED_PARALLELISM
+        );
+        ai_bid::services::embedding_service::embed_chunks_parallel(
+            &chunks,
+            &chunking_config,
+            &sections_output.document_id,
+            EMBED_PARALLELISM,
+        )?
+    };
+
+    let embeddings_dir = "output/embeddings".to_string();
+    ai_bid::services::embedding_service::save_index(&doc_index, &embeddings_dir, &stem)?;
+    println!(
+        "  索引完成: {} 条向量, 维度 {}",
+        doc_index.len(),
+        doc_index
+            .embeddings
+            .first()
+            .map(|v| v.len())
+            .unwrap_or(0)
+    );
+
+    // ─── 阶段 5: 语义搜索验证（V5.6）──────────────────────────
+
+    println!();
+    println!("正在运行语义搜索验证（V5.6）...");
+
+    let queries: &[(&str, &str)] = &[
+        ("Q1", "供应商需要具备哪些资格条件？"),
+        ("Q2", "本项目不接受联合体投标的要求"),
+        ("Q3", "投标文件的密封和递交要求"),
+        ("Q4", "付款方式和结算条件是什么"),
+        ("Q5", "技术服务的验收标准和流程"),
+    ];
+
+    // 创建嵌入客户端（查询 + Agent 复用，根据 EMBED_ENGINE 自动选择引擎）
+    let embed_client = ai_bid::services::embedding_service::EmbeddingClient::from_env()?;
+
+    let query_texts: Vec<&str> = queries.iter().map(|(_, t)| *t).collect();
+    let query_embs = embed_client.encode_queries(&query_texts)?;
+
+    println!("  已编码 {} 条查询", query_embs.len());
+    println!();
+
+    for (i, (label, query)) in queries.iter().enumerate() {
+        // query_embs 已由 EmbeddingClient 做 L2 归一化，直接使用
+        let hits = doc_index.search(&query_embs[i], 5);
+        println!("━━━ {}: \"{}\" ━━━", label, query);
+        for (rank, hit) in hits.iter().enumerate() {
+            let marker = if rank == 0 { "★" } else { " " };
+            println!(
+                "  {} #{}. [{}] cos={:.4}  p.{}  \"{}\"",
+                marker,
+                rank + 1,
+                hit.chunk_id,
+                hit.score,
+                hit.page_start,
+                hit.title,
+            );
+            // 显示 snippet 前 120 字符
+            let snippet: String = hit.snippet.chars().take(120).collect();
+            println!("       ↳ {}", snippet);
+        }
+        println!();
+    }
+
+    // ─── 阶段 6: Multi-Agent 合规审查 (Phase 2 Coordinator) ───
+
+    println!();
+    println!("══════════════════════════════════════════════");
+    println!("  阶段 6: Multi-Agent 合规审查 (Phase 2)");
+    println!("══════════════════════════════════════════════");
+    println!();
+
+    // 检查是否启用 Agent 模式（环境变量 AIBID_AGENT=1）
+    let agent_enabled = env::var("AIBID_AGENT").unwrap_or_default() == "1";
+    if !agent_enabled {
+        println!("  Agent 模式未启用。设置 AIBID_AGENT=1 以启用。");
+        println!("  用法: $env:AIBID_AGENT=1; cargo run -- <文件路径>");
+        println!();
+        println!("  注意：Agent 模式需要设置 OPENAI_API_KEY 环境变量。");
+        return Ok(());
+    }
+
+    // 1. 构建 Chunk 查找表（read_section 工具）
+    let chunk_map: HashMap<String, Chunk> = chunks
+        .iter()
+        .map(|c| (c.chunk_id.clone(), c.clone()))
+        .collect();
+    let chunk_map = Arc::new(chunk_map);
+
+    // 构建有序 chunk_id 列表（用于 read_section 的相邻上下文查询）
+    let chunk_order: Vec<String> = chunks.iter().map(|c| c.chunk_id.clone()).collect();
+    let chunk_order = Arc::new(chunk_order);
+    println!("  已加载 {} 个 Chunk 到内存索引", chunk_order.len());
+
+    // 2. 共享 DocumentVectorIndex（search_document 工具）
+    let doc_index = Arc::new(doc_index);
+
+    // 3. 共享嵌入客户端（search_document 查询编码用，与验证阶段共用同一实例）
+    let agent_embed = Arc::new(embed_client);
+    println!("  嵌入客户端已共享给 Agent");
+
+    // 4. 构建审查条款列表
+    let max_clauses: usize = env::var("AIBID_MAX_CLAUSES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+
+    let review_clauses: Vec<ReviewClause> = chunks
+        .iter()
+        .take(max_clauses)
+        .map(|c| {
+            ReviewClause::from_chunk(
+                c,
+                chunking_config.embed_ctx_depth,
+                chunking_config.embed_path_max_len,
+            )
+        })
+        .collect();
+
+    // 5. Phase 2 共享基础设施
+    // AgentBus — Agent 间实时广播（capacity=32）
+    let bus = Arc::new(AgentBus::new(32));
+
+    // SessionGraph — Blackboard 核心（中期记忆）
+    let graph = Arc::new(SessionGraph::new());
+
+    // TraceLog — 审查追溯日志
+    let trace = Arc::new(Mutex::new(TraceLog::new()));
+
+    // AgentRegistry — 8 Agent 内置定义
+    let registry = AgentRegistry::builtin();
+
+    // 6. 工厂函数（避免 clone_box 传染）
+    let llm_factory = {
+        move || {
+            create_llm_client()
+                .expect("创建 LLM 客户端失败。请检查 AIBID_LLM_PROTOCOL 及相关 API 密钥环境变量")
+        }
+    };
+
+    // 6. 搜索后端选择
+    let search_backend =
+        env::var("AIBID_SEARCH_BACKEND").unwrap_or_else(|_| "dashscope".to_string());
+
+    // SearXNG 仅在明确配置时初始化
+    let shared_search_buffer: Option<Arc<SearchBuffer>> = if search_backend == "searxng" {
+        let searxng_url =
+            env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+        println!("  SearXNG 搜索后端: {} (SearchBuffer 已启用)", searxng_url);
+        Some(SearchBuffer::new(searxng_url))
+    } else {
+        None
+    };
+
+    // DashScope 搜索后端
+    let shared_dashscope_search: Option<Arc<DashScopeSearchBackend>> =
+        if search_backend == "dashscope" {
+            let ds = DashScopeSearchBackend::from_env()
+                .expect("DashScope 搜索后端初始化失败。请设置 DASHSCOPE_API_KEY");
+            println!("  DashScope 联网搜索后端已启用 (model={})",
+                std::env::var("DASHSCOPE_SEARCH_MODEL").unwrap_or_else(|_| "qwen-turbo".to_string()));
+            Some(Arc::new(ds))
+        } else {
+            None
+        };
+
+    // 验证
+    if search_backend != "dashscope" && search_backend != "searxng" {
+        anyhow::bail!(
+            "未知的 AIBID_SEARCH_BACKEND: '{}'。支持: dashscope, searxng",
+            search_backend
+        );
+    }
+
+    let tools_factory = {
+        let doc_index = doc_index.clone();
+        let agent_embed = agent_embed.clone();
+        let chunk_map = chunk_map.clone();
+        let chunk_order = chunk_order.clone();
+        let ds_search = shared_dashscope_search.clone();
+        let buffer = shared_search_buffer.clone();
+        move || {
+            let mut registry = ToolRegistry::new();
+            registry.register(Box::new(SearchDocumentTool::new(
+                doc_index.clone(),
+                agent_embed.clone(),
+            )));
+            registry.register(Box::new(ReadSectionTool::new(
+                chunk_map.clone(),
+                chunk_order.clone(),
+            )));
+            // 根据搜索后端选择工具变体
+            if let Some(ref ds) = ds_search {
+                registry.register(Box::new(SearchKnowledgeTool::with_dashscope(
+                    ds.clone(),
+                )));
+            } else if let Some(ref buf) = buffer {
+                registry.register(Box::new(SearchKnowledgeTool::with_buffer(
+                    buf.clone(),
+                )));
+            } else {
+                panic!("搜索后端未初始化");
+            }
+            registry.register(Box::new(OutputFindingTool));
+            registry
+        }
+    };
+
+    // 7. 检查是否使用 Coordinator 模式（环境变量 AIBID_COORDINATOR=1）
+    let use_coordinator = env::var("AIBID_COORDINATOR").unwrap_or_default() == "1";
+
+    let output: CoordinatorOutput = if use_coordinator {
+        // ── Coordinator 模式（Phase 2 完整管线）─────────────────
+
+        println!("  模式: Coordinator (Multi-Agent)");
+        println!("  搜索后端: {}", search_backend);
+
+        let config = CoordinatorConfig::default();
+        let coordinator = Coordinator::new(
+            config,
+            registry,
+            Box::new(llm_factory),
+            Box::new(tools_factory),
+            bus,
+            graph,
+            trace,
+        );
+
+        coordinator.review(&review_clauses).await?
+    } else {
+        // ── 单 Agent 模式（向后兼容 MVP）─────────────────────────
+
+        println!("  模式: 单 Agent (向后兼容 MVP)");
+        println!("  提示: 设置 AIBID_COORDINATOR=1 启用 Multi-Agent 模式");
+
+        let llm = create_llm_client()
+            .context("创建 LLM 客户端失败。请检查 AIBID_LLM_PROTOCOL 及相关 API 密钥环境变量")?;
+        let tools = tools_factory();
+        let agent = create_fact_check_agent(llm, tools);
+        let findings = agent.review(&review_clauses).await;
+
+        CoordinatorOutput {
+            findings,
+            routing_summary: ai_bid::agents::types::RoutingSummary {
+                total_clauses: review_clauses.len(),
+                agent_clause_counts: {
+                    let mut m = HashMap::new();
+                    m.insert("FactCheckAgent".to_string(), review_clauses.len());
+                    m
+                },
+                high_risk_count: 0,
+                legal_verify_count: 0,
+                blind_spot_findings: 0,
+            },
+            graph_snapshot: None,
+        }
+    };
+
+    // 8. 输出结果
+    let findings = &output.findings;
+    let findings_dir = "output/findings";
+    fs::create_dir_all(findings_dir)
+        .with_context(|| format!("无法创建输出目录: {}", findings_dir))?;
+    let findings_path = format!("{}/{}_findings.json", findings_dir, stem);
+    let findings_json = serde_json::to_string_pretty(&findings)?;
+    fs::write(&findings_path, findings_json)?;
+
+    // 输出 routing_summary
+    let summary_path = format!("{}/{}_routing_summary.json", findings_dir, stem);
+    let summary_json = serde_json::to_string_pretty(&output.routing_summary)?;
+    fs::write(&summary_path, summary_json)?;
+
+    // 输出 graph_snapshot（审计追溯）
+    if let Some(ref snap) = output.graph_snapshot {
+        let snap_path = format!("{}/{}_graph_snapshot.json", findings_dir, stem);
+        let snap_json = serde_json::to_string_pretty(snap)?;
+        fs::write(&snap_path, snap_json)?;
+        println!("  Graph 快照已写入: {}", snap_path);
+    }
+
+    println!();
+    println!("══════════════════════════════════════════════");
+    println!("  审查完成");
+    println!("══════════════════════════════════════════════");
+    println!("  审查条款: {} 条", output.routing_summary.total_clauses);
+    println!(
+        "  发现风险: {} 条",
+        findings.iter().filter(|f| !f.no_risk).count()
+    );
+    println!(
+        "  合规条款: {} 条",
+        findings.iter().filter(|f| f.no_risk && !f.truncated).count()
+    );
+    println!(
+        "  截断(需人工): {} 条",
+        findings.iter().filter(|f| f.truncated).count()
+    );
+    println!(
+        "  🔴 High: {} 条",
+        output.routing_summary.high_risk_count
+    );
+    println!("  结果文件: {}", findings_path);
+
+    // 打印 Agent 分布
+    println!();
+    println!("  Agent 条款分配:");
+    for (agent, count) in &output.routing_summary.agent_clause_counts {
+        println!("    {} : {} 条", agent, count);
+    }
+
+    // 打印风险摘要
+    for f in findings {
+        if !f.no_risk {
+            println!();
+            println!("  ┌─ {} [{}] confidence={:.2}", f.risk_id, f.severity, f.confidence);
+            println!("  │  条款: {}", f.clause_ids.join(", "));
+            println!("  │  类型: {}", f.risk_type);
+            println!("  │  法条: {}", f.legal_basis.join("; "));
+            println!("  │  理由: {}", f.reason.chars().take(200).collect::<String>());
+            println!("  └──────────────────────────────");
+        }
+    }
 
     Ok(())
 }

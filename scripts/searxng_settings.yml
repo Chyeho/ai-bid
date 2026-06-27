@@ -1,0 +1,63 @@
+# SearXNG 配置 — ai-bid 项目专用
+# 优化搜索引擎选择以支持中文政府采购法规搜索
+#
+# ⚠️ 挂载方法:
+#   docker run -d -p 8080:8080 \
+#     -v "$(pwd)/scripts/searxng_settings.yml:/etc/searxng/settings.yml" \
+#     searxng/searxng
+#
+#   如果不挂载，SearXNG 将使用默认配置（百度默认启用），
+#   本文件中的 disabled: true 不会生效。
+
+use_default_settings: true
+
+server:
+  secret_key: "ai-bid-search-2026"
+  limiter: false              # 私有实例无需限流（SearchBuffer 已控制并发）
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 0
+
+outgoing:
+  request_timeout: 15.0      # 单个引擎的超时秒数
+  max_request_timeout: 30.0  # 请求总超时硬上限
+  retries: 1                 # 上游失败后换引擎重试
+  useragent_suffix: "ai-bid/1.0"
+
+engines:
+  # ── 主力搜索引擎 ──────────────────────────────
+  # 百度 — 中文搜索结果质量最高（政府采购法规/案例）
+  # ✅ SearchBuffer 已保证串行 + 500ms 间隔 → 不会触发百度并发限流
+  - name: baidu
+    disabled: false
+    timeout: 15.0
+
+  # Bing — 中文支持较好，作为百度的后备
+  - name: bing
+    disabled: false
+    timeout: 15.0
+
+  # Brave — 不限 IP，支持中文（需免费 API key）
+  # 申请: https://brave.com/search/api/ (免费 2000 次/月)
+  # 有 key 后取消下面注释并填入:
+  # - name: brave
+  #   disabled: false
+  #   api_key: "BSA_YOUR_KEY"
+  #   timeout: 15.0
+
+  # Wikipedia — 永不限流，对法规定义类查询有价值
+  - name: wikipedia
+    disabled: false
+    timeout: 10.0
+
+  # ── 已禁用的引擎 ──────────────────────────────
+  # Google — 无代理情况下频繁 CAPTCHA，禁用
+  - name: google
+    disabled: true
+
+  # DuckDuckGo — 频繁 CAPTCHA，禁用
+  - name: duckduckgo
+    disabled: true

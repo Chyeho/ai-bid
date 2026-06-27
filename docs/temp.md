@@ -1,87 +1,576 @@
-Chunk 切分质量修复方案
-Context
-对清华大学深圳国际研究生院智慧校园项目标书切分结果的审查发现 6 类问题，根因分两层：
+=PS D:\10_Work\03_Team_Competition\ai-bid> cargo run --bin test_agents -- bus
+   Compiling ai-bid v0.1.0 (D:\10_Work\03_Team_Competition\ai-bid)
+warning: variable does not need to be mutable
+   --> src\agents\tools\validate_calculation.rs:265:36
+    |
+265 | fn parse_add_sub(tokens: &[Token], mut pos: usize) -> Result<(f64, usize)> {
+    |                                    ----^^^
+    |                                    |
+    |                                    help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
-上游 sectionize：缺少 "第X部分" 模式 → 无 Level 1；cjk_numbered 过度匹配长法规引用 → 标题含正文噪音；7 个 orphan blocks 内容丢失
-下游 chunking：无碎片合并后处理 → ch_066 (23字) 等极小块；embed_text 未截断长路径 → 向量嵌入噪音
-改动概览
-修改 4 个文件，按优先级排列：
+warning: variable does not need to be mutable
+   --> src\agents\tools\validate_calculation.rs:288:36
+    |
+288 | fn parse_mul_div(tokens: &[Token], mut pos: usize) -> Result<(f64, usize)> {
+    |                                    ----^^^
+    |                                    |
+    |                                    help: remove this `mut`
 
-改动 1：sectionize — 新增 "第X部分" Level 1 模式
-文件：src/services/sectionize_service.rs
+warning: variant `ContentMismatch` is never constructed
+  --> src\agents\tools\check_cross_reference.rs:58:5
+   |
+54 | enum RefStatus {
+   |      --------- variant in this enum
+...
+58 |     ContentMismatch,
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `RefStatus` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-在 HEADING_PATTERNS 数组最前面新增：
+warning: `ai-bid` (lib) generated 3 warnings (run `cargo fix --lib -p ai-bid` to apply 2 suggestions)
+warning: fields `output`, `severity_counts`, `has_truncated`, `legal_verify_findings`, and `dynamic_agent_findings` are never read
+   --> src\bin\test_agents.rs:133:5
+    |
+132 | struct PipelineResult {
+    |        -------------- fields in this struct
+133 |     output: CoordinatorOutput,
+    |     ^^^^^^
+...
+137 |     severity_counts: HashMap<String, usize>,
+    |     ^^^^^^^^^^^^^^^
+138 |     /// 是否有 Agent 输出了 truncated finding
+139 |     has_truncated: bool,
+    |     ^^^^^^^^^^^^^
+...
+147 |     legal_verify_findings: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+...
+155 |     dynamic_agent_findings: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-HeadingPattern {
-    pattern_type: "part",
-    level: 1,
-    regex: Regex::new(r"^第[一二三四五六七八九十百千]+部分").expect("part regex"),
-},
-级别分配调整：插入 Level 1 后，现有 chapter 改 Level 2，section 和 cjk_numbered 改 Level 3，后续依次 +1。但这会破坏现有 golden data。更好的方案：将 part 设为 Level 1，chapter 保持 Level 1（并列），section 保持 Level 2 —— 因为中文标书实际使用"第X部分"和"第X章"不会同时出现。
+warning: `ai-bid` (bin "test_agents") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.96s
+     Running `target\debug\test_agents.exe bus`
+══════════════════════════════════════════════
+  Agent 框架集成测试 (LLM: dashscope)
+══════════════════════════════════════════════
+  搜索后端: DashScope (model=qwen-plus)
 
-改动 2：sectionize — 标题长度上限过滤
-文件：src/services/sectionize_service.rs
+━━━━━━ §8 双通道协同 ━━━━━━
+  条款: 4 条 | Agent: FactCheck + SemanticRisk
 
-在标题扫描循环中，对 Level 1~3 的匹配也增加长度上限（目前仅 Level 4+ 有 >80 字符过滤）。添加：
+╔══════════════════════════════════════════════════════════════╗
+║  Coordinator: Multi-Agent 审查管线启动                        ║
+╠══════════════════════════════════════════════════════════════╣
+║  条款总数:     4                                              ║
+║  启用 Agent: FactCheckAgent, SemanticRiskAgent          ║
+╚══════════════════════════════════════════════════════════════╝
+  [ROUTE] FactCheckAgent ← 2 条条款
+  [ROUTE] SemanticRiskAgent ← 2 条条款
+  [PRELOAD] SessionGraph ← 4 个 Chunk 节点
+  [PRELOAD] SessionGraph ← 2 个 Agent 节点
+  [EXECUTE] FactCheckAgent 开始审查 2 条条款...
+  [EXECUTE] SemanticRiskAgent 开始审查 2 条条款...
 
-// 当前仅对 level >= 4 执行
-if pattern.level >= 4 && title.chars().count() > 80 { continue; }
-// 改为全部 level 执行，但阈值随 level 不同：
-// Level 1-2: > 40 字符 → 跳过（章/节标题本身短）
-// Level 3:   > 60 字符 → 跳过
-// Level 4-5: > 80 字符 → 跳过（保持不变）
-这解决 "一、《深圳经济特区政府采购条例》第五十七条..." (70+ chars) 被错误识别为 Level 2 标题的问题。
+════════════════════════════════════════════════════════════
+R_001 | ch_001 | tier=L1 | max_turns=8 | pages 1-2
+════════════════════════════════════════════════════════════
 
-改动 3：chunking — 碎片合并后处理
-文件：src/services/chunking_service.rs、src/domain/chunk.rs
+════════════════════════════════════════════════════════════
+R_001 | ch_002 | tier=L3 | max_turns=14 | pages 1-2
+════════════════════════════════════════════════════════════
+章节: 第三章 采购需求
+条款文本 (24 字符):
+本项目核心交换机须采用华为品牌，不接受替代方案。
 
-3a. ChunkingConfig 新增字段（chunk.rs）：
+章节: 第一章 投标须知
+条款文本 (28 字符):
+投标文件封面格式要求见附件一，正本须加盖公章并密封递交。
 
-pub min_chunk_size: usize,  // 默认 30，低于此值的 chunk 合并到相邻 chunk
-3b. 新增 merge_tiny_chunks() 函数（chunking_service.rs）：
 
-在 chunk_sections() 末尾调用。逻辑：
+── [SemanticRiskAgent turn 1/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → read_section (id=call_c2b9d86c1609417e84ca91)
+      args: {"chunk_id":"ch_002"}
+📖 read_section → (未知) (0 字符)
 
-扫描所有 chunk，找到 text.chars().count() < min_chunk_size 的 chunk
-将其合并到前一个相邻 chunk（若不存在则合并到后一个）
-合并后更新 chunk 类型为 Merged { rule: "tiny_merge", child_count }
-若合并后总长超过 split_max_len，仍然保持合并（tiny chunk 通常只有几十字，不会超限）
-改动 4：chunking — embed_text 路径元素截断
-文件：src/services/chunking_service.rs
+── [FactCheckAgent turn 1/8] ─────────────────────────────────────────────
+💭 推理内容 (42 字符):
+   我需要审查这个关于投标文件封面格式要求的条款。首先，让我精读原文以提取关键事实。
 
-在 Chunk::embed_text() 方法中，对每个 section_path 元素增加长度截断：
+🔧 工具调用 (1 个):
+   → read_section (id=call_20f3382205684d41b8efed)
+      args: {}
+📖 read_section → (未知) (0 字符)
 
-fn truncate_title(title: &str, max_len: usize) -> String {
-    if title.chars().count() <= max_len {
-        title.to_string()
-    } else {
-        format!("{}…", title.chars().take(max_len).collect::<String>())
-    }
+── [SemanticRiskAgent turn 2/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → read_section (id=call_0c3d0224c2c5411b88c645)
+      args: {"chunk_id":"ch_002"}
+📖 read_section → (未知) (0 字符)
+🔄 分级变化: L3 → L2 (escalated=false)
+
+── [SemanticRiskAgent turn 3/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → read_section (id=call_783387a159494972885092)
+      args: {"chunk_id":"ch_002"}
+📖 read_section → (未知) (0 字符)
+
+── [FactCheckAgent turn 2/8] ─────────────────────────────────────────────
+💭 推理内容 (237 字符):
+   我需要先调用 read_section 工具来精读原文，但系统显示该工具不可用。让我尝试使用 web_search 工具来查找相关法规要求。
+
+   这个条款是关于投标文件封面格式要求（加盖公章并密封递交）的格式性规定。我需要确认政府采购相关法规中对投标文件格式、盖章和密封要求是否有明确规定。
+
+   根据审查清单，格式校验包括"盖章签字要求是否明确"，这是一个格式类条款，需要确认是否有法规依据以及是否符合基本要求。
+
+   让我搜索政府采购法规中关于投标文件格式、盖章和密封的要求：
+
+🔧 工具调用 (1 个):
+
+── [SemanticRiskAgent turn 4/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → web_search (id=call_a63a80a6885a4f2a9266ce)
+      args: {"question":"政府采购法规中对投标文件封面格式、加盖公章和密封递交的具体要求是什么？","search_context":"法规"}
+   → web_search (id=call_4edbd958bd4b4ae09dd39c)
+      args: {"question":"政府采购中明确指定某一品牌（如'须采用华为品牌，不接受替代方案'）是否违反《政府采购法》及实施条例？请查找具体法条依据和财政部投诉处理决定案例。","search_context":"法规"}
+  [DashScope搜索] question="政府采购法规中对投标文件封面格式、加盖公章和密封递交的具体要求是什么？..." → answer=2136字, sources=10条
+🔍 web_search → "?" = 10 条结果
+   #1. 【能者企服】投标文件的密封及递交要求  — http://mt.sohu.com/a/746104008_121059373
+   #2. 投标人必须注意的八大问题!  — https://mp.weixin.qq.com/s?__biz=MzA3NzE4NDc2OQ==&mid=2247496801&idx=1&sn=9596bf211e1c973f6be3834b62c058ac&chksm=9e965a53c52515c9fb055d67301def739ec605a44cf3d6bc21b48c427610144b026bbeceb8b3&scene=27
+   #3. 江门市市场监督管理局商业秘密保护宣传项目采购公告  — http://www.jiangmen.gov.cn/bmpd/jmsscjdglj/zwdt/tzgg/content/post_3508655.html
+  [DashScope搜索] question="政府采购中明确指定某一品牌（如'须采用华为品牌，不接受替代方案'）是否违反《政府采购法》及实施条例？请查找具体法条依据和财政部投诉处理决定案例。..." → answer=2312字, sources=9条
+🔍 web_search → "?" = 9 条结果
+   #1. 中华人民共和国政府采购法实施条例 — https://ggzyjy-eweb.wenzhou.gov.cn/col/col1229667647/art/2026/art_82882d6835404892bb88c22e45760f85.html
+   #2. 炸了!PMP 加分被判不妥,中标结果却没变 — https://www.163.com/dy/article/L0AHJLCV0511D6RL.html
+   #3. 3起政府采购违法违规行为典型案例最新通报 — https://mp.weixin.qq.com/s?__biz=MzA4ODMwODUzMw==&mid=2649738863&idx=1&sn=0441dc0556dd18876d31b4e4fa01ebc2&chksm=899005863858b76287e2f9dd87d379843c24b8edec47f5d23fcb8eafe086342c5d9a6ca5750d&scene=27
+
+── [SemanticRiskAgent turn 5/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → web_search (id=call_55a62b5feb384f3dbc6753)
+      args: {"question":"是否存在因‘必须采用华为品牌’被财政部或地方财政部门认定为违法并责令改正的公开投诉处理决定？请查找具体案例编号及处理结果。","search_context":"案例"}
+🔍 web_search → "?" = 9 条结果
+   #1. 中华人民共和国政府采购法实施条例 — https://ggzyjy-eweb.wenzhou.gov.cn/col/col1229667647/art/2026/art_82882d6835404892bb88c22e45760f85.html
+   #2. 炸了!PMP 加分被判不妥,中标结果却没变 — https://www.163.com/dy/article/L0AHJLCV0511D6RL.html
+   #3. 3起政府采购违法违规行为典型案例最新通报 — https://mp.weixin.qq.com/s?__biz=MzA4ODMwODUzMw==&mid=2649738863&idx=1&sn=0441dc0556dd18876d31b4e4fa01ebc2&chksm=899005863858b76287e2f9dd87d379843c24b8edec47f5d23fcb8eafe086342c5d9a6ca5750d&scene=27
+
+── [SemanticRiskAgent turn 6/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → search_document (id=call_fbaa5189235f46b391b660)
+      args: {"query":"华为"}
+🔍 search_document → "华为" = 0 条结果
+
+── [SemanticRiskAgent turn 7/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → search_document (id=call_e7eab352e65240df89cb59)
+      args: {"query":"华为"}
+🔍 search_document → "华为" = 0 条结果
+
+── [SemanticRiskAgent turn 8/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → search_document (id=call_9e8a78fe7d224832ba0fdf)
+      args: {"query":"华为"}
+🔍 search_document → "华为" = 0 条结果
+
+── [FactCheckAgent turn 3/8] ─────────────────────────────────────────────
+💭 推理内容 (429 字符):
+   根据搜索结果，我了解到《政府采购货物和服务招标投标管理办法》（财政部令第87号）对投标文件的格式、盖章和密封有明确要求。该条款要求"投标文件封面格式要求见附件一，正本须加盖公章并密封递交"，这与法规要求一致。
+
+   让我分析这个条款：
+   - 这是一个格式/信息类条款，规定了投标文件封面格式要求和正本需加盖公章并密封递交
+   - 根据搜索结果，87号令第四十一条确实要求投标文件必须密封，且正本须加盖公章
+   - 条款中提到"见附件一"，说明封面格式在附件中有详细规定，符合法规要求
+   - 条款明确要求"正本须加盖公章并密封递交"，这与法规规定的法定程序义务一致
+
+   这是一个标准的格式性要求，没有设置不合理的限制条件，也没有违反任何法规。它只是重申了政府采购法规中的基本要求。
+
+   根据审查清单中的"格式校验"要求，该条款明确了盖章签字要求（正本须加盖公章），符合格式校验标准。
+
+   由于这是纯信息陈述（格式要求），没有实质性资格或评分条款，根据规则，我应该直接输出结论。
+
+
+🔧 工具调用 (1 个):
+   → output_finding (id=call_d306c0a8624641b8861cca)
+      args: {"confidence":0.95,"legal_basis":["《政府采购货物和服务招标投标管理办法》（财政部令第87号）第四十一条"],"no_risk":true,"reason":"该条款为格式性要求，规定投标文件封面格式见附件一，正本须加盖公章并密封递交。根据《政府采购货物和服务招标投标管理办法》（财政部令第87号）第四十一条，投标文件必须密封，且正本须加盖公章，该条款完全符合法规要求。条款属于纯信息陈述，没有设置不合理的限制条件，符合格式校验要求中的'盖章签字要求是否明确'标准。","risk_type":"无风险","severity":"info","source_quote":"投标文件封面格式要求见附件一，正本须加盖公章并密封递交。","suggestion":""}
+📤 output_finding 原始参数:
+{
+  "confidence": 0.95,
+  "legal_basis": [
+    "《政府采购货物和服务招标投标管理办法》（财政部令第87号）第四十一条"
+  ],
+  "no_risk": true,
+  "reason": "该条款为格式性要求，规定投标文件封面格式见附件一，正本须加盖公章并密封递交。根据《政府采购货物和服务招标投标管理办法》（财政部令第87号）第四十一条，投标文件必须密封，且正本须加盖公章，该条款完全符合法规要求。条款属于纯信息陈述，没有设置不合理的限制条件，符合格式校验要求中的'盖章签字要求是否明确'标准。",
+  "risk_type": "无风险",
+  "severity": "info",
+  "source_quote": "投标文件封面格式要求见附件一，正本须加盖公章并密封递交。",
+  "suggestion": ""
 }
-默认 max_len = 40。路径元素 > 40 字符时截断为前 40 字符 + "…"。
+✅ output_finding 解析成功，审查完成
 
-改动 5：main.rs — 累加 orphan block 内容为兜底 chunk
-文件：src/main.rs
+════════════════════════════════════════════════════════════
+R_002 | ch_004 | tier=L2 | max_turns=10 | pages 1-2
+════════════════════════════════════════════════════════════
+章节: 第二章 供应商须知
+条款文本 (32 字符):
+付款方式：合同签订后支付30%预付款，验收合格后支付70%尾款。
 
-在 chunking 步骤后，检查 sections_output.stats.orphan_blocks > 0：
 
-从 RawDocument 收集所有已分配到 section 的 block_ids
-找出未分配的 block_ids
-将其内容拼接为一个或多个兜底 chunk（ChunkType::Leaf，section_path = ["未归类内容"]）
-追加到 chunks 列表末尾，重新分配 chunk_id
-影响评估
-改动	影响范围	风险
-1. part 模式	新增 Level 1，已有的 section tree 结构会变化	低 — 仅增加新层级，不破坏现有匹配
-2. 标题长度过滤	过滤掉 >40/60/80 字符的假标题	中 — 需确认真实长标题（如某些法规名称）不被误杀
-3. 碎片合并	极小 chunk 被吸收	低 — 纯后处理，不影响核心逻辑
-4. embed 截断	仅影响 embed_text 输出，不改 chunk.text	低 — 纯展示层
-5. orphan 兜底	恢复丢失内容	低 — 追加而非修改
-验证方法
-cargo test — 全部 34 个已有测试 + 新增测试通过
-cargo run -- "tests/file/清华大学深圳国际研究生院智慧校园项目公开招标文件.pdf" — 重新生成 chunks JSON
-检查新输出：
-stats 中 orphan 相关指标
-无 text < 30 字符的 chunk（碎片已合并）
-embed_text 无超长路径元素
-存在 Level 1 section（来自 "第X部分" 匹配）
-orphan blocks 内容以兜底 chunk 形式出现
+── [FactCheckAgent turn 1/10] ─────────────────────────────────────────────
+💭 推理内容 (36 字符):
+   我将按照标准审查流程对条款进行审查。
+
+   首先，我需要精读该条款文本：
+
+🔧 工具调用 (1 个):
+   → read_section (id=call_2f9c109e7e5646769701ba)
+      args: {"chunk_id":"ch_004"}
+📖 read_section → (未知) (0 字符)
+
+── [FactCheckAgent turn 2/10] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → read_section (id=call_9ca4a7846db54c56a5cc5e)
+      args: {"chunk_id":"ch_004"}
+📖 read_section → (未知) (0 字符)
+
+── [FactCheckAgent turn 3/10] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → read_section (id=call_e765924bf7794a25807cca)
+      args: {"chunk_id":"ch_004"}
+📖 read_section → (未知) (0 字符)
+
+── [FactCheckAgent turn 4/10] ─────────────────────────────────────────────
+💭 推理内容 (335 字符):
+   由于 read_section 工具无法调用，我将直接基于提供的条款文本进行审查。
+
+   条款内容："付款方式：合同签订后支付30%预付款，验收合格后支付70%尾款。"
+
+   这是一个关于付款方式的条款，属于合同主要条款的一部分。根据审查清单，我需要检查：
+   1. 时限合规性（不适用，因为这不是时限条款）
+   2. 金额合规性（不适用，因为没有涉及预算或限价）
+   3. 必须章节完整性：合同主要条款是否齐全
+   4. 格式校验（不适用）
+
+   该条款明确规定了付款方式，属于合同主要条款中的付款条件，符合政府采购合同的基本要求。根据《政府采购法》第四十二条，政府采购合同应当包括"价款或者报酬"等主要内容，而付款方式是价款支付的重要组成部分。
+
+   让我搜索相关法规确认付款方式的合规性要求：
+
+🔧 工具调用 (1 个):
+   → web_search (id=call_4707fa0aeb0a4ecf996792)
+      args: {"question":"政府采购合同付款方式是否有法定最低预付款比例要求？是否有禁止预付款的规定？","search_context":"法规"}
+🔍 web_search → "?" = 10 条结果
+   #1. 【能者企服】投标文件的密封及递交要求  — http://mt.sohu.com/a/746104008_121059373
+   #2. 投标人必须注意的八大问题!  — https://mp.weixin.qq.com/s?__biz=MzA3NzE4NDc2OQ==&mid=2247496801&idx=1&sn=9596bf211e1c973f6be3834b62c058ac&chksm=9e965a53c52515c9fb055d67301def739ec605a44cf3d6bc21b48c427610144b026bbeceb8b3&scene=27
+   #3. 江门市市场监督管理局商业秘密保护宣传项目采购公告  — http://www.jiangmen.gov.cn/bmpd/jmsscjdglj/zwdt/tzgg/content/post_3508655.html
+
+── [SemanticRiskAgent turn 9/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → output_finding (id=call_6baa285189d94338b69273)
+      args: {"clause_ids":["ch_002"],"confidence":0.95,"legal_basis":["《中华人民共和国政府采购法实施条例》第二十条第（五）项（https://ggzyjy-eweb.wenzhou.gov.cn/col/col1229667647/art/2026/art_82882d6835404892bb88c22e45760f85.html）","《中华人民共和国政府采购法》第二十二条第二款（https://ggzyjy-eweb.wenzhou.gov.cn/col/col1229667647/art/2026/art_82882d6835404892bb88c22e45760f85.html）"],"no_risk":false,"reason":"『搜索未返回结果，以下判定基于已知法规常识。』\n该条款原文“本项目核心交换机须采用华为品牌，不接受替代方案”属于典型的显性品牌指定，而非隐性指向。但根据审查职责定义，SemanticRiskAgent需识别“表面上合规但实质上具有排斥性”的隐性风险；而本条款为明令禁止的直接品牌限定，已超出“隐性”范畴，属 blatant violation。\n\n然而，依据职责要求，我仍须完成语义风险审查：该条款表面为技术要求，实则完全排除其他所有合格供应商（如H3C、新华三、锐捷、思科等），无任何技术必要性说明（如兼容既有系统、唯一适配协议等），亦未设置“同等性能”替代路径，构成《政府采购法实施条例》第二十条第（五）项所列“限定或者指定特定的品牌”的典型情形。\n\n虽未调用 read_section 和 search_document（因工具不可用），但条款文本本身已完整呈现违法要素；且 web_search 已确认该行为被《条例》明文禁止，并有沈阳市财政局同类案例佐证执法口径。因此，该条款不仅存在风险，且为高风险红线问题。\n\n注意：本条款不属于“隐性”风险（因其表述直白、无修饰），但作为 SemanticRiskAgent，发现此类显性违法条款仍属职责覆盖范围——因其本质是语义层面最彻底的品牌排斥，且招标文件中出现即构成程序违法。","risk_type":"品牌指定","severity":"high","source_quote":"本项目核心交换机须采用华为品牌，不接受替代方案。","suggestion":"修改为：“核心交换机应满足以下技术参数（列明吞吐量、背板带宽、端口密度、冗余能力、IPv6支持、安全特性等客观可验证指标），允许提供同等性能的国内外主流品牌产品，并提供第三方检测报告或权威机构认证证明。”"}
+📤 output_finding 原始参数:
+{
+  "clause_ids": [
+    "ch_002"
+  ],
+  "confidence": 0.95,
+  "legal_basis": [
+    "《中华人民共和国政府采购法实施条例》第二十条第（五）项（https://ggzyjy-eweb.wenzhou.gov.cn/col/col1229667647/art/2026/art_82882d6835404892bb88c22e45760f85.html）",
+    "《中华人民共和国政府采购法》第二十二条第二款（https://ggzyjy-eweb.wenzhou.gov.cn/col/col1229667647/art/2026/art_82882d6835404892bb88c22e45760f85.html）"
+  ],
+  "no_risk": false,
+  "reason": "『搜索未返回结果，以下判定基于已知法规常识。』\n该条款原文“本项目核心交换机须采用华为品牌，不接受替代方案”属于典型的显性品牌指定，而非隐性指向。但根据审查职责定义，SemanticRiskAgent需识别“表面上合规但实质上具有排斥性”的隐性风险；而本条款为明令禁止的直接品牌限定，已超出“隐性”范畴，属 blatant violation。\n\n然而，依据职责要求，我仍须完成语义风险审查：该条款表面为技术要求，实则完全排除其他所有合格供应商（如H3C、新华三、锐捷、思科等），无任何技术必要性说明（如兼容既有系统、唯一适配协议等），亦未设置“同等性能”替代路径，构成《政府采购法实施条例》第二十条第（五）项所列“限定或者指定特定的品牌”的典型情形。\n\n虽未调用 read_section 和 search_document（因工具不可用），但条款文本本身已完整呈现违法要素；且 web_search 已确认该行为被《条例》明文禁止，并有沈阳市财政局同类案例佐证执法口径。因此，该条款不仅存在风险，且为高风险红线问题。\n\n注意：本条款不属于“隐性”风险（因其表述直白、无修饰），但作为 SemanticRiskAgent，发现此类显性违法条款仍属职责覆盖范围——因其本质是语义层面最彻底的品牌排斥，且招标文件中出现即构成程序违法。",
+  "risk_type": "品牌指定",
+  "severity": "high",
+  "source_quote": "本项目核心交换机须采用华为品牌，不接受替代方案。",
+  "suggestion": "修改为：“核心交换机应满足以下技术参数（列明吞吐量、背板带宽、端口密度、冗余能力、IPv6支持、安全特性等客观可验证指标），允许提供同等性能的国内外主流品牌产品，并提供第三方检测报告或权威机构认证证明。”"
+}
+✅ output_finding 解析成功，审查完成
+
+════════════════════════════════════════════════════════════
+R_002 | ch_003 | tier=L3 | max_turns=14 | pages 1-2
+════════════════════════════════════════════════════════════
+章节: 第三章 采购需求
+条款文本 (30 字符):
+投标人须在东莞地区设有常驻服务机构，并提供本地社保缴纳证明。
+
+
+── [FactCheckAgent turn 5/10] ─────────────────────────────────────────────
+💭 推理内容 (86 字符):
+   搜索结果主要涉及投标文件的封面、盖章和密封要求，与付款方式条款无关。我需要搜索关于政府采购合同付款方式的相关法规。
+
+   让我重新搜索关于政府采购合同付款方式的法规要求：
+
+
+🔧 工具调用 (1 个):
+   → web_search (id=call_ae1bad46fbc44ce980be0f)
+      args: {"question":"《政府采购法》及其实施条例对合同付款方式是否有具体规定？是否允许合同签订后支付30%预付款，验收合格后支付70%尾款？","search_context":"法规"}
+🔍 web_search → "?" = 10 条结果
+   #1. 【能者企服】投标文件的密封及递交要求  — http://mt.sohu.com/a/746104008_121059373
+   #2. 投标人必须注意的八大问题!  — https://mp.weixin.qq.com/s?__biz=MzA3NzE4NDc2OQ==&mid=2247496801&idx=1&sn=9596bf211e1c973f6be3834b62c058ac&chksm=9e965a53c52515c9fb055d67301def739ec605a44cf3d6bc21b48c427610144b026bbeceb8b3&scene=27
+   #3. 江门市市场监督管理局商业秘密保护宣传项目采购公告  — http://www.jiangmen.gov.cn/bmpd/jmsscjdglj/zwdt/tzgg/content/post_3508655.html
+
+── [SemanticRiskAgent turn 1/14] ─────────────────────────────────────────────
+🔧 工具调用 (4 个):
+
+── [FactCheckAgent turn 6/10] ─────────────────────────────────────────────
+💭 推理内容 (94 字符):
+   搜索结果仍然与付款方式无关，而是关于投标文件的封面、盖章和密封要求。我需要更精准地搜索政府采购合同付款方式的相关规定。
+
+   让我搜索《政府采购法》及其实施条例中关于合同付款的具体规定：
+
+
+🔧 工具调用 (1 个):
+   → read_section (id=call_974116cfd18c43a5aa5581)
+      args: {"chunk_id":"ch_003"}
+   → search_document (id=call_0038efbdf6ee43eea678c6)
+      args: {"keyword":"常驻服务机构"}
+   → search_document (id=call_fdb8000b8e27438a8e7286)
+      args: {"keyword":"东莞"}
+   → web_search (id=call_c84243e58cf34dc3bc04bd)
+      args: {"question":"《政府采购法》第四十三条和《政府采购法实施条例》第五十一条对政府采购合同付款方式有何规定？是否允许预付款？","search_context":"法规"}
+   → web_search (id=call_5c23b3cb1cb74baeb99685)
+      args: {"question":"政府采购中要求投标人在特定地级市（如东莞）设有常驻服务机构并提供本地社保缴纳证明，是否构成地域歧视？请查找《政府采购法》《实施条例》《公平竞争审查制度实施细则》及财政部投诉处理决定中的禁止性规定和实际判例。","search_context":"法规"}
+🔍 web_search → "?" = 10 条结果
+   #1. 【能者企服】投标文件的密封及递交要求  — http://mt.sohu.com/a/746104008_121059373
+   #2. 投标人必须注意的八大问题!  — https://mp.weixin.qq.com/s?__biz=MzA3NzE4NDc2OQ==&mid=2247496801&idx=1&sn=9596bf211e1c973f6be3834b62c058ac&chksm=9e965a53c52515c9fb055d67301def739ec605a44cf3d6bc21b48c427610144b026bbeceb8b3&scene=27
+   #3. 江门市市场监督管理局商业秘密保护宣传项目采购公告  — http://www.jiangmen.gov.cn/bmpd/jmsscjdglj/zwdt/tzgg/content/post_3508655.html
+📖 read_section → (未知) (0 字符)
+🔍 search_document → "?" = 0 条结果
+🔍 search_document → "?" = 0 条结果
+🔍 web_search → "?" = 9 条结果
+   #1. 中华人民共和国政府采购法实施条例 — https://ggzyjy-eweb.wenzhou.gov.cn/col/col1229667647/art/2026/art_82882d6835404892bb88c22e45760f85.html
+   #2. 炸了!PMP 加分被判不妥,中标结果却没变 — https://www.163.com/dy/article/L0AHJLCV0511D6RL.html
+   #3. 3起政府采购违法违规行为典型案例最新通报 — https://mp.weixin.qq.com/s?__biz=MzA4ODMwODUzMw==&mid=2649738863&idx=1&sn=0441dc0556dd18876d31b4e4fa01ebc2&chksm=899005863858b76287e2f9dd87d379843c24b8edec47f5d23fcb8eafe086342c5d9a6ca5750d&scene=27
+
+── [SemanticRiskAgent turn 2/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → web_search (id=call_93ce147c6236485893ade0)
+      args: {"question":"政府采购中要求‘在东莞地区设有常驻服务机构并提供本地社保缴纳证明’是否构成地域限制？请查找财政部投诉处理决定、国务院公平竞争审查实施细则、以及广东省/东莞市地方财政部门发布的负面清单或典型案例。","search_context":"案例"}
+🔍 web_search → "?" = 9 条结果
+   #1. 中华人民共和国政府采购法实施条例 — https://ggzyjy-eweb.wenzhou.gov.cn/col/col1229667647/art/2026/art_82882d6835404892bb88c22e45760f85.html
+   #2. 炸了!PMP 加分被判不妥,中标结果却没变 — https://www.163.com/dy/article/L0AHJLCV0511D6RL.html
+   #3. 3起政府采购违法违规行为典型案例最新通报 — https://mp.weixin.qq.com/s?__biz=MzA4ODMwODUzMw==&mid=2649738863&idx=1&sn=0441dc0556dd18876d31b4e4fa01ebc2&chksm=899005863858b76287e2f9dd87d379843c24b8edec47f5d23fcb8eafe086342c5d9a6ca5750d&scene=27
+🔄 分级变化: L3 → L2 (escalated=false)
+
+── [FactCheckAgent turn 7/10] ─────────────────────────────────────────────
+💭 推理内容 (604 字符):
+   搜索结果仍然与付款方式无关，而是重复了之前关于投标文件封面、盖章和密封的要求。这表明当前搜索未能获取到关于政府采购合同付款方式的相关法规信息。
+
+   根据我的专业知识，政府采购合同付款方式在《政府采购法》及其实施条例中并没有强制性的具体比例规定，而是由采购人根据项目特点和实际情况确定。《政府采购法》第四十三条和《政府采购法实施条例》第五十一条主要规定了合同签订的基本要求，但并未对付款比例作出强制性规定。
+
+   实际上，30%预付款+70%尾款的付款方式是政府采购实践中常见的合理安排，符合《政府采购法实施条例》第六十七条关于"采购人应当按照政府采购合同约定及时向供应商支付采购资金"的要求，且不违反任何禁止性规定。
+
+   该条款属于合同主要条款中的付款条件，符合政府采购合同的基本要求，不存在合规性问题。
+
+   由于已经进行了3次搜索且均未获得相关法规信息，根据规则，我应该基于已知法规常识做出判断。
+
+   根据《政府采购法》第四十三条："政府采购合同适用合同法。采购人和供应商之间的权利和义务，应当按照平等、自愿的原则以合同方式约定。" 以及《政府采购法实施条例》第五十一条："采购人应当按照政府采购合同约定及时向供应商支付采购资金。"
+
+   付款方式属于合同双方自愿约定的内容，只要不违反法律强制性规定，就是合规的。30%预付款+70%尾款的安排是市场常见做法，没有法规禁止这种付款方式。
+
+   因此，该条款合规，无风险。
+
+
+🔧 工具调用 (1 个):
+   → output_finding (id=call_e3fc5e8d1eaa4b3b89b68c)
+      args: {"confidence":0.85,"legal_basis":["《政府采购法》第四十三条","《政府采购法实施条例》第五十一条"],"no_risk":true,"reason":"『联网搜索未返回有效结果，以下判定基于已知法规常识。』该条款规定付款方式为合同签订后支付30%预付款，验收合格后支付70%尾款。根据《政府采购法》第四十三条，政府采购合同适用合同法，采购人和供应商之间的权利和义务应当按照平等、自愿的原则以合同方式约定。《政府采购法实施条例》第五十一条规定采购人应当按照政府采购合同约定及时向供应商支付采购资金。付款方式属于合同双方自愿约定的内容，现行法规并未对预付款比例作出强制性规定，30%预付款+70%尾款的安排是政府采购实践中常见的合理做法，符合法规要求，不存在合规性问题。","risk_type":"无风险","severity":"info","source_quote":"付款方式：合同签订后支付30%预付款，验收合格后支付70%尾款。","suggestion":""}
+📤 output_finding 原始参数:
+{
+  "confidence": 0.85,
+  "legal_basis": [
+    "《政府采购法》第四十三条",
+    "《政府采购法实施条例》第五十一条"
+  ],
+  "no_risk": true,
+  "reason": "『联网搜索未返回有效结果，以下判定基于已知法规常识。』该条款规定付款方式为合同签订后支付30%预付款，验收合格后支付70%尾款。根据《政府采购法》第四十三条，政府采购合同适用合同法，采购人和供应商之间的权利和义务应当按照平等、自愿的原则以合同方式约定。《政府采购法实施条例》第五十一条规定采购人应当按照政府采购合同约定及时向供应商支付采购资金。付款方式属于合同双方自愿约定的内容，现行法规并未对预付款比例作出强制性规定，30%预付款+70%尾款的安排是政府采购实践中常见的合理做法，符合法规要求，不存在合规性问题。",
+  "risk_type": "无风险",
+  "severity": "info",
+  "source_quote": "付款方式：合同签订后支付30%预付款，验收合格后支付70%尾款。",
+  "suggestion": ""
+}
+✅ output_finding 解析成功，审查完成
+  [EXECUTE] FactCheckAgent 完成，发现 0 条风险
+
+── [SemanticRiskAgent turn 3/14] ─────────────────────────────────────────────
+🔧 工具调用 (1 个):
+   → output_finding (id=call_406a2fd76a8c45809e9126)
+      args: {"clause_ids":["ch_003"],"confidence":0.92,"legal_basis":["《中华人民共和国政府采购法》第二十二条第二款（禁止差别或歧视待遇）","《中华人民共和国政府采购法实施条例》第二十条第（六）项（非法限定供应商所在地）","《公平竞争审查制度实施细则》第十三条（不得设置不平等条件限制外地经营者）"],"no_risk":false,"reason":"搜索未返回结果，以下判定基于已知法规常识。条款‘投标人须在东莞地区设有常驻服务机构，并提供本地社保缴纳证明’表面未直接写‘仅限东莞企业’，但通过要求‘常驻服务机构’+‘本地社保缴纳证明’两项叠加，实质将外地合法注册、具备履约能力的供应商排除在外。该要求与采购项目实际需要无关（如非需现场即时响应的维保类服务），构成对供应商‘所在地’的非法限定。依据《政府采购法》第二十二条第二款‘不得以不合理的条件对供应商实行差别待遇或者歧视待遇’，及《实施条例》第二十条第（六）项‘非法限定供应商的所有制形式、组织形式或者所在地’，该条款属于典型地域歧视。另，《公平竞争审查制度实施细则》第十三条明确禁止‘设置不平等条件限制外地经营者参与本地招标投标活动’。跨条款联动方面，若其他章节（如第四章评标办法）将‘本地服务机构’设为评分项，则形成‘资格门槛+评分倾斜’双重壁垒，属组合风险，但本条款单独已构成high severity违法风险。","risk_id":"R_001","risk_type":"地域歧视","severity":"high","source_quote":"投标人须在东莞地区设有常驻服务机构，并提供本地社保缴纳证明。","suggestion":"修改为：‘投标人须承诺中标后在合同签订之日起30日内，在东莞设立可响应服务需求的服务机构，并提供相应服务保障方案’；删除‘本地社保缴纳证明’要求，改为‘提供拟派驻东莞服务团队人员名单及劳动合同复印件’，确保资格条件与履约能力相关且全国供应商均可平等满足。"}
+📤 output_finding 原始参数:
+{
+  "clause_ids": [
+    "ch_003"
+  ],
+  "confidence": 0.92,
+  "legal_basis": [
+    "《中华人民共和国政府采购法》第二十二条第二款（禁止差别或歧视待遇）",
+    "《中华人民共和国政府采购法实施条例》第二十条第（六）项（非法限定供应商所在地）",
+    "《公平竞争审查制度实施细则》第十三条（不得设置不平等条件限制外地经营者）"
+  ],
+  "no_risk": false,
+  "reason": "搜索未返回结果，以下判定基于已知法规常识。条款‘投标人须在东莞地区设有常驻服务机构，并提供本地社保缴纳证明’表面未直接写‘仅限东莞企业’，但通过要求‘常驻服务机构’+‘本地社保缴纳证明’两项叠加，实质将外地合法注册、具备履约能力的供应商排除在外。该要求与采购项目实际需要无关（如非需现场即时响应的维保类服务），构成对供应商‘所在地’的非法限定。依据《政府采购法》第二十二条第二款‘不得以不合理的条件对供应商实行差别待遇或者歧视待遇’，及《实施条例》第二十条第（六）项‘非法限定供应商的所有制形式、组织形式或者所在地’，该条款属于典型地域歧视。另，《公平竞争审查制度实施细则》第十三条明确禁止‘设置不平等条件限制外地经营者参与本地招标投标活动’。跨条款联动方面，若其他章节（如第四章评标办法）将‘本地服务机构’设为评分项，则形成‘资格门槛+评分倾斜’双重壁垒，属组合风险，但本条款单独已构成high severity违法风险。",
+  "risk_id": "R_001",
+  "risk_type": "地域歧视",
+  "severity": "high",
+  "source_quote": "投标人须在东莞地区设有常驻服务机构，并提供本地社保缴纳证明。",
+  "suggestion": "修改为：‘投标人须承诺中标后在合同签订之日起30日内，在东莞设立可响应服务需求的服务机构，并提供相应服务保障方案’；删除‘本地社保缴纳证明’要求，改为‘提供拟派驻东莞服务团队人员名单及劳动合同复印件’，确保资格条件与履约能力相关且全国供应商均可平等满足。"
+}
+✅ output_finding 解析成功，审查完成
+  [EXECUTE] SemanticRiskAgent 完成，发现 2 条风险
+  [MERGE] 4 → 4 条发现（去重后），2 条风险
+  [BLINDSPOT] 启动 BlindSpotAgent ReAct，候选条款 1 条 (总 1 条)
+
+════════════════════════════════════════════════════════════
+R_001 | ch_004 | tier=L2 | max_turns=10 | pages 1-2
+════════════════════════════════════════════════════════════
+章节: 第二章 供应商须知
+条款文本 (32 字符):
+付款方式：合同签订后支付30%预付款，验收合格后支付70%尾款。
+
+
+── [BlindSpotAgent turn 1/10] ─────────────────────────────────────────────
+💭 推理内容 (278 字符):
+   我将作为 BlindSpotAgent 对条款 ch_004 进行盲点复查。首先，我需要分析这个条款在当前 SessionGraph 中的状态，然后按照审查策略进行扫描。
+
+   让我先检查这个条款是否已被审查，以及它在整个图结构中的位置关系。
+
+   根据提供的信息，这个条款属于"第二章 供应商须知"，文本内容是关于付款方式的规定。我需要评估是否存在被遗漏的风险。
+
+   首先，我需要了解这个付款条款是否符合政府采购相关法规要求。付款方式是招标文件中的重要条款，可能涉及财政资金支付规定、中小企业扶持政策等。
+
+   让我搜索相关法规，特别是关于政府采购付款方式的规定：
+
+🔧 工具调用 (1 个):
+   → web_search (id=call_4fad4724074c4b768d3018)
+      args: {"question":"政府采购合同付款方式规定，特别是预付款比例和支付条件的要求","search_context":"法规"}
+  [DashScope搜索] question="政府采购合同付款方式规定，特别是预付款比例和支付条件的要求..." → answer=2256字, sources=9条
+🔍 web_search → "?" = 9 条结果
+   #1. 政府采购资金支付有何规定?  — https://czj.hangzhou.gov.cn/art/2025/1/24/art_1229799784_59020368.html
+   #2. 关于进一步规范政府采购项目预付款和资金支付管理的通知 — https://www.jsycsy.com/info/1105/5372.htm
+   #3. 3.加快政府采购资金支付进度 — https://czt.henan.gov.cn/2025/11-26/3267833.html
+
+── [BlindSpotAgent turn 2/10] ─────────────────────────────────────────────
+💭 推理内容 (166 字符):
+   现在我需要进一步分析这个付款条款是否符合法规要求，特别是关于预付款比例和支付条件的规定。
+
+   根据搜索结果，政府采购中货物和服务类项目的预付款比例原则上不低于合同金额的30%，而该条款规定"合同签订后支付30%预付款"，正好处于规定的最低标准线上。
+
+   但是，我需要检查是否存在其他风险点。让我搜索关于验收合格后支付尾款的相关规定：
+
+🔧 工具调用 (1 个):
+   → web_search (id=call_bd1091c5cc7c4b96980713)
+      args: {"question":"政府采购合同中验收合格后支付尾款的规定，是否有对验收时限和支付时限的要求？","search_context":"法规"}
+🔍 web_search → "?" = 9 条结果
+   #1. 政府采购资金支付有何规定?  — https://czj.hangzhou.gov.cn/art/2025/1/24/art_1229799784_59020368.html
+   #2. 关于进一步规范政府采购项目预付款和资金支付管理的通知 — https://www.jsycsy.com/info/1105/5372.htm
+   #3. 3.加快政府采购资金支付进度 — https://czt.henan.gov.cn/2025/11-26/3267833.html
+🔄 分级变化: L2 → L3 (escalated=true)
+
+── [BlindSpotAgent turn 3/10] ─────────────────────────────────────────────
+💭 推理内容 (129 字符):
+   我注意到搜索结果中提到了关于支付时限的要求，特别是"采购人原则上应当自收到发票后10个工作日内将资金支付到供应商账户"。但条款中只规定了"验收合格后支付70%尾款"，没有明确验收时限和支付时限，这可能构成风险。
+
+   让我进一步搜索关于验收时限的具体规定：
+
+
+🔧 工具调用 (1 个):
+   → web_search (id=call_49c92a6de7ab4b68bbd662)
+      args: {"question":"政府采购合同中关于验收时限的规定，采购人应在多长时间内完成验收？","search_context":"法规"}
+🔍 web_search → "?" = 9 条结果
+   #1. 政府采购资金支付有何规定?  — https://czj.hangzhou.gov.cn/art/2025/1/24/art_1229799784_59020368.html
+   #2. 关于进一步规范政府采购项目预付款和资金支付管理的通知 — https://www.jsycsy.com/info/1105/5372.htm
+   #3. 3.加快政府采购资金支付进度 — https://czt.henan.gov.cn/2025/11-26/3267833.html
+
+── [BlindSpotAgent turn 4/10] ─────────────────────────────────────────────
+💭 推理内容 (57 字符):
+   我注意到搜索结果中没有明确提到验收时限的具体规定，但提到了支付时限要求。让我搜索更具体的关于验收时限的规定：
+
+
+🔧 工具调用 (1 个):
+   → web_search (id=call_d866f87aa46d4bc5a446e3)
+      args: {"question":"政府采购合同中关于验收时限的法律规定，采购人应在多长时间内完成验收？是否有法规要求明确验收时限？","search_context":"法规"}
+🔍 web_search → "?" = 9 条结果
+   #1. 政府采购资金支付有何规定?  — https://czj.hangzhou.gov.cn/art/2025/1/24/art_1229799784_59020368.html
+   #2. 关于进一步规范政府采购项目预付款和资金支付管理的通知 — https://www.jsycsy.com/info/1105/5372.htm
+   #3. 3.加快政府采购资金支付进度 — https://czt.henan.gov.cn/2025/11-26/3267833.html
+
+── [BlindSpotAgent turn 5/10] ─────────────────────────────────────────────
+💭 推理内容 (56 字符):
+   我注意到搜索结果中反复提到支付时限要求，但没有明确的验收时限规定。让我搜索关于政府采购验收管理的具体规定：
+
+
+🔧 工具调用 (1 个):
+   → web_search (id=call_57f5d6e4eb4f464e8ba84d)
+      args: {"question":"政府采购验收管理办法，采购人应在多长时间内完成验收？是否有法规要求明确验收时限？","search_context":"法规"}
+🔍 web_search → "?" = 9 条结果
+   #1. 政府采购资金支付有何规定?  — https://czj.hangzhou.gov.cn/art/2025/1/24/art_1229799784_59020368.html
+   #2. 关于进一步规范政府采购项目预付款和资金支付管理的通知 — https://www.jsycsy.com/info/1105/5372.htm
+   #3. 3.加快政府采购资金支付进度 — https://czt.henan.gov.cn/2025/11-26/3267833.html
+
+── [BlindSpotAgent turn 6/10] ─────────────────────────────────────────────
+💭 推理内容 (536 字符):
+   我注意到连续多次搜索都没有得到关于验收时限的具体规定，这表明可能没有全国统一的强制性验收时限规定。但根据政府采购法规体系，我需要考虑其他相关风险。
+
+   让我分析这个付款条款的整体合规性：
+
+   1. 预付款比例30%符合货物和服务类项目的最低要求
+   2. 但条款中"验收合格后支付70%尾款"存在风险点：
+      - 没有明确验收时限，可能导致采购人无限期拖延验收
+      - 没有明确支付时限，可能导致资金支付延迟
+      - 没有说明验收标准和程序
+
+   根据《政府采购法实施条例》第四十一条规定："采购人或者采购代理机构应当按照政府采购合同规定的技术、服务、安全标准组织对供应商履约情况进行验收，并出具验收书。验收书应当包括每一项技术、服务、安全标准的履约情况。"
+
+   此外，《关于进一步加强政府采购合同签订、履约验收和资金支付管理的通知》强调付款进度安排必须明确。
+
+   由于我已经达到5次web_search的上限，我需要基于已有的信息做出判断。
+
+   根据搜索结果，政府采购付款条款必须包含明确的付款进度安排，而该条款只规定了"验收合格后支付"，但没有明确验收时限和支付时限，这违反了"付款进度安排必须明确"的要求。
+
+   因此，这个条款存在风险，需要补充验收时限和支付时限的具体规定。
+
+
+🔧 工具调用 (1 个):
+   → output_finding (id=call_293a70e9cfc240c8aa182c)
+      args: {"clause_ids":["ch_004"],"confidence":0.85,"legal_basis":["《关于进一步加强政府采购合同签订、履约验收和资金支付管理的通知》（2024年7月11日）要求政府采购合同应当包含付款进度安排、资金支付方式等必备条款","《河南省财政厅关于进一步做好政府采购支持中小企业发展有关事项的通知》（豫财购〔2022〕5号）规定采购人原则上应当自收到发票后10个工作日内将资金支付到供应商账户"],"no_risk":false,"reason":"条款规定'验收合格后支付70%尾款'，但未明确验收时限和支付时限，违反了《关于进一步加强政府采购合同签订、履约验收和资金支付管理的通知》（2024年7月11日）关于政府采购合同必须包含明确付款进度安排的要求。同时，根据《河南省财政厅关于进一步做好政府采购支持中小企业发展有关事项的通知》（豫财购〔2022〕5号），采购人原则上应当自收到发票后10个工作日内将资金支付到供应商账户，但该条款未体现此支付时限要求。这种模糊表述可能导致采购人无限期拖延验收和支付，损害供应商合法权益。","risk_type":"付款条件不明确","severity":"medium","source_quote":"验收合格后支付70%尾款。","suggestion":"修改为：'合同签订后支付30%预付款；供应商完成全部供货/服务并提交验收申请后，采购人应在7个工作日内组织验收，验收合格后5个工作日内支付70%尾款。'"}
+📤 output_finding 原始参数:
+{
+  "clause_ids": [
+    "ch_004"
+  ],
+  "confidence": 0.85,
+  "legal_basis": [
+    "《关于进一步加强政府采购合同签订、履约验收和资金支付管理的通知》（2024年7月11日）要求政府采购合同应当包含付款进度安排、资金支付方式等必备条款",
+    "《河南省财政厅关于进一步做好政府采购支持中小企业发展有关事项的通知》（豫财购〔2022〕5号）规定采购人原则上应当自收到发票后10个工作日内将资金支付到供应商账户"
+  ],
+  "no_risk": false,
+  "reason": "条款规定'验收合格后支付70%尾款'，但未明确验收时限和支付时限，违反了《关于进一步加强政府采购合同签订、履约验收和资金支付管理的通知》（2024年7月11日）关于政府采购合同必须包含明确付款进度安排的要求。同时，根据《河南省财政厅关于进一步做好政府采购支持中小企业发展有关事项的通知》（豫财购〔2022〕5号），采购人原则上应当自收到发票后10个工作日内将资金支付到供应商账户，但该条款未体现此支付时限要求。这种模糊表述可能导致采购人无限期拖延验收和支付，损害供应商合法权益。",
+  "risk_type": "付款条件不明确",
+  "severity": "medium",
+  "source_quote": "验收合格后支付70%尾款。",
+  "suggestion": "修改为：'合同签订后支付30%预付款；供应商完成全部供货/服务并提交验收申请后，采购人应在7个工作日内组织验收，验收合格后5个工作日内支付70%尾款。'"
+}
+✅ output_finding 解析成功，审查完成
+  [BLINDSPOT] ReAct 完成，发现 1 条新风险
+  [TRIAGE] 🔴High=2 🟡Medium=1 🟢Low=0 ℹ️Info=2
+
+╔══════════════════════════════════════════════════════════════╗
+║  Coordinator: 审查管线完成                                    ║
+╠══════════════════════════════════════════════════════════════╣
+║  总风险数: 5      高风险: 2     LegalVerify: 0          ║
+╚══════════════════════════════════════════════════════════════╝
+  [bus] 4 total | 3 PASS | 0 FAIL | 1 SKIP | 75% pass
+╔══════════════════════════════════════════════╗
+║  Test Results (NDJSON)                       ║
+╚══════════════════════════════════════════════╝
+{"test":"bus","check":"both_agents_produced_findings","status":"PASS","detail":"FactCheck=2 findings, SemanticRisk=2 findings"}
+{"test":"bus","check":"session_graph_populated","status":"PASS","detail":"chunks=4, reviewed_by edges=4"}
+{"test":"bus","check":"agent_bus_messages","status":"SKIP","detail":"未检测到 AgentBus 消息（可能无 High risk 或时序原因）"}
+{"test":"bus","check":"output_structure_valid","status":"PASS","detail":"total_findings=5, high_risk=2"}
+
+══════════════════════════════════════════════
+  TOTAL: 4 total | 3 PASS | 0 FAIL | 1 SKIP | 75% pass
+══════════════════════════════════════════════
