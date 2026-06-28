@@ -1,11 +1,20 @@
-# ── 后端 (Rust) ──
-backend/target
-backend/output
-backend/models
+# ── 后端 Rust (审核引擎) ──
+backend-rust/target
+backend-rust/output
+backend-rust/models
+
+# ── 后端 Java (业务平台) ──
+backend-java/target
+backend-java/build
+backend-java/.gradle
+backend-java/node_modules
 
 # ── 前端 (React) ──
 frontend/node_modules
 frontend/dist
+
+# ── Rust 构建产物（根级） ──
+target/
 
 # ── 共享 ──
 .env

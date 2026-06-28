@@ -6,7 +6,8 @@
 
 | 目录 | 说明 |
 |---|---|
-| `backend/` | Rust 后端：CLI 工具 + Multi-Agent 审核引擎 |
+| `backend-rust/` | Rust 后端：CLI 工具 + Multi-Agent 审核引擎 |
+| `backend-java/` | Java 后端：Spring Boot 业务平台（认证/CRUD/文件管理） |
 | `frontend/` | React 前端（Vite + TypeScript） |
 | `docs/` | 项目文档（中文） |
 | `models/` | ONNX 嵌入模型文件（~568MB，git ignored） |
@@ -23,7 +24,7 @@
 
 ## 环境变量（.env）
 
-后端依赖以下环境变量（详见 `backend/src/main.rs`）：
+Rust 后端依赖以下环境变量（详见 `backend-rust/src/main.rs`）：
 
 - `DASHSCOPE_API_KEY` — 阿里云 DashScope API 密钥
 - `AIBID_LLM_PROTOCOL=dashscope` — LLM 协议（dashscope / openai_compatible）
@@ -32,7 +33,7 @@
 - `EMBED_ENGINE=local` — 嵌入引擎（local / remote）
 - `AIBID_AGENT=1` — 启用 Multi-Agent 模式
 - `AIBID_COORDINATOR=1` — 启用 Coordinator 模式
-- `AIBID_DATA_DIR` — 数据根目录，默认 `.`。从 `backend/` 目录运行时设为 `AIBID_DATA_DIR=..` 可将路径解析到项目根目录
+- `AIBID_DATA_DIR` — 数据根目录，默认 `.`。从 `backend-rust/` 目录运行时设为 `AIBID_DATA_DIR=..` 可将路径解析到项目根目录
 
 ## 前后端通信
 

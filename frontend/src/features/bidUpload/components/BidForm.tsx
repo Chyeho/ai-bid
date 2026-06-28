@@ -1,0 +1,229 @@
+import React, { useState, useEffect } from 'react';
+import { Form, Button, Card, Input } from 'antd';
+import { useStyles } from '../style';
+import { useIsMobile } from '@/hooks/useMediaQuery';
+import {
+   BankOutlined,
+   FolderOutlined,
+   InfoOutlined,
+   PayCircleOutlined,
+   ProjectOutlined,
+   ShoppingCartOutlined,
+   UserOutlined,
+} from '@ant-design/icons';
+import type { BidUploadQueryParams, FileCategory } from '../types';
+import { useNavigate, useParams } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import { dashboardOptions } from '@/features/dashboard/api/dashboard';
+
+interface Props {
+   onSubmit: (values: BidUploadQueryParams, file: File) => Promise<void>;
+   isPending: boolean;
+   renderUpload: (
+      file: File | null,
+      setFile: (f: File | null) => void
+   ) => React.ReactNode;
+}
+
+export const BidForm: React.FC<Props> = ({
+   onSubmit,
+   isPending,
+   renderUpload,
+}) => {
+   const { styles } = useStyles();
+   const isMobile = useIsMobile();
+   const navigate = useNavigate();
+   const { projectId } = useParams<{ projectId: string }>();
+
+   const [form] = Form.useForm();
+
+   const [file, setFile] = useState<File | null>(null);
+   const [activeCategory, setActiveCategory] = useState<FileCategory>();
+
+   const { data: projectList = [] } = useQuery(dashboardOptions.list());
+
+   const projectName = projectList.find((p) => p.id === Number(projectId))?.projectName || '';
+
+   // 文件上传后自动填充文件名
+   useEffect(() => {
+      if (file) {
+         const fileNameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
+         form.setFieldsValue({ bidName: fileNameWithoutExt });
+      }
+   }, [file, form]);
+
+   const handleCategorySelect = (type: FileCategory) => {
+      setActiveCategory(type);
+      form.setFieldsValue({ fileCategory: type });
+   };
+
+   const handleFinish = async (values: BidUploadQueryParams) => {
+      if (!file) {
+         return;
+      }
+
+      const payload = {
+         ...values,
+         projectId: Number(projectId),
+      };
+
+      await onSubmit(payload, file);
+      form.resetFields();
+      setFile(null);
+   };
+
+   const handleCancel = () => {
+      form.resetFields();
+      navigate('/dashboard');
+   };
+
+   return (
+      <Card className={styles.cardWrapper}>
+         <Form
+            form={form}
+            layout='vertical'
+            onFinish={handleFinish}
+            initialValues={{ fileCategory: '标书' }}
+         >
+            {renderUpload(file, setFile)}
+
+            <div
+               className={styles.buttonContainer}
+               style={{
+                  flexDirection: isMobile ? 'column' : 'row',
+                  gap: isMobile ? '0' : '2rem',
+               }}
+            >
+               <Form.Item
+                  label='所属项目'
+                  style={{ flex: 1 }}
+               >
+                  <Input
+                     value={projectName}
+                     prefix={<FolderOutlined />}
+                     disabled
+                  />
+               </Form.Item>
+
+               <Form.Item
+                  label='文件类型'
+                  name='fileCategory'
+                  rules={[{ required: true, message: '请选择文件类型' }]}
+                  style={{ flex: 1 }}
+               >
+                  <div className={styles.buttonContainer}>
+                     <Button
+                        type={activeCategory === '标书' ? 'primary' : 'default'}
+                        onClick={() => handleCategorySelect('标书')}
+                        icon={<ShoppingCartOutlined style={{ fontSize: 20 }} />}
+                        style={{ flex: isMobile ? 1 : '' }}
+                     >
+                        标书
+                     </Button>
+
+                     <Button
+                        type={activeCategory === '合同' ? 'primary' : 'default'}
+                        onClick={() => handleCategorySelect('合同')}
+                        icon={<BankOutlined style={{ fontSize: 20 }} />}
+                        style={{ flex: isMobile ? 1 : '' }}
+                     >
+                        合同
+                     </Button>
+                  </div>
+               </Form.Item>
+            </div>
+
+            <div
+               className={styles.buttonContainer}
+               style={{
+                  flexDirection: isMobile ? 'column' : 'row',
+                  gap: isMobile ? '0' : '2rem',
+               }}
+            >
+               {/* 项目名称 */}
+               <Form.Item
+                  label='文件名称'
+                  name='bidName'
+                  style={{ flex: 1 }}
+                  rules={[{ required: true, message: '请输入文件名称' }]}
+               >
+                  <Input
+                     prefix={<ProjectOutlined />}
+                     placeholder='请输入文件名称'
+                  />
+               </Form.Item>
+
+               <Form.Item
+                  label='版本'
+                  name='version'
+                  style={{ flex: 1 }}
+                  rules={[
+                     { required: true, message: '请输入版本' },
+                     {
+                        pattern: /^[0-9]+$/,
+                        message: '版本只能包含数字',
+                     },
+                  ]}
+               >
+                  <Input
+                     prefix={<InfoOutlined />}
+                     placeholder='请输入版本(数字)'
+                  />
+               </Form.Item>
+            </div>
+
+            {/* 供应商与预算 */}
+            <div
+               className={styles.buttonContainer}
+               style={{
+                  flexDirection: isMobile ? 'column' : 'row',
+                  gap: isMobile ? '0' : '2rem',
+               }}
+            >
+               <Form.Item
+                  label='供应商名称(可选)'
+                  name='supplierName'
+                  style={{ flex: 1 }}
+               >
+                  <Input prefix={<UserOutlined />} placeholder='请输入名称' />
+               </Form.Item>
+
+               <Form.Item
+                  label='预算金额(可选)'
+                  name='budgetAmount'
+                  style={{ flex: 1 }}
+                  rules={[
+                     {
+                        pattern: /^\d+(\.\d{1,2})?$/,
+                        message: '请输入有效的金额数值',
+                     },
+                  ]}
+               >
+                  <Input
+                     prefix={<PayCircleOutlined />}
+                     placeholder='预算金额'
+                  />
+               </Form.Item>
+            </div>
+
+            {/* 提交按钮区 */}
+            <Form.Item style={{ marginBottom: 0 }}>
+               <div className={styles.buttonContainer}>
+                  <Button
+                     type='primary'
+                     htmlType='submit'
+                     loading={isPending}
+                     style={{ flex: 1 }}
+                  >
+                     上传
+                  </Button>
+
+                  <Button onClick={handleCancel} disabled={isPending}>
+                     取消
+                  </Button>
+               </div>
+            </Form.Item>
+         </Form>
+      </Card>
+   );
+};
