@@ -1,0 +1,10 @@
+audit:
+  embedding:
+    provider: local
+    local-dimension: 1024
+    openai:
+      base-url: https://api.openai.com/v1
+      api-key: ""
+      model: text-embedding-3-large
+      max-segments-per-batch: 16
+      timeout-ms: 60000

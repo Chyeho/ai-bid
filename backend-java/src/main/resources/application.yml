@@ -1,0 +1,171 @@
+spring:
+  profiles:
+    active: prod,embedding
+  application:
+    name: smart_tender
+  config:
+    import: optional:classpath:application-embedding.yml
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/smart_tender_system?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: "1234"
+    type: com.alibaba.druid.pool.DruidDataSource
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      #password: "123456"
+      database: 10
+      timeout: 10000ms
+      jedis:
+        pool:
+          max-active: 8
+          max-wait: -1ms
+          max-idle: 8
+          min-idle: 0
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+  flyway:
+    enabled: false
+    baseline-on-migrate: true
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:audit_task_event.sql #classpath:audit_task.sql,classpath:audit_issue.sql,
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
+# 文件存储配置
+file:
+  storage:
+    path: ${ST_DATA_ROOT:D:/smart-tender/data}
+    tender-dir: ${ST_UPLOAD_TENDER_DIR:tenders}
+    knowledge-dir: ${ST_UPLOAD_KB_DIR:knowledge/uploads}
+
+# MyBatis-Plus配置
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-aliases-package: com.ithsd.smart_tender.pojo.entity
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: isDeleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+      # 可选：开启参数打印（默认开启，可省略）
+    log-parameters: true
+      # 可选：开启格式化 SQL（便于阅读）
+    pretty-print: true
+    
+# 服务器配置
+server:
+  port: 8080
+
+#langchain4j:
+#  open-ai:
+#    embedding-model:
+#     base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+#     api-key: ${LANGCHAIN-API-KEY}
+#     model-name: text-embedding-v4
+#     log-requests: true
+#     log-responses: true
+#     max-segments-per-batch: 10
+
+# Milvus 配置
+milvus:
+  enabled: false
+  host: localhost
+  port: 19530
+  collection:
+    name: knowledge_base
+  dimension: 1024
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+rag:
+  base-url: http://localhost:8000
+  trigger:
+    enabled: true
+    endpoint: http://localhost:8000/rag-audit/trigger
+    timeout-ms: 180000
+    max-retry: 3
+    initial-backoff-ms: 1000
+    poll-delay-ms: 2000
+ 
+doc:
+  parse:
+    enabled: true
+
+preview:
+  cache:
+    path: ${ST_PREVIEW_CACHE_DIR:D:/smart-tender/data/preview-cache}
+  converter:
+    base-url: http://localhost:8088
+
+audit:
+  queue:
+    mode: async
+    stream-key: queue:audit:tasks
+    consumer-group: audit-task-workers
+    consumer-name-prefix: worker
+    batch-size: 5
+    block-ms: 1000
+    poll-delay-ms: 500
+    max-retry: 3
+    dlq-stream-key: queue:audit:tasks:dlq
+  sse:
+    replay-max-events: 100
+  async:
+    core-pool-size: 2
+    max-pool-size: 4
+    queue-capacity: 100
+    keep-alive-seconds: 60
+  rag:
+    enabled: false
+    top-k: 2
+    provider: stub
+    fallback-to-stub: true
+    http-enabled: false
+  extract:
+    provider: stub
+    fallback-to-stub: true
+    placeholder-enabled: false
+  chunk:
+    mode: hybrid
+    target-length: 1000
+    min-length: 800
+    max-length: 1200
+    overlap-ratio: 0.20
+    overlap-min-ratio: 0.15
+    overlap-max-ratio: 0.25
+    semantic-similarity-threshold: 0.72
+    semantic-min-length: 320
+    semantic-max-length: 1800
+    split-unit: sentence
+    title-injection: true
+    denoise-enabled: true
+    strategy-version: chunk-v1
+    stable-id-version: stable-id-v1
+  progress:
+    doc-extract: 10
+    rag: 15
+    budget: 25
+    demand: 25
+    legal: 25
