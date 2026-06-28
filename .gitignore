@@ -1,4 +1,11 @@
-/target
-/output
-/models
+# ── 后端 (Rust) ──
+backend/target
+backend/output
+backend/models
+
+# ── 前端 (React) ──
+frontend/node_modules
+frontend/dist
+
+# ── 共享 ──
 .env

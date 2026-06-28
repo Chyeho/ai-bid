@@ -31,6 +31,7 @@ use crate::agents::session_graph::SessionGraph;
 use crate::agents::tools::ToolRegistry;
 use crate::agents::trace::TraceLog;
 use crate::agents::types::*;
+use crate::paths::data_path_str;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1178,8 +1179,8 @@ impl Coordinator {
 
     /// 启动时从 agents/dynamic_agents.json 加载活跃的动态 Agent。
     pub fn load_dynamic_agents(&mut self) -> Result<usize> {
-        let path = "agents/dynamic_agents.json";
-        if !std::path::Path::new(path).exists() {
+        let path = data_path_str("agents/dynamic_agents.json");
+        if !std::path::Path::new(&path).exists() {
             return Ok(0);
         }
         let json = std::fs::read_to_string(path)?;
@@ -1269,9 +1270,9 @@ impl Coordinator {
 
     /// 将新 Agent 追加写入 dynamic_agents.json（上限 20 个，超出淘汰最旧）。
     fn append_dynamic_agent_to_file(&self, def: &DynamicAgentDefinition) {
-        let path = "agents/dynamic_agents.json";
-        let mut manifest: DynamicAgentManifest = if std::path::Path::new(path).exists() {
-            std::fs::read_to_string(path)
+        let path = data_path_str("agents/dynamic_agents.json");
+        let mut manifest: DynamicAgentManifest = if std::path::Path::new(&path).exists() {
+            std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or(DynamicAgentManifest {
@@ -1296,12 +1297,12 @@ impl Coordinator {
         }
 
         // 确保目录存在
-        if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Some(parent) = std::path::Path::new(&path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
         if let Ok(json) = serde_json::to_string_pretty(&manifest) {
-            let _ = std::fs::write(path, json);
+            let _ = std::fs::write(&path, json);
         }
     }
 
@@ -1823,18 +1824,18 @@ mod tests {
 
         // 注意: register_dynamic_agents 会写入 agents/dynamic_agents.json
         // 测试环境下我们先 backup 原文件，测试完恢复
-        let backup_path = "agents/dynamic_agents.json.bak";
-        let original_path = "agents/dynamic_agents.json";
-        let original_exists = std::path::Path::new(original_path).exists();
+        let backup_path = data_path_str("agents/dynamic_agents.json.bak");
+        let original_path = data_path_str("agents/dynamic_agents.json");
+        let original_exists = std::path::Path::new(&original_path).exists();
         if original_exists {
-            std::fs::rename(original_path, backup_path).ok();
+            std::fs::rename(&original_path, &backup_path).ok();
         }
 
         let registered = coordinator.register_dynamic_agents(&[finding]);
         assert_eq!(registered, 1, "应注册 1 个动态 Agent");
 
         // 验证文件被写入
-        let json = std::fs::read_to_string(original_path).expect("文件应存在");
+        let json = std::fs::read_to_string(&original_path).expect("文件应存在");
         let manifest: DynamicAgentManifest = serde_json::from_str(&json).expect("JSON 应合法");
         assert_eq!(manifest.agents.len(), 1);
         assert!(!manifest.agents[0].active, "新 Agent 的 active 应为 false");
@@ -1843,9 +1844,9 @@ mod tests {
         assert_eq!(manifest.agents[0].tool_names.len(), 4);
 
         // 清理恢复
-        std::fs::remove_file(original_path).ok();
+        std::fs::remove_file(&original_path).ok();
         if original_exists {
-            std::fs::rename(backup_path, original_path).ok();
+            std::fs::rename(&backup_path, &original_path).ok();
         }
     }
 
@@ -1884,7 +1885,7 @@ mod tests {
         let mut coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
 
         // 确保文件不存在（测试环境应该没有）
-        if std::path::Path::new("agents/dynamic_agents.json").exists() {
+        if std::path::Path::new(&data_path_str("agents/dynamic_agents.json")).exists() {
             // 跳过此测试以免影响已存在的文件
             return;
         }
@@ -1913,9 +1914,9 @@ mod tests {
             }],
         };
 
-        let backup_path = "agents/dynamic_agents.json.bak";
-        let original_path = "agents/dynamic_agents.json";
-        let original_exists = std::path::Path::new(original_path).exists();
+        let backup_path = data_path_str("agents/dynamic_agents.json.bak");
+        let original_path = data_path_str("agents/dynamic_agents.json");
+        let original_exists = std::path::Path::new(&original_path).exists();
         if original_exists {
             std::fs::rename(original_path, backup_path).ok();
         }

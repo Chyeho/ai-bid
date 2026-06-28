@@ -1,4 +1,5 @@
 pub mod bus;
+pub mod chat_agent;
 pub mod coordinator;
 pub mod fact_check;
 pub mod procedure;

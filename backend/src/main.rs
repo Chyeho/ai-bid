@@ -5,6 +5,7 @@ use std::path::Path;
 
 use ai_bid::domain::chunk::{Chunk, ChunkType, ChunkingConfig};
 use ai_bid::domain::raw_document::RawDocument;
+use ai_bid::paths::data_path_str;
 use ai_bid::services::chunking_service::chunk_sections;
 use ai_bid::services::docx_convert_service::convert_docx_to_pdf;
 use ai_bid::services::pdf_extract_service::{extract_pdf_to_raw_json, extract_with_python};
@@ -24,9 +25,11 @@ use ai_bid::agents::tools::search_knowledge::{
 };
 use ai_bid::agents::tools::read_section::ReadSectionTool;
 use ai_bid::agents::tools::output_finding::OutputFindingTool;
+use ai_bid::agents::tools::answer_user::AnswerUserTool;
 use ai_bid::agents::tools::ToolRegistry;
 use ai_bid::agents::trace::TraceLog;
-use ai_bid::agents::types::{CoordinatorConfig, CoordinatorOutput, ReviewClause};
+use ai_bid::agents::types::{ChatAgentConfig, CoordinatorConfig, CoordinatorOutput, ReviewClause};
+use ai_bid::agents::chat_agent::ChatAgent;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -187,12 +190,23 @@ impl ChunkingOutput {
 #[tokio::main]
 async fn main() -> Result<()> {
     // 加载 .env 文件（LLM API 密钥等配置）
+    // 依次尝试：当前目录 → data_dir（支持从 backend/ 子目录运行时找到根级 .env）
     dotenv::dotenv().ok();
+    let data_env = ai_bid::paths::data_dir().join(".env");
+    if data_env.exists() {
+        dotenv::from_path(data_env).ok();
+    }
 
-    // 从命令行参数或默认值获取输入路径
-    let input_path = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "tests/file/智慧教室环境改造工程.pdf".to_string());
+    // 解析命令行参数：flag 参数（如 --chat）与位置参数（文件路径）分离
+    let args: Vec<String> = env::args().collect();
+    let chat_mode = args.iter().any(|a| a == "--chat");
+    // 取第一个不以 -- 开头的参数作为文件路径
+    let input_path = args
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_else(|| data_path_str("tests/file/智慧教室环境改造工程.pdf"));
 
     let input = Path::new(&input_path);
     anyhow::ensure!(input.exists(), "文件不存在: {}", input.display());
@@ -230,7 +244,7 @@ async fn main() -> Result<()> {
 
     // ─── 阶段 1: PDF → RawDocument ───────────────────────────
 
-    let raw_json_dir = "output/raw_json".to_string();
+    let raw_json_dir = data_path_str("output/raw_json");
     fs::create_dir_all(&raw_json_dir)
         .with_context(|| format!("无法创建输出目录: {}", raw_json_dir))?;
     let raw_json_path = format!("{}/{}_raw.json", raw_json_dir, stem);
@@ -261,7 +275,7 @@ async fn main() -> Result<()> {
     println!("正在进行章节结构识别 (sectionize)...");
     let sections_output = sectionize(&raw_doc);
 
-    let sections_dir = "output/sections".to_string();
+    let sections_dir = data_path_str("output/sections");
     fs::create_dir_all(&sections_dir)
         .with_context(|| format!("无法创建输出目录: {}", sections_dir))?;
 
@@ -387,6 +401,11 @@ async fn main() -> Result<()> {
     // 确保孤儿 Section 也能接收表格内容注入。
 
     println!("正在注入表格内容到章节结构...");
+    // ★ 跨页表格合并：同一逻辑表格跨页时被 PDF 提取器拆散，先合并再注入
+    let cross_page_merged = ai_bid::services::sectionize_service::merge_cross_page_tables(&mut raw_doc);
+    if cross_page_merged > 0 {
+        println!("  已合并 {} 组跨页表格", cross_page_merged);
+    }
     ai_bid::services::sectionize_service::inject_tables_into_sections(
         &mut all_sections,
         &raw_doc,
@@ -409,7 +428,7 @@ async fn main() -> Result<()> {
     println!("正在进行条款级 Chunk 切分 (chunking)...");
     let chunks = chunk_sections(&all_sections, &chunking_config);
 
-    let chunks_dir = "output/chunks".to_string();
+    let chunks_dir = data_path_str("output/chunks");
     fs::create_dir_all(&chunks_dir)
         .with_context(|| format!("无法创建输出目录: {}", chunks_dir))?;
 
@@ -480,7 +499,7 @@ async fn main() -> Result<()> {
         )?
     };
 
-    let embeddings_dir = "output/embeddings".to_string();
+    let embeddings_dir = data_path_str("output/embeddings");
     ai_bid::services::embedding_service::save_index(&doc_index, &embeddings_dir, &stem)?;
     println!(
         "  索引完成: {} 条向量, 维度 {}",
@@ -551,6 +570,93 @@ async fn main() -> Result<()> {
         println!("  用法: $env:AIBID_AGENT=1; cargo run -- <文件路径>");
         println!();
         println!("  注意：Agent 模式需要设置 OPENAI_API_KEY 环境变量。");
+        return Ok(());
+    }
+
+    // ── 阶段 6b: ChatAgent 交互模式（--chat 标志）──
+    if chat_mode {
+        println!();
+        println!("══════════════════════════════════════════════");
+        println!("  阶段 6b: ChatAgent 交互模式");
+        println!("══════════════════════════════════════════════");
+        println!();
+
+        // 1. 构建 Chunk 查找表（read_section 工具复用）
+        let chunk_map: HashMap<String, Chunk> = chunks
+            .iter()
+            .map(|c| (c.chunk_id.clone(), c.clone()))
+            .collect();
+        let chunk_map = Arc::new(chunk_map);
+        let chunk_order: Vec<String> = chunks.iter().map(|c| c.chunk_id.clone()).collect();
+        let chunk_order = Arc::new(chunk_order);
+
+        // 2. 共享 DocumentVectorIndex（search_document 工具复用）
+        let doc_index = Arc::new(doc_index);
+
+        // 3. 共享嵌入客户端（search_document 查询编码用）
+        let agent_embed = Arc::new(embed_client);
+
+        // 4. 创建 LLM 客户端（Arc 共享）
+        let llm: Arc<dyn ai_bid::agents::react_loop::LlmClient> =
+            create_llm_client()?.into();
+
+        // 5. 搜索后端选择（复用阶段 6 逻辑）
+        let search_backend =
+            env::var("AIBID_SEARCH_BACKEND").unwrap_or_else(|_| "dashscope".to_string());
+
+        let shared_search_buffer: Option<Arc<SearchBuffer>> = if search_backend == "searxng" {
+            let url = env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+            Some(SearchBuffer::new(url))
+        } else {
+            None
+        };
+
+        let shared_dashscope_search: Option<Arc<DashScopeSearchBackend>> =
+            if search_backend == "dashscope" {
+                let ds = DashScopeSearchBackend::from_env()
+                    .expect("DashScope 搜索后端初始化失败。请设置 DASHSCOPE_API_KEY");
+                Some(Arc::new(ds))
+            } else {
+                None
+            };
+
+        // 6. 构建 ChatAgent 工具注册表（不含 output_finding，含 answer_user）
+        let mut chat_tools = ToolRegistry::new();
+        if search_backend == "dashscope" {
+            chat_tools.register(Box::new(SearchKnowledgeTool::with_dashscope(
+                shared_dashscope_search.expect("DashScope 未初始化"),
+            )));
+        } else {
+            chat_tools.register(Box::new(SearchKnowledgeTool::with_buffer(
+                shared_search_buffer.expect("SearchBuffer 未初始化"),
+            )));
+        }
+        chat_tools.register(Box::new(SearchDocumentTool::new(
+            Arc::clone(&doc_index),
+            Arc::clone(&agent_embed),
+        )));
+        chat_tools.register(Box::new(ReadSectionTool::new(
+            Arc::clone(&chunk_map),
+            Arc::clone(&chunk_order),
+        )));
+        chat_tools.register(Box::new(AnswerUserTool));
+
+        // 7. 创建 ChatAgent 并进入交互循环
+        let chat_config = ChatAgentConfig::default();
+        let chat_agent = ChatAgent::new(
+            chat_config,
+            llm,
+            chat_tools,
+            Some(Arc::clone(&doc_index)),   // P0: 自动 RAG 注入
+            Some(Arc::clone(&agent_embed)), // P0: 查询编码
+            Some(Arc::clone(&chunk_map)),   // P3: 引用验证
+        )?;
+
+        println!("  已加载 {} 个 Chunk", chunk_order.len());
+        println!("  搜索后端: {}", search_backend);
+        println!();
+
+        chat_agent.chat_loop().await?;
         return Ok(());
     }
 
@@ -732,8 +838,8 @@ async fn main() -> Result<()> {
 
     // 8. 输出结果
     let findings = &output.findings;
-    let findings_dir = "output/findings";
-    fs::create_dir_all(findings_dir)
+    let findings_dir = data_path_str("output/findings");
+    fs::create_dir_all(&findings_dir)
         .with_context(|| format!("无法创建输出目录: {}", findings_dir))?;
     let findings_path = format!("{}/{}_findings.json", findings_dir, stem);
     let findings_json = serde_json::to_string_pretty(&findings)?;

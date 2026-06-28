@@ -35,6 +35,7 @@ use ai_bid::agents::tools::ToolRegistry;
 use ai_bid::domain::chunk::{Chunk, ChunkType};
 use ai_bid::agents::trace::TraceLog;
 use ai_bid::agents::types::*;
+use ai_bid::paths::data_path_str;
 use ai_bid::services::llm_client::create_llm_client;
 use std::collections::HashMap;
 use std::env;
@@ -757,7 +758,8 @@ async fn test_dynamic(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Op
     }
 
     // Check 3: dynamic_agents.json 文件状态
-    let dynamic_file = Path::new("agents/dynamic_agents.json");
+    let dynamic_file_path = data_path_str("agents/dynamic_agents.json");
+    let dynamic_file = Path::new(&dynamic_file_path);
     if dynamic_file.exists() {
         match fs::read_to_string(dynamic_file) {
             Ok(content) => {
@@ -894,8 +896,10 @@ async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
     // ── 场景 4: JSON 损坏不 panic ──
     {
         // 备份 + 损坏 + 测试 + 恢复
-        let dynamic_file = Path::new("agents/dynamic_agents.json");
-        let backup_file = Path::new("agents/dynamic_agents.json.test_bak");
+        let dynamic_file_path = data_path_str("agents/dynamic_agents.json");
+    let dynamic_file = Path::new(&dynamic_file_path);
+        let backup_file_path = data_path_str("agents/dynamic_agents.json.test_bak");
+        let backup_file = Path::new(&backup_file_path);
 
         let original_exists = dynamic_file.exists();
         if original_exists {
@@ -943,13 +947,13 @@ async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
 
     // ── 场景 5: 输出文件自动创建目录 ──
     {
-        let test_dir = "output/test_fault_output";
-        let result = fs::create_dir_all(test_dir);
+        let test_dir = data_path_str("output/test_fault_output");
+        let result = fs::create_dir_all(&test_dir);
         if result.is_ok() {
             checks.push(TestCheck::pass(test_name, "output_dir_auto_create",
                 "create_dir_all 成功 — 输出目录自动创建"));
             // 清理
-            fs::remove_dir_all(test_dir).ok();
+            fs::remove_dir_all(&test_dir).ok();
         } else {
             checks.push(TestCheck::fail(test_name, "output_dir_auto_create",
                 &format!("create_dir_all 失败: {:?}", result.err())));

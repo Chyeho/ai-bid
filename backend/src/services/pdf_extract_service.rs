@@ -26,6 +26,7 @@ use uuid::Uuid;
 use crate::domain::raw_document::{
     BBox, BlockType, RawBlock, RawDocument, RawLine, RawPage, RawRect, RawTable, RawWord,
 };
+use crate::paths::data_path_str;
 
 // ---------- 文本清洗工具 ----------
 
@@ -345,10 +346,10 @@ pub fn extract_pdf_to_raw_json(path: &str) -> Result<RawDocument> {
 
 /// 用 Python pdfplumber 兜底提取 PDF 内容。
 pub fn extract_with_python(input_path: &str, output_path: &str) -> Result<()> {
-    let script = "scripts/pdf_extract.py";
+    let script = data_path_str("scripts/pdf_extract.py");
 
     let output = Command::new("python")
-        .args([script, input_path, output_path])
+        .args([&script, input_path, output_path])
         .output()
         .with_context(|| format!("无法执行 Python 脚本: {}", script))?;
 

@@ -48,7 +48,7 @@ pub struct LlmResponse {
 }
 
 impl LlmResponse {
-    /// 检查是否包含 output_finding 工具调用（触发循环退出）。
+    /// 检查是否包含 output_finding 工具调用（触发批量审查循环退出）。
     pub fn has_output_finding(&self) -> bool {
         self.tool_calls.iter().any(|tc| tc.name == "output_finding")
     }
@@ -58,6 +58,19 @@ impl LlmResponse {
         self.tool_calls
             .iter()
             .find(|tc| tc.name == "output_finding")
+            .map(|tc| &tc.arguments)
+    }
+
+    /// 检查是否包含 answer_user 工具调用（触发 ChatAgent 循环退出）。
+    pub fn has_answer_user(&self) -> bool {
+        self.tool_calls.iter().any(|tc| tc.name == "answer_user")
+    }
+
+    /// 获取第一个 answer_user 工具调用的 arguments（构建 ChatResponse 用）。
+    pub fn get_answer(&self) -> Option<&serde_json::Value> {
+        self.tool_calls
+            .iter()
+            .find(|tc| tc.name == "answer_user")
             .map(|tc| &tc.arguments)
     }
 }
@@ -136,6 +149,55 @@ pub enum ChatMessage {
         tool_call_id: String,
         content: String,
     },
+}
+
+// ─── 共享 Helper ───────────────────────────────────────────────
+
+/// 执行 LLM 返回的工具调用并将结果追加到对话历史。
+///
+/// ★ 这是 ReActLoop 和 ChatAgent 共享的公共逻辑。
+/// 批量审查特有的逻辑（搜索缓存、空结果升级、打印日志）
+/// 保留在 ReActLoop::react_loop() 内部，不纳入此 helper。
+pub async fn execute_tool_calls(
+    response: &LlmResponse,
+    tools: &crate::agents::tools::ToolRegistry,
+    conversation: &mut Vec<ChatMessage>,
+) -> Result<()> {
+    let assistant_tool_calls = response.tool_calls.clone();
+    conversation.push(ChatMessage::Assistant {
+        content: response.content.clone(),
+        tool_calls: if assistant_tool_calls.is_empty() {
+            None
+        } else {
+            Some(assistant_tool_calls.clone())
+        },
+    });
+
+    // 如果没有工具调用，提示继续
+    if assistant_tool_calls.is_empty() {
+        conversation.push(ChatMessage::User {
+            content: "请继续——调用工具搜索证据或输出结论。".to_string(),
+        });
+        return Ok(());
+    }
+
+    for tc in &assistant_tool_calls {
+        let result = if let Some(tool) = tools.get(&tc.name) {
+            match tool.execute(tc.arguments.clone()).await {
+                Ok(val) => val,
+                Err(e) => serde_json::json!({ "error": format!("{}", e) }),
+            }
+        } else {
+            serde_json::json!({
+                "error": format!("工具 '{}' 未注册", tc.name)
+            })
+        };
+        conversation.push(ChatMessage::Tool {
+            tool_call_id: tc.id.clone(),
+            content: serde_json::to_string(&result).unwrap_or_default(),
+        });
+    }
+    Ok(())
 }
 
 // ─── ReActLoop ─────────────────────────────────────────────────

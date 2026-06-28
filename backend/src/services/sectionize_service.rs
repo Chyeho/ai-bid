@@ -26,7 +26,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
-use crate::domain::raw_document::{BlockType, RawDocument, RawTable};
+use crate::domain::raw_document::{BBox, BlockType, RawDocument, RawTable};
+#[cfg(test)]
+use crate::paths::data_path_str;
 
 // ─── 标题模式定义 ─────────────────────────────────────────────
 
@@ -88,6 +90,76 @@ struct HeadingPattern {
     pattern_type: &'static str,
     level: u8,
     regex: Regex,
+}
+
+// ─── 行内标题拆分 ─────────────────────────────────────────────
+
+/// 行内标题拆分正则：检测右括号后紧跟的数字编号。
+///
+/// 匹配 `)` 或 `）` 后紧跟的 `数字.` / `数字、` / `数字)` / `数字）` 模式。
+/// 用于处理 PDF 提取中标题与前文被合并到同一行的情况。
+///
+/// # 示例
+///
+/// ```text
+/// 输入: "采购包1（...二期））1.主要商务要求"
+/// 输出: ["采购包1（...二期））", "1.主要商务要求"]
+/// ```
+static INLINE_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[)）](\d+[.、)）])").expect("inline heading regex")
+});
+
+/// 将行内标题从前置内容中拆分出来。
+///
+/// 遍历行中每个 `)数字.` / `)数字、` 模式，在右括号后将行切开。
+/// 拆分出的标题行（以数字编号开头）会被后续的 [`HEADING_PATTERNS`] 正常匹配。
+///
+/// 无匹配时返回原行（单元素 Vec）。
+fn split_inline_headings(line: &str) -> Vec<String> {
+    let matches: Vec<(usize, usize)> = INLINE_HEADING_RE
+        .find_iter(line)
+        .map(|m| {
+            // 右括号的字节位置（也是 split 点之后的位置）
+            let paren_byte_start = m.start();
+            let paren_char = line[paren_byte_start..].chars().next().unwrap();
+            let paren_byte_end = paren_byte_start + paren_char.len_utf8();
+            // 标题数字的起始位置 = 右括号之后
+            let heading_byte_start = paren_byte_end;
+            (paren_byte_end, heading_byte_start)
+        })
+        .collect();
+
+    if matches.is_empty() {
+        return vec![line.to_string()];
+    }
+
+    let mut result = Vec::new();
+    let mut last_start = 0;
+
+    for (prefix_end, heading_start) in &matches {
+        // 前缀部分（含右括号）
+        if *prefix_end > last_start {
+            let prefix = line[last_start..*prefix_end].to_string();
+            if !prefix.trim().is_empty() {
+                result.push(prefix);
+            }
+        }
+        last_start = *heading_start;
+    }
+
+    // 最后一个标题（从 heading_start 到行尾）
+    if last_start < line.len() {
+        let remainder = line[last_start..].trim().to_string();
+        if !remainder.is_empty() {
+            result.push(remainder);
+        }
+    }
+
+    if result.is_empty() {
+        vec![line.to_string()]
+    } else {
+        result
+    }
 }
 
 // ─── 输出数据结构 ─────────────────────────────────────────────
@@ -191,9 +263,16 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
     let mut candidates: Vec<HeadingCandidate> = Vec::new();
 
     for (block, page_idx) in &all_blocks {
-        // 取 block 文本的第一行进行匹配
-        // 同时检查每一行（某些 block 可能包含多个内嵌标题）
-        for (_line_idx, line) in block.text.lines().enumerate() {
+        // ★ P1: 行内标题预拆分 — 将 "）1.主要商务要求" 拆为独立行
+        let expanded_lines: Vec<String> = block
+            .text
+            .lines()
+            .flat_map(|l| split_inline_headings(l))
+            .collect();
+
+        let mut block_has_candidate = false;
+
+        for line in &expanded_lines {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -259,8 +338,34 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
                             block_id: block.id.clone(),
                         });
                         found = true;
+                        block_has_candidate = true;
                         break; // 一行只匹配一个模式
                     }
+                }
+            }
+        }
+
+        // ★ A2: 无编号标题 — 利用 PDF 提取器的 block type 信号
+        // 如果 block 被标注为 heading 但所有行均未匹配任何编号标题模式，
+        // 将首行短文本作为 plain_heading 候选。
+        // 典型场景："付款方式""验收要求" 等无编号的表格列标题。
+        if !block_has_candidate && block.block_type == BlockType::Heading {
+            if let Some(first_line) = block
+                .text
+                .lines()
+                .map(|l| l.trim())
+                .find(|l| !l.is_empty() && !is_page_noise(l))
+            {
+                let char_count = first_line.chars().count();
+                // 仅接受短文本（≤ 30 字符），避免将长段落误判为标题
+                if char_count >= 2 && char_count <= 30 {
+                    candidates.push(HeadingCandidate {
+                        level: 5, // 最低层，挂到最近的上级 section 下
+                        title: first_line.to_string(),
+                        pattern: "plain_heading",
+                        page: *page_idx,
+                        block_id: block.id.clone(),
+                    });
                 }
             }
         }
@@ -1365,6 +1470,94 @@ pub fn detect_pipe_tables(raw_doc: &mut RawDocument) -> usize {
     total_detected
 }
 
+// ─── 跨页表格合并 ─────────────────────────────────────────────
+
+/// 合并跨页断裂的表格。
+///
+/// PDF 提取器按页提取表格，同一逻辑表格跨页时会被拆成多个独立 RawTable。
+/// 此函数检测连续页面上结构一致（列数相同、首列不重复表头）的表格并合并。
+///
+/// # 合并条件
+///
+/// 1. 连续两页（N, N+1）各有至少一张表
+/// 2. 页 N 的最后一张表与页 N+1 的第一张表**列数相同**
+/// 3. 页 N+1 的表首行首单元格 ≠ 页 N 的表首行首单元格（否则是重复表头，非延续）
+///
+/// # 行为
+///
+/// - 将页 N+1 的首表行追加到页 N 的末表
+/// - 更新页 N 末表的 bbox 为两张表的并集
+/// - 从页 N+1 删除已合并的表
+/// - 递归尝试，直到无法再合并
+pub fn merge_cross_page_tables(raw_doc: &mut RawDocument) -> usize {
+    if raw_doc.pages.len() < 2 {
+        return 0;
+    }
+
+    let mut merge_count = 0;
+    let page_count = raw_doc.pages.len();
+
+    // 遍历所有连续页面对
+    for n in 0..(page_count - 1) {
+        // 需要安全地同时借用 pages[n] 和 pages[n+1]
+        // 使用 split_at_mut 实现
+        let (left_pages, right_pages) = raw_doc.pages.split_at_mut(n + 1);
+        let page_n = &mut left_pages[n];
+        let page_n1 = &mut right_pages[0];
+
+        if page_n.tables.is_empty() || page_n1.tables.is_empty() {
+            continue;
+        }
+
+        let last_idx = page_n.tables.len() - 1;
+
+        // 先提取比较所需的信息（不可变借用）
+        let cols_n = page_n.tables[last_idx].rows.first().map(|r| r.len()).unwrap_or(0);
+        let cols_n1 = page_n1.tables[0].rows.first().map(|r| r.len()).unwrap_or(0);
+        if cols_n == 0 || cols_n != cols_n1 {
+            continue;
+        }
+
+        let first_cell_n = page_n.tables[last_idx].rows.first()
+            .and_then(|r| r.first())
+            .and_then(|c| c.as_deref())
+            .unwrap_or("")
+            .to_string();
+        let first_cell_n1 = page_n1.tables[0].rows.first()
+            .and_then(|r| r.first())
+            .and_then(|c| c.as_deref())
+            .unwrap_or("")
+            .to_string();
+        if first_cell_n == first_cell_n1 && !first_cell_n.is_empty() {
+            continue;
+        }
+
+        // 提取 n1 表的行（take 避免 clone）；bbox 引用读取
+        let n1_rows = std::mem::take(&mut page_n1.tables[0].rows);
+        let n1_bbox_ref = &page_n1.tables[0].bbox; // 借用，不移出
+
+        // 更新 bbox 为两张表的并集
+        {
+            let bbox_n = &page_n.tables[last_idx].bbox;
+            if let (Some(bb_n), Some(bb_n1)) = (bbox_n, n1_bbox_ref) {
+                page_n.tables[last_idx].bbox = Some(BBox {
+                    x0: bb_n.x0.min(bb_n1.x0),
+                    top: bb_n.top.min(bb_n1.top),
+                    x1: bb_n.x1.max(bb_n1.x1),
+                    bottom: bb_n.bottom.max(bb_n1.bottom),
+                });
+            }
+        }
+
+        page_n.tables[last_idx].rows.extend(n1_rows);
+        // n1 表已被清空（rows taken），移除它
+        page_n1.tables.remove(0);
+        merge_count += 1;
+    }
+
+    merge_count
+}
+
 // ─── 表格内容注入（方案二）─────────────────────────────────────
 
 /// 将 RawDocument 中的表格内容注入到 Section 树的 body_text 中。
@@ -1604,5 +1797,269 @@ mod tests {
     fn test_article_pattern() {
         let pat = &HEADING_PATTERNS[7];
         assert!(pat.regex.is_match("第九条工程的支付、结算"));
+    }
+
+    // ─── A1: split_inline_headings 测试 ─────────────────────────
+
+    #[test]
+    fn test_split_inline_headings_no_match() {
+        // 普通行无右括号+数字标题模式 → 原样返回
+        let result = split_inline_headings("普通的正文内容");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "普通的正文内容");
+    }
+
+    #[test]
+    fn test_split_inline_headings_basic() {
+        // 采购包名后紧跟 "1.主要商务要求"
+        let result = split_inline_headings(
+            "采购包1（东莞理工学院松山湖校区智慧教室环境改造工程（二期））1.主要商务要求",
+        );
+        assert_eq!(result.len(), 2, "应拆分为前缀和标题两部分，实际: {:?}", result);
+        assert!(result[0].contains("（二期））"), "前缀应包含右括号，实际: {}", result[0]);
+        assert_eq!(result[1], "1.主要商务要求", "标题应从数字开始，实际: {}", result[1]);
+    }
+
+    #[test]
+    fn test_split_inline_headings_heading_already_at_start() {
+        // 标题已在行首 → 不应被拆分（没有前置右括号）
+        let result = split_inline_headings("1.具有良好的商业信誉和健全的财务会计制度；");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "1.具有良好的商业信誉和健全的财务会计制度；");
+    }
+
+    #[test]
+    fn test_split_inline_headings_plain_text_no_paren() {
+        // 行中包含数字编号但前面不是右括号（是冒号）
+        let result = split_inline_headings("条件包括：1.具有良好的商业信誉");
+        assert_eq!(result.len(), 1, "冒号不是右括号，不应拆分");
+    }
+
+    #[test]
+    fn test_split_inline_headings_empty_line() {
+        let result = split_inline_headings("");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_empty());
+    }
+
+    // ─── A1 + A2: sectionize 集成测试 ───────────────────────────
+
+    /// 构造包含内联标题的 RawDocument 用于集成验证。
+    fn make_raw_doc_with_inline_heading() -> RawDocument {
+        use crate::domain::raw_document::{BBox, RawBlock, RawPage};
+        RawDocument {
+            document_id: "test_inline".to_string(),
+            source_path: String::new(),
+            pages: vec![RawPage {
+                page_index: 0,
+                width: 595.0,
+                height: 842.0,
+                text: String::new(),
+                words: vec![],
+                blocks: vec![
+                    RawBlock {
+                        id: "b_0_0".to_string(),
+                        block_type: BlockType::Heading,
+                        text: "六、《资格条件承诺函》格式".to_string(),
+                        bbox: BBox { x0: 90.0, top: 75.0, x1: 350.0, bottom: 100.0 },
+                    },
+                    RawBlock {
+                        id: "b_0_1".to_string(),
+                        block_type: BlockType::Paragraph,
+                        text: "采购包1（东莞理工学院）1.主要商务要求".to_string(),
+                        bbox: BBox { x0: 90.0, top: 560.0, x1: 500.0, bottom: 580.0 },
+                    },
+                ],
+                tables: vec![],
+                lines: vec![],
+                rects: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn test_sectionize_detects_inline_heading() {
+        let doc = make_raw_doc_with_inline_heading();
+        let output = sectionize(&doc);
+
+        // 应检测到 2 个标题：六、... 和 1.主要商务要求
+        // 遍历树查找 "1.主要商务要求"
+        let titles: Vec<String> = collect_all_titles(&output.sections);
+        assert!(
+            titles.iter().any(|t| t.contains("1.主要商务要求")),
+            "应检测到内联标题 '1.主要商务要求'，实际标题: {:?}",
+            titles
+        );
+    }
+
+    #[test]
+    fn test_sectionize_detects_plain_heading() {
+        let doc = make_raw_doc_with_inline_heading();
+        let output = sectionize(&doc);
+
+        let orphans = output.stats.orphan_blocks;
+        // "1.主要商务要求" 应被正确识别，不应有过多孤儿 block
+        assert!(
+            orphans <= 1,
+            "孤儿 block 不应超过 1 个（可能有页码噪声），实际: {}",
+            orphans
+        );
+    }
+
+    /// 递归收集所有 section 的 title。
+    fn collect_all_titles(sections: &[Section]) -> Vec<String> {
+        let mut titles = Vec::new();
+        for s in sections {
+            titles.push(s.title.clone());
+            titles.extend(collect_all_titles(&s.children));
+        }
+        titles
+    }
+
+    /// 递归收集所有 section 的 (pattern, title) 对，用于调试。
+    fn collect_pattern_titles(sections: &[Section]) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        for s in sections {
+            result.push((s.pattern.clone(), s.title.clone()));
+            result.extend(collect_pattern_titles(&s.children));
+        }
+        result
+    }
+
+    // ─── 端到端回归测试：使用实际 PDF 的 RawDocument ─────────────
+
+    /// 加载已有的 raw JSON，运行 sectionize，验证关键标题被正确识别。
+    /// 此测试依赖 `output/raw_json/智慧教室环境改造工程_raw.json`。
+    #[test]
+    fn test_real_pdf_detects_inline_and_plain_headings() {
+        let raw_path = data_path_str("output/raw_json/智慧教室环境改造工程_raw.json");
+        let raw_json = match std::fs::read_to_string(raw_path) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("跳过: raw JSON 文件不存在 ({})", raw_path);
+                return;
+            }
+        };
+        let doc: RawDocument = match serde_json::from_str(&raw_json) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("跳过: raw JSON 解析失败: {}", e);
+                return;
+            }
+        };
+
+        let output = sectionize(&doc);
+        let titles = collect_all_titles(&output.sections);
+        let pattern_titles = collect_pattern_titles(&output.sections);
+
+        // ★ 验证 A1: "1.主要商务要求" 被检测为独立 section
+        let has_business_req = titles.iter().any(|t| t.contains("1.主要商务要求"));
+        assert!(
+            has_business_req,
+            "A1 失败: 未检测到 '1.主要商务要求'。\n\
+             实际标题列表 (共 {} 个):\n{:#?}\n\
+             完整 pattern+title:\n{:#?}",
+            titles.len(),
+            titles,
+            pattern_titles,
+        );
+
+        // ★ 验证 A2: "付款方式" 被检测为 plain_heading section
+        let has_payment = titles.iter().any(|t| t == "付款方式");
+        assert!(
+            has_payment,
+            "A2 失败: 未检测到 '付款方式' (plain_heading)。\n\
+             实际标题列表:\n{:#?}",
+            titles,
+        );
+
+        // ★ 验证层级关系: "付款方式" 应在 "1.主要商务要求" 下
+        // （"付款方式" 的 section path 祖先应包含 "1.主要商务要求"）
+        if has_business_req && has_payment {
+            let payment_under_business = verify_child_of(&output.sections, "1.主要商务要求", "付款方式");
+            assert!(
+                payment_under_business,
+                "层级关系错误: '付款方式' 应位于 '1.主要商务要求' 下"
+            );
+        }
+
+        println!(
+            "✅ 端到端验证通过: {} 个 section, {} 个孤儿 block",
+            output.stats.total_sections, output.stats.orphan_blocks
+        );
+    }
+
+    /// 验证 `child_title` 是否在 `parent_title_contains` 的子树中。
+    fn verify_child_of(sections: &[Section], parent_contains: &str, child_title: &str) -> bool {
+        for s in sections {
+            if s.title.contains(parent_contains) {
+                let children_titles = collect_all_titles(&s.children);
+                return children_titles.iter().any(|t| t == child_title);
+            }
+            if verify_child_of(&s.children, parent_contains, child_title) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 验证跨页表格合并：t_9_0（标的提供时间/地点）+ t_10_0（付款方式/验收要求）
+    /// 是同一张"主要商务要求"表格，合并后 t_9_0 应包含全部 4 行。
+    #[test]
+    fn test_merge_cross_page_tables_real_pdf() {
+        let raw_path = data_path_str("output/raw_json/智慧教室环境改造工程_raw.json");
+        let raw_json = match std::fs::read_to_string(raw_path) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("跳过: raw JSON 文件不存在 ({})", raw_path);
+                return;
+            }
+        };
+        let mut doc: RawDocument = match serde_json::from_str(&raw_json) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("跳过: raw JSON 解析失败: {}", e);
+                return;
+            }
+        };
+
+        // 记录合并前各页表格数
+        let tables_before: Vec<usize> = doc.pages.iter().map(|p| p.tables.len()).collect();
+
+        let merged = merge_cross_page_tables(&mut doc);
+
+        let tables_after: Vec<usize> = doc.pages.iter().map(|p| p.tables.len()).collect();
+
+        // 验证：应该有合并发生（page 9 + page 10 的表格被合并）
+        assert!(merged > 0,
+            "应至少合并 1 组跨页表格。\n\
+             合并前各页表格数: {:?}\n\
+             合并后各页表格数: {:?}",
+            tables_before, tables_after);
+
+        // 验证 page 9 (index 9) 的最后一个表格包含了"付款方式"和"验收要求"
+        let page_9 = &doc.pages[9];
+        let last_table = page_9.tables.last().expect("page 9 应有表格");
+        let all_cells: Vec<String> = last_table.rows.iter()
+            .flat_map(|r| r.iter())
+            .filter_map(|c| c.as_deref())
+            .map(|s| s.chars().take(50).collect())
+            .collect();
+
+        let has_payment = all_cells.iter().any(|c| c.contains("付款方式"));
+        let has_acceptance = all_cells.iter().any(|c| c.contains("验收要求"));
+        let has_delivery_time = all_cells.iter().any(|c| c.contains("标的提供的时间"));
+
+        assert!(has_delivery_time,
+            "合并后表格应包含 '标的提供的时间'（来自原 t_9_0）。\n单元格: {:?}", all_cells);
+        assert!(has_payment,
+            "合并后表格应包含 '付款方式'（来自原 t_10_0）。\n单元格: {:?}", all_cells);
+        assert!(has_acceptance,
+            "合并后表格应包含 '验收要求'（来自原 t_10_0）。\n单元格: {:?}", all_cells);
+
+        println!(
+            "✅ 跨页表格合并测试通过: {} 组合并，合并前后表格数 {:?} → {:?}",
+            merged, tables_before, tables_after
+        );
     }
 }

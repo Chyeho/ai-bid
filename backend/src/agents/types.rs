@@ -8,6 +8,8 @@
 //! - [`AgentId`] — Agent 身份枚举 (8 种 Agent + BlindSpot)
 //! - [`AgentDefinition`] — Agent 静态定义 (Strategy 模式)
 //! - [`SessionGraph`] 相关类型 — ChunkNode, RiskNode, LinkedChunk, ClauseContext, GraphSnapshot
+//! - [`TextSelection`] / [`ChatResponse`] / [`BlockRef`] / [`KnowledgeRef`] — ChatAgent 类型
+//! - [`ChatAgentConfig`] — ChatAgent 运行时配置
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -785,6 +787,117 @@ impl Default for GraphSnapshot {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ─── ChatAgent 类型 ──────────────────────────────────────────────
+
+/// 用户在 PDF 上划词选中的文本。可为 None（纯对话模式）。
+///
+/// 对标 AI 编程工具的"划词 + 提问"交互。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSelection {
+    /// 选中的原文
+    pub text: String,
+    /// 选中文本对应的 block_id 列表
+    pub block_ids: Vec<String>,
+    /// 起始页码 (0-based)
+    pub page: usize,
+    /// 选区包围盒坐标（前端高亮定位用，复用 RawDocument 的 BBox）
+    pub bbox: Option<BBox>,
+}
+
+/// 选区包围盒（简化版，用于 ChatAgent 类型。完整版见 domain::raw_document::BBox）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BBox {
+    pub x0: f64,
+    pub top: f64,
+    pub x1: f64,
+    pub bottom: f64,
+}
+
+/// ChatAgent 的返回结构。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatResponse {
+    /// 自然语言回答（含 [b_xxx] 标记 → 前端渲染链接）
+    pub answer: String,
+    /// 原文引用（前端按 block_id 高亮 PDF）
+    pub references: Vec<BlockRef>,
+    /// 法规/案例引用
+    pub knowledge_refs: Vec<KnowledgeRef>,
+    /// 置信度（仅合规判断时）
+    pub confidence: Option<f32>,
+    /// 建议下一步操作
+    pub suggested_actions: Vec<String>,
+}
+
+/// 原文引用 — 前端用 block_id 查询 bbox 渲染 PDF 高亮。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockRef {
+    /// 前端查询 bbox 渲染高亮
+    pub block_id: String,
+    /// 精确引用的文字片段
+    pub quote: String,
+    /// 上下文（200 字）
+    pub snippet: String,
+    /// 所在页码 (0-based)
+    pub page: usize,
+}
+
+/// 外部知识引用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeRef {
+    /// "law" | "case" | "negative_list"
+    pub ref_type: String,
+    /// "《政府采购法实施条例》第20条"
+    pub title: String,
+    /// 摘录
+    pub excerpt: String,
+    /// 来源 URL
+    pub source_url: Option<String>,
+}
+
+/// ChatAgent 运行时配置。
+#[derive(Debug, Clone)]
+pub struct ChatAgentConfig {
+    /// 最大 ReAct 轮次，默认 12（对话常需多轮搜索）
+    pub max_turns: usize,
+    /// 对话压缩阈值（tokens），默认 150_000。★ 实现推迟到 Phase 3
+    pub compaction_threshold: usize,
+    /// 压缩后保留最近轮次，默认 5。★ 实现推迟到 Phase 3
+    pub compaction_keep_recent: usize,
+    /// 用户偏好文件路径
+    pub preferences_path: String,
+    /// 项目配置文件路径
+    pub project_config_path: String,
+}
+
+impl Default for ChatAgentConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: 12,
+            compaction_threshold: 150_000,
+            compaction_keep_recent: 5,
+            preferences_path: ".ai-bid/user-preferences.md".to_string(),
+            project_config_path: ".ai-bid/review-config.md".to_string(),
+        }
+    }
+}
+
+/// ChatAgent 调用的性能 profile（`_profile` 前缀，不暴露给 LLM）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatProfile {
+    /// 实际执行轮次
+    pub total_turns: usize,
+    /// 总耗时 (ms)
+    pub total_duration_ms: u64,
+    /// 调用的工具列表
+    pub tool_calls: Vec<String>,
+    /// web_search 次数
+    pub search_count: usize,
+    /// search_document 次数
+    pub document_search_count: usize,
+    /// read_section 次数
+    pub read_section_count: usize,
 }
 
 // ─── 测试 ────────────────────────────────────────────────────────
