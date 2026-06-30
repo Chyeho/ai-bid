@@ -1,14 +1,11 @@
 import React from 'react';
-import { Spin, Empty, Typography } from 'antd';
+import { Spin, Empty } from 'antd';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { FilePdfOutlined } from '@ant-design/icons';
 import { useStyles } from '../../style';
 import { usePdfFlow } from '../../hooks/usePdfFlow';
 import { PdfToolbar } from './PdfToolbar';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
-
-const { Title } = Typography;
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
    'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -22,6 +19,15 @@ interface PdfPreviewProps {
 }
 
 type HighlightStatus = 'idle' | 'exact_hit' | 'token_fallback_hit' | 'miss';
+
+/** BBox 坐标数据（来自后端 API，PDF points 坐标系） */
+export type BBoxData = {
+  x0: number;
+  top: number;
+  x1: number;
+  bottom: number;
+  pageWidth: number;
+};
 
 type HighlightBox = {
    left: number;
@@ -45,6 +51,8 @@ type PageTextIndex = {
 
 export interface PdfPreviewRef {
    jumpToPage: (page: number, highlightText?: string, fallbackTokens?: string[]) => void;
+   /** BBox-based 精确高亮：直接按坐标渲染高亮矩形（PDF points → DOM 像素） */
+   highlightBboxes: (page: number, bboxes: BBoxData[]) => void;
 }
 
 const normalizeHighlightText = (value?: string): string => {
@@ -813,31 +821,68 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
                scrollFirstHitIntoView(page);
             }, 140);
          },
+         /** BBox-based 精确高亮：跳过文本搜索，直接按坐标渲染矩形 overlay。 */
+         highlightBboxes: (page: number, bboxes: BBoxData[]) => {
+            if (!bboxes.length || page == null || page < 0) return;
+            // 1. 清旧高亮，跳到目标页
+            setHighlightBoxesByPage({});
+            setHighlightStatus('idle');
+            setHighlightPage(page);
+            setHighlightVersion((v) => v + 1);
+            jumpToPage(page);
+
+            // 2. 获取页面渲染后的实际尺寸，计算 PDF→DOM scale
+            window.setTimeout(() => {
+               const pageEl = containerRef.current?.querySelector(
+                  `[data-page-num="${page}"]`
+               ) as HTMLElement | null;
+               if (!pageEl) return;
+               const renderedWidth = pageEl.clientWidth;
+               if (renderedWidth <= 0) return;
+
+               // 3. 将 PDF points → DOM 像素 (scale = renderedPx / originalPt)
+               const highlightBoxes: HighlightBox[] = bboxes.map((b, idx) => {
+                  const scaleFactor = renderedWidth / (b.pageWidth || 595);
+                  return {
+                     left: b.x0 * scaleFactor,
+                     top: b.top * scaleFactor,
+                     width: Math.max(1, (b.x1 - b.x0) * scaleFactor),
+                     height: Math.max(1, (b.bottom - b.top) * scaleFactor),
+                     primary: idx === 0,
+                  };
+               });
+
+               setHighlightBoxesByPage((prev) => ({
+                  ...prev,
+                  [page]: highlightBoxes,
+               }));
+               setHighlightStatus('exact_hit');
+               console.info(
+                  '[pdf-highlight] engine=bbox page=%s boxes=%s scale=%.3f',
+                  page, highlightBoxes.length, highlightBoxes.length > 0
+                     ? (renderedWidth / (bboxes[0].pageWidth || 595))
+                     : 0
+               );
+
+               // 4. 滚动到第一个高亮区域
+               window.setTimeout(() => {
+                  const hit = containerRef.current?.querySelector(
+                     `[data-page-num="${page}"] [data-overlay-hit="1"]`
+                  ) as HTMLElement | null;
+                  if (hit) {
+                     hit.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+                  }
+               }, 60);
+            }, 100);
+         },
       }),
-      [jumpToPage, applySecondaryPageMatch, scrollFirstHitIntoView, applySpanHighlights, applyPdfJsHighlights, numPages]
+      [jumpToPage, applySecondaryPageMatch, scrollFirstHitIntoView, applySpanHighlights, applyPdfJsHighlights, numPages, containerRef]
    );
 
    return (
-      <div className={styles.leftPanel}>
-         <div className={styles.previewHeader}>
-            <Title level={5} style={{ margin: 0 }}>
-               <FilePdfOutlined style={{ marginRight: 8 }} />
-               文件预览图
-            </Title>
-         </div>
-
+      <div className={styles.pdfPanel}>
          {isPdf ? (
             <>
-               <PdfToolbar
-                  scale={scale}
-                  currentPage={currentPage}
-                  numPages={numPages}
-                  onZoomIn={zoomIn}
-                  onZoomOut={zoomOut}
-                  onResetZoom={resetZoom}
-                  onJumpToPage={jumpToPage}
-               />
-
                <div className={styles.pdfScrollArea} ref={containerRef}>
                   <Document
                      file={documentFile}
@@ -856,11 +901,19 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
                      }
                      error={<Empty description='加载失败' />}
                   >
-                     <div className={styles.pdfContentCenter}>
-                        {renderPages()}
-                     </div>
+                     {renderPages()}
                   </Document>
                </div>
+
+               <PdfToolbar
+                  scale={scale}
+                  currentPage={currentPage}
+                  numPages={numPages}
+                  onZoomIn={zoomIn}
+                  onZoomOut={zoomOut}
+                  onResetZoom={resetZoom}
+                  onJumpToPage={jumpToPage}
+               />
             </>
          ) : (
             <div

@@ -1,11 +1,10 @@
-import React, { useMemo, useState } from 'react';
-import { Tabs, Typography, Tag, Space, Button } from 'antd';
-import { CloseOutlined, RightOutlined } from '@ant-design/icons';
+import React, { useMemo } from 'react';
+import { Segmented, Typography, Tag, Space, Progress, Alert } from 'antd';
 import { useStyles } from '../../style';
-import { CATEGORY_MAP } from '../../types';
-import type { AuditCategory, AuditIssue } from '../../types';
+import type { AuditIssue } from '../../types';
+import type { BBoxData } from '../../components/PDFPreview/PdfPreview';
+import { agentLabel, SEVERITY_MAP } from '@/types/audit';
 import { useUrlState } from '@/hooks/useUrlState';
-import { createPortal } from 'react-dom';
 
 const { Text, Paragraph } = Typography;
 
@@ -114,83 +113,6 @@ const parseIssueText = (raw: string): ParsedIssueText | null => {
    };
 };
 
-const splitSuggestionLines = (raw?: string): string[] => {
-   if (!raw) return [];
-   const normalized = String(raw)
-      .replace(/([。！？!?])\s*/g, '$1\n')
-      .replace(/[；;]/g, '\n');
-   return normalized
-      .split(/\n/)
-      .map((item) => item.trim())
-      .filter(Boolean);
-};
-
-const sanitizeSuggestionLines = (lines: string[]): string[] => {
-   const invalidPattern = /^[\s.,，。:：;；、\-—_()[\]{}"']*$/;
-   const placeholderPattern =
-      /^(明确|补充|细化|删除|修订|例如|比如|建议|的时限与标准|。|\.{1,})$/;
-   const danglingPattern =
-      /(例如[:：]\s*$|第\d+条中\s*$|的表述\s*$|的时限与标准\s*$|与标准[，,:：\s]*例如\s*$)/;
-   const trailingVerbPattern = /[，,:：\s]*(明确|补充|完善|细化|增加|定义|说明|约定)\s*$/;
-   const splitTailPattern = /(的|与|及|并|且|或|为|是|在|于|对|按|向|从|给|将|需|应|可|应当|必须|以及|并且|并在|,|，|:|：)\s*$/;
-   const leadJoinPattern = /^(例如|比如|如|即|并|并且|且|同时|并明确|并约定)/;
-
-   const normalizeLine = (line: string): string => {
-      let result = line.replace(/\s+/g, ' ').trim();
-      result = result.replace(/^[-•·\d.、\s]+/, '');
-      result = result.replace(/^的(表述|时限|标准|要求)?[，,:：\s]*/, '');
-      result = result.replace(/^[，,:：。\s]+/, '');
-      result = result.replace(/\s*[，,:：]\s*$/, '');
-      if (/^避免/.test(result)) {
-         result = `修订相关条款，${result}`;
-      }
-         result = result
-            .replace(/\bDocuments?\b/gi, '标书内容')
-            .replace(/\bStandards?\b/gi, '政策依据')
-            .replace(/\bTopic\b/gi, '审查主题');
-      if (result && !/[。！？!?]$/.test(result)) {
-         result = `${result}。`;
-      }
-      return result.trim();
-   };
-
-   const normalized = lines
-      .map(normalizeLine)
-      .filter((line) => line.length > 1)
-      .filter((line) => !invalidPattern.test(line));
-
-   const merged: string[] = [];
-   for (let i = 0; i < normalized.length; i++) {
-      const current = normalized[i];
-      const next = normalized[i + 1];
-      if (!next) {
-         merged.push(current);
-         continue;
-      }
-      const shouldMerge =
-         splitTailPattern.test(current) ||
-         trailingVerbPattern.test(current) ||
-         (current.length <= 14 && leadJoinPattern.test(next));
-      if (shouldMerge) {
-         merged.push(`${current}${next.replace(/^[，,:：\s]+/, '')}`.trim());
-         i += 1;
-         continue;
-      }
-      merged.push(current);
-   }
-
-   return Array.from(
-      new Set(
-         merged
-            .filter((line) => !placeholderPattern.test(line))
-            .filter((line) => !danglingPattern.test(line))
-            .filter((line) => !trailingVerbPattern.test(line))
-            .filter((line) => !/^(与|及|并|且|或|和)[\s，,。.:：]/.test(line))
-            .filter((line) => !/^(并|且|及|或)$/.test(line))
-      )
-   );
-};
-
 const normalizeIssueTitle = (value?: string): string => {
    const text = String(value || '').trim();
    if (!text) return '';
@@ -290,12 +212,12 @@ const sanitizeDisplayText = (value?: string): string => {
 };
 
 const parsePageNumber = (value: unknown): number | null => {
-   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+   if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
       return Math.floor(value);
    }
    if (typeof value === 'string') {
       const num = Number.parseInt(value, 10);
-      if (Number.isFinite(num) && num > 0) {
+      if (Number.isFinite(num) && num >= 0) {
          return num;
       }
    }
@@ -573,6 +495,7 @@ const buildIssueExplanation = (issue: AuditIssue, raw?: string): string => {
       .replace(/【问题说明】/g, '')
       .replace(/^主证据中，?\s*/g, '')
       .replace(/^审核文件中，?\s*/g, '')
+      .replace(/📎\s*搜索来源[\s\S]*$/g, '')  // 去掉末尾搜索来源（与 CitationList 重复）
       .trim();
 
    const anchor = String(issue.anchorQuote || '').trim();
@@ -614,37 +537,68 @@ interface AnalysisListProps {
    issues: AuditIssue[];
    isComplete: boolean;
    onLocateIssuePage: (page: number, highlightText?: string, fallbackTokens?: string[]) => void;
-   overlayHost?: HTMLElement | null;
    currentFileName?: string;
    currentFileId?: number;
+   /** 点击风险卡打开推理抽屉 */
+   onIssueClick?: (issue: AuditIssue) => void;
+   /** 审核任务 ID（用于 bbox API 调用） */
+   taskId?: string | null;
+   /** BBox-based 精确高亮回调（优先于文本匹配） */
+   onLocateBboxes?: (page: number, bboxes: BBoxData[]) => void;
+}
+
+/** 高亮模式配置：auto=优先BBox失败回落 | bbox=仅BBox | text=仅文本匹配 */
+const HIGHLIGHT_MODE: string = import.meta.env.VITE_HIGHLIGHT_MODE || 'auto';
+
+/** 调用 Java 代理端点获取 block BBox 坐标 */
+async function fetchBlockBboxes(taskId: string, blockIds: string[]): Promise<BBoxData[]> {
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || '';
+  const ids = blockIds.slice(0, 10).join(',');
+  const url = `${baseUrl}/api/audit-tasks/${taskId}/blocks?ids=${encodeURIComponent(ids)}`;
+  console.info('[bbox-fetch] calling: %s', url);
+  const token = localStorage.getItem('token') || sessionStorage.getItem('token') || '';
+  const resp = await fetch(url, {
+    headers: { Authorization: token ? `Bearer ${token}` : '' },
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const json = await resp.json();
+  const list = json?.data || [];
+  console.info('[bbox-fetch] got %d bbox entries for %d blockIds', list.length, blockIds.length);
+  return list.map((item: Record<string, any>) => ({
+    x0: item.bbox?.x0 ?? 0,
+    top: item.bbox?.top ?? 0,
+    x1: item.bbox?.x1 ?? 0,
+    bottom: item.bbox?.bottom ?? 0,
+    pageWidth: item.page_width ?? 595,
+  }));
 }
 
 export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
-   ({ issues, isComplete, onLocateIssuePage, overlayHost, currentFileName, currentFileId }) => {
-      const { theme } = useStyles();
+   ({ issues, isComplete, onLocateIssuePage, currentFileName, currentFileId, onIssueClick, taskId, onLocateBboxes }) => {
+      const { theme, styles } = useStyles();
       const [queryParams, setQueryParams] = useUrlState({ tab: 'all' });
       const currentTab = queryParams.tab;
-      const [activeCategory, setActiveCategory] = useState<AuditCategory | null>(
-         null
-      );
       const visibleIssues = useMemo(
          () => (issues || []).filter((i) => i && shouldRenderIssue(i)),
          [issues]
       );
       const visibleSummary = useMemo(
          () => ({
-            critical: visibleIssues.filter((i) => i?.severity === 'critical').length,
-            warning: visibleIssues.filter((i) => i?.severity === 'warning').length,
+            high: visibleIssues.filter((i) => i?.severity === 'high').length,
+            medium: visibleIssues.filter((i) => i?.severity === 'medium').length,
+            low: visibleIssues.filter((i) => i?.severity === 'low').length,
             info: visibleIssues.filter((i) => i?.severity === 'info').length,
          }),
          [visibleIssues]
       );
 
       const filteredIssues = useMemo(() => {
-         if (currentTab === 'critical')
-            return visibleIssues.filter((i) => i?.severity === 'critical');
-         if (currentTab === 'warning')
-            return visibleIssues.filter((i) => i?.severity === 'warning');
+         if (currentTab === 'high')
+            return visibleIssues.filter((i) => i?.severity === 'high');
+         if (currentTab === 'medium')
+            return visibleIssues.filter((i) => i?.severity === 'medium');
+         if (currentTab === 'low')
+            return visibleIssues.filter((i) => i?.severity === 'low');
          if (currentTab === 'info')
             return visibleIssues.filter((i) => i?.severity === 'info');
          return visibleIssues;
@@ -654,9 +608,9 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
          const pageVotes = new Map<string, Map<number, number>>();
          visibleIssues.forEach((issue) => {
             const page =
-               parsePageNumber(issue.anchorPage) ||
+               parsePageNumber(issue.anchorPage) ??
                parsePageNumber(issue.location?.pageNumber);
-            if (!page) return;
+            if (page == null) return;
             const key = buildAnchorKey(issue);
             if (!key) return;
             const votes = pageVotes.get(key) || new Map<number, number>();
@@ -678,222 +632,213 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
          return result;
       }, [visibleIssues]);
 
-      const tabItems = useMemo(
+      const segOptions = useMemo(
          () => [
-            { key: 'all', label: `全部 (${visibleIssues.length})` },
-            { key: 'critical', label: `严重 (${visibleSummary.critical})` },
-            { key: 'warning', label: `一般 (${visibleSummary.warning})` },
-            { key: 'info', label: `提示 (${visibleSummary.info})` },
+            { label: `全部 ${visibleIssues.length}`, value: 'all' },
+            { label: `高 ${visibleSummary.high}`, value: 'high' },
+            { label: `中 ${visibleSummary.medium}`, value: 'medium' },
+            { label: `低 ${visibleSummary.low}`, value: 'low' },
+            { label: `信息 ${visibleSummary.info}`, value: 'info' },
          ],
          [visibleIssues.length, visibleSummary]
       );
 
-      const categoryPanels = useMemo(() => {
-         return (Object.keys(CATEGORY_MAP) as AuditCategory[]).map((categoryKey) => {
-               const categoryIssues = filteredIssues
-                  .filter(Boolean)
-                  .filter((i) => (i?.category || i?.dimension) === categoryKey);
-               const stretchCard = categoryIssues.length === 1;
-               const renderedIssues = categoryIssues
-                  .map((issue, issueIndex) => {
-                     const parsed = parseIssueText(issue.description);
-                     const rawDescription = sanitizeDisplayText(issue.description);
-                     const title = normalizeIssueTitle(
-                        parsed?.title ||
-                           (rawDescription.length > 0 && rawDescription.length <= 36
-                              ? rawDescription
-                              : '审查问题')
-                     );
-                     const rationaleBody = buildIssueExplanation(
-                        issue,
-                        parsed?.rationale || rawDescription
-                     );
-                     const rationale = `${buildAnchorPrefix(issue)}\n【问题说明】${rationaleBody}`;
-                     if (!hasMeaningfulContent(title, rationale)) {
-                        return null;
-                     }
-                     const suggestionSource =
-                        parsed?.suggestions && parsed.suggestions.length > 0
-                           ? parsed.suggestions
-                           : splitSuggestionLines(issue.suggestion);
-                     const suggestionLines =
-                        sanitizeSuggestionLines(suggestionSource);
-                     const sourceInfo = extractSourceInfo(issue, currentFileName, currentFileId);
+      const renderedIssueCards = useMemo(() => {
+         return filteredIssues
+            .map((issue, issueIndex) => {
+               const parsed = parseIssueText(issue.description);
+               const rawDescription = sanitizeDisplayText(issue.description);
+               const title = issue.category || '审查问题';
+               const rationaleBody = buildIssueExplanation(
+                  issue,
+                  parsed?.rationale || rawDescription
+               );
+               const rationale = `${buildAnchorPrefix(issue)}\n【问题说明】${rationaleBody}`;
+               if (!hasMeaningfulContent(title, rationale)) {
+                  return null;
+               }
+               const sourceInfo = extractSourceInfo(issue, currentFileName, currentFileId);
 
-                     const issueAnchorKey = buildAnchorKey(issue);
-                     const canonicalPage =
-                        (issueAnchorKey ? canonicalPageByAnchor.get(issueAnchorKey) : undefined) || null;
-                     const rawPageNo =
-                        canonicalPage ||
-                        parsePageNumber(issue.anchorPage) ||
-                        parsePageNumber(issue.location?.pageNumber);
-                     const pageNo = rawPageNo
-                        ? normalizeLocatePage(rawPageNo, sourceInfo.fileName)
-                        : null;
-                     const issueRenderKey = `${issue.issueNo || 'issue'}-${rawPageNo}-${issueIndex}`;
+               const issueAnchorKey = buildAnchorKey(issue);
+               const canonicalPage =
+                  (issueAnchorKey ? canonicalPageByAnchor.get(issueAnchorKey) : undefined) || null;
+               const rawPageNo =
+                  canonicalPage ??
+                  parsePageNumber(issue.anchorPage) ??
+                  parsePageNumber(issue.location?.pageNumber);
+               const pageNo = rawPageNo != null
+                  ? normalizeLocatePage(rawPageNo, sourceInfo.fileName)
+                  : null;
+               const issueRenderKey = `${issue.issueNo || 'issue'}-${rawPageNo}-${issueIndex}`;
 
-                     return (
-                        <div
-                           key={issueRenderKey}
+               return (
+                  <div
+                     key={issueRenderKey}
+                     onClick={() => onIssueClick?.(issue)}
+                     style={{
+                        padding: '14px 16px 10px',
+                        border: `1px solid ${theme.colorBorderSecondary}`,
+                        borderRadius: 8,
+                        cursor: onIssueClick ? 'pointer' : undefined,
+                        background: theme.colorBgContainer,
+                        transition: 'box-shadow 0.2s',
+                     }}
+                     onMouseEnter={(e) => {
+                        e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.06)';
+                     }}
+                     onMouseLeave={(e) => {
+                        e.currentTarget.style.boxShadow = 'none';
+                     }}
+                  >
+                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                        <Space size={8}>
+                           <Tag
+                              style={{ fontSize: '1rem' }}
+                              color="green"
+                           >
+                              <span
+                                 onClick={(e) => {
+                                    e.stopPropagation();
+                                    const page =
+                                       canonicalPage ??
+                                       parsePageNumber(issue.anchorPage) ??
+                                       parsePageNumber(issue.location?.pageNumber);
+                                    if (page == null) return;
+
+                                    const normalizedPage = normalizeLocatePage(page, sourceInfo.fileName);
+
+                                    // ── BBox 优先路径 ──
+                                    const useBbox =
+                                       HIGHLIGHT_MODE !== 'text' &&
+                                       issue.blockIds &&
+                                       issue.blockIds.length > 0 &&
+                                       taskId &&
+                                       onLocateBboxes;
+                                    if (useBbox) {
+                                       fetchBlockBboxes(taskId, issue.blockIds!)
+                                          .then((bboxes) => {
+                                             if (bboxes.length > 0) {
+                                                onLocateBboxes(normalizedPage, bboxes);
+                                             } else if (HIGHLIGHT_MODE === 'auto') {
+                                                // Fallback to text matching
+                                                fallbackToTextMatch();
+                                             }
+                                          })
+                                          .catch(() => {
+                                             if (HIGHLIGHT_MODE === 'auto') {
+                                                fallbackToTextMatch();
+                                             }
+                                          });
+                                       return;
+                                    }
+
+                                    // ── 文本匹配路径（现有逻辑） ──
+                                    fallbackToTextMatch();
+
+                                    function fallbackToTextMatch() {
+                                       const highlightText = buildHighlightText(
+                                          issue,
+                                          rationale,
+                                          title
+                                       );
+                                       const fallbackTokens = Array.isArray(issue.anchorTokens)
+                                          ? issue.anchorTokens
+                                               .map((item) => String(item || '').trim())
+                                               .filter(Boolean)
+                                               .slice(0, 5)
+                                          : [];
+                                       onLocateIssuePage(
+                                          normalizedPage,
+                                          highlightText,
+                                          fallbackTokens
+                                       );
+                                    }
+                                 }}
+                                 style={{ cursor: pageNo ? 'pointer' : 'default' }}
+                              >
+                                 {pageNo ? `第 ${pageNo} 页` : '页码待定位'}
+                              </span>
+                           </Tag>
+
+                           {title ? (
+                              <Text
+                                 strong
+                                 style={{
+                                    fontSize: 15,
+                                    letterSpacing: '0.5px',
+                                 }}
+                              >
+                                 {title}
+                              </Text>
+                           ) : null}
+                        </Space>
+
+                        <Space size={4}>
+                           {(issue.agentName || issue.agent) && (
+                              <Tag style={{ fontSize: 12, margin: 0 }}>
+                                 {agentLabel(issue.agentName || issue.agent || '')}
+                              </Tag>
+                           )}
+                           <Tag
+                              style={{ fontSize: 12, margin: 0 }}
+                              color={
+                                 issue.severity === 'high' ? 'error' :
+                                 issue.severity === 'medium' ? 'orange' :
+                                 issue.severity === 'low' ? 'warning' : 'processing'
+                              }
+                           >
+                              {SEVERITY_MAP[issue.severity]}
+                           </Tag>
+                        </Space>
+                     </div>
+
+                     {/* Confidence + Truncated */}
+                     <div style={{ marginTop: 4, marginBottom: 6 }}>
+                        {issue.confidence !== undefined && (
+                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <Progress
+                                 percent={Math.round(issue.confidence * 100)}
+                                 size="small"
+                                 style={{ width: 120, margin: 0 }}
+                                 format={(p) => `置信度 ${p}%`}
+                                 strokeColor={
+                                    issue.confidence < 0.5 ? '#f5222d' :
+                                    issue.confidence < 0.7 ? '#fa8c16' : '#52c41a'
+                                 }
+                              />
+                           </div>
+                        )}
+                        {issue.truncated && (
+                           <Alert
+                              type="warning"
+                              showIcon
+                              message="审查未完成 — Agent 轮次耗尽，置信度低，建议人工复核"
+                              style={{ marginTop: 4, fontSize: 13 }}
+                           />
+                        )}
+                     </div>
+
+                     {rationale && (
+                        <Paragraph
                            style={{
-                              flex: stretchCard ? 1 : undefined,
-                              paddingBottom: 8,
-                              borderBottom: `1px dashed ${theme.colorBorderSecondary}`,
-                              borderLeft: `4px solid ${
-                                 issue.severity === 'critical'
-                                    ? theme.colorError
-                                    : issue.severity === 'warning'
-                                    ? theme.colorWarning
-                                    : theme.colorPrimary
-                              }`,
-                              paddingLeft: 12,
+                              marginBottom: 6,
+                              color: '#262626',
+                              fontWeight: 500,
+                              fontSize: 15,
+                              lineHeight: 1.85,
+                              whiteSpace: 'pre-wrap',
+                              fontFamily:
+                                 '"Times New Roman","Noto Serif SC","Songti SC",serif',
                            }}
                         >
-                           <Space style={{ marginBottom: 8 }}>
-                              <Tag
-                                 style={{ fontSize: '1.15rem' }}
-                                 color={
-                                    issue.severity === 'critical'
-                                       ? 'error'
-                                       : issue.severity === 'warning'
-                                       ? 'warning'
-                                       : 'processing'
-                                 }
-                              >
-                                 <span
-                                    onClick={() => {
-                                       const page =
-                                          canonicalPage ||
-                                          parsePageNumber(issue.anchorPage) ||
-                                          parsePageNumber(issue.location?.pageNumber);
-                                       if (page) {
-                                          const highlightText = buildHighlightText(
-                                             issue,
-                                             rationale,
-                                             title
-                                          );
-                                          const fallbackTokens = Array.isArray(issue.anchorTokens)
-                                             ? issue.anchorTokens
-                                                  .map((item) => String(item || '').trim())
-                                                  .filter(Boolean)
-                                                  .slice(0, 5)
-                                             : [];
-                                          onLocateIssuePage(
-                                             normalizeLocatePage(page, sourceInfo.fileName),
-                                             highlightText,
-                                             fallbackTokens
-                                          );
-                                       }
-                                    }}
-                                    style={{ cursor: pageNo ? 'pointer' : 'default' }}
-                                 >
-                                    {pageNo ? `第 ${pageNo} 页` : '页码待定位'}
-                                 </span>
-                              </Tag>
-
-                              {title ? (
-                                 <Text
-                                    strong
-                                    style={{
-                                       fontSize: '1.15rem',
-                                       letterSpacing: '0.8px',
-                                    }}
-                                 >
-                                    {title}
-                                 </Text>
-                              ) : null}
-                           </Space>
-                           {rationale && (
-                              <Paragraph
-                                 style={{
-                                    marginBottom: 6,
-                                    color: '#262626',
-                                    fontWeight: 500,
-                                    fontSize: '1.25rem',
-                                    lineHeight: 1.85,
-                                    whiteSpace: 'pre-wrap',
-                                    fontFamily:
-                                       '"Times New Roman","Noto Serif SC","Songti SC",serif',
-                                 }}
-                              >
-                                 {rationale}
-                              </Paragraph>
-                           )}
-                           {suggestionLines.length > 0 && (
-                              <ul
-                                 style={{
-                                    margin: 0,
-                                    paddingLeft: 20,
-                                    color: theme.colorTextSecondary,
-                                    fontSize: '1.15rem',
-                                    lineHeight: 1.9,
-                                    fontWeight: 700,
-                                    fontFamily:
-                                       '"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif',
-                                 }}
-                              >
-                                 {suggestionLines.map((line, lineIndex) => (
-                                    <li key={`${issueRenderKey}-${lineIndex}`}>
-                                       {line}
-                                    </li>
-                                 ))}
-                              </ul>
-                           )}
-                           <div
-                              style={{
-                                 marginTop: 8,
-                                 padding: '6px 10px',
-                                 borderRadius: 6,
-                                 background: '#f0f7ff',
-                                 border: '1px solid #91caff',
-                              }}
-                           >
-                              <Text
-                                 style={{
-                                    fontSize: '0.95rem',
-                                    fontWeight: 700,
-                                    color: '#0958d9',
-                                    marginRight: 8,
-                                 }}
-                              >
-                                 RAG引用文件
-                              </Text>
-                              <Text
-                                 style={{
-                                    fontSize: '1rem',
-                                    color: '#1d39c4',
-                                 }}
-                              >
-                                 {sourceInfo.previewUrl ? (
-                                    <a
-                                       href={sourceInfo.previewUrl}
-                                       target='_blank'
-                                       rel='noreferrer'
-                                       style={{ color: '#1d39c4' }}
-                                    >
-                                       {sourceInfo.fileName}
-                                    </a>
-                                 ) : (
-                                    sourceInfo.fileName
-                                 )}
-                              </Text>
-                           </div>
-                        </div>
-                     );
-                  })
-                  .filter(Boolean);
-
-               return { key: categoryKey, renderedIssues };
-            });
-      }, [filteredIssues, theme, onLocateIssuePage, currentFileName, currentFileId, canonicalPageByAnchor]);
-
-      const currentPanel = useMemo(
-         () =>
-            activeCategory
-               ? categoryPanels.find((item) => item.key === activeCategory) || null
-               : null,
-         [activeCategory, categoryPanels]
-      );
+                           {rationale}
+                        </Paragraph>
+                     )}
+                  </div>
+               );
+            })
+            .filter(Boolean);
+      }, [filteredIssues, theme, onLocateIssuePage, currentFileName, currentFileId, canonicalPageByAnchor, onIssueClick]);
 
       return (
          <div
@@ -903,13 +848,18 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
                flexDirection: 'column',
             }}
          >
-            <Tabs
-               activeKey={currentTab}
-               onChange={(key) => setQueryParams({ tab: key })}
-               items={tabItems}
-               style={{ paddingLeft: 6, height: 'auto', flex: 'none' }}
-               size='small'
-            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 6px 6px', flexShrink: 0 }}>
+               <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 }}>风险等级</Text>
+               <div style={{ flex: 1, minWidth: 0 }} className={styles.severityFilter}>
+                  <Segmented
+                     block
+                     size="small"
+                     value={currentTab}
+                     onChange={(val) => setQueryParams({ tab: val as string })}
+                     options={segOptions}
+                  />
+               </div>
+            </div>
 
             <div
                style={{
@@ -924,109 +874,19 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
                   style={{
                      display: 'flex',
                      flexDirection: 'column',
-                     gap: 8,
+                     gap: 12,
                      paddingRight: 4,
                   }}
                >
-                  {categoryPanels.map((panel) => (
-                     <div
-                        key={panel.key}
-                        onClick={() => setActiveCategory(panel.key)}
-                        style={{
-                           display: 'flex',
-                           alignItems: 'center',
-                           justifyContent: 'space-between',
-                           cursor: 'pointer',
-                           padding: '12px 14px',
-                           border: `1px solid ${theme.colorBorderSecondary}`,
-                           borderRadius: 8,
-                           background: theme.colorBgContainer,
-                        }}
-                     >
-                        <Space>
-                           <Text strong style={{ fontSize: '1.25rem' }}>
-                              {CATEGORY_MAP[panel.key]} ({panel.renderedIssues.length})
-                           </Text>
-                           {panel.renderedIssues.length === 0 && isComplete && (
-                              <Tag color='success'>
-                                 无异常
-                              </Tag>
-                           )}
-                        </Space>
-                        <RightOutlined />
-                     </div>
-                  ))}
+                  {renderedIssueCards.length === 0 && isComplete ? (
+                     <Text type='secondary' style={{ paddingLeft: 12, fontSize: '1.15rem' }}>
+                        暂未发现相关问题
+                     </Text>
+                  ) : (
+                     renderedIssueCards
+                  )}
                </div>
             </div>
-
-            {currentPanel &&
-               (() => {
-                  const overlayNode = (
-                     <div
-                        style={{
-                           position: 'absolute',
-                           inset: 0,
-                           zIndex: 200,
-                           background: theme.colorBgContainer,
-                           borderRadius: 8,
-                           border: `1px solid ${theme.colorBorderSecondary}`,
-                           padding: 16,
-                           display: 'flex',
-                           flexDirection: 'column',
-                           gap: 10,
-                        }}
-                     >
-                        <div
-                           style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                           }}
-                        >
-                           <Text strong style={{ fontSize: '1.25rem' }}>
-                              {CATEGORY_MAP[currentPanel.key]} ({currentPanel.renderedIssues.length})
-                           </Text>
-                           <Button
-                              type='text'
-                              icon={<CloseOutlined />}
-                              onClick={() => setActiveCategory(null)}
-                           />
-                        </div>
-                        <div
-                           style={{
-                              overflowY: 'auto',
-                              flex: 1,
-                              paddingRight: 4,
-                              scrollbarWidth: 'none',
-                              msOverflowStyle: 'none',
-                           }}
-                        >
-                           {currentPanel.renderedIssues.length === 0 ? (
-                              <Text
-                                 type='secondary'
-                                 style={{ paddingLeft: 12, fontSize: '1.15rem' }}
-                              >
-                                 暂未发现相关问题
-                              </Text>
-                           ) : (
-                              <div
-                                 style={{
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    gap: 12,
-                                 }}
-                              >
-                                 {currentPanel.renderedIssues}
-                              </div>
-                           )}
-                        </div>
-                     </div>
-                  );
-                  if (overlayHost) {
-                     return createPortal(overlayNode, overlayHost);
-                  }
-                  return overlayNode;
-               })()}
          </div>
       );
    }

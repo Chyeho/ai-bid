@@ -7,7 +7,7 @@ export const usePdfFlow = (isComplete: boolean) => {
 
    const [queryParams, setQueryParams] = useUrlState({
       page: 1,
-      scale: 0.6,
+      scale: 1.0,
       mode: 'single',
       targetPage: 0,
    });
@@ -102,7 +102,7 @@ export const usePdfFlow = (isComplete: boolean) => {
    }, [scale, setQueryParams]);
 
    const resetZoom = useCallback(() => {
-      setQueryParams({ scale: 0.6 });
+      setQueryParams({ scale: 1.0 });
    }, [setQueryParams]);
 
    return {

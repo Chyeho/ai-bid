@@ -1,11 +1,11 @@
 package com.ithsd.smart_tender.controller;
 
-import com.ithsd.smart_tender.pojo.entity.KnowledgeFile;
-import com.ithsd.smart_tender.pojo.result.PageResult;
-import com.ithsd.smart_tender.pojo.result.Result;
+import com.ithsd.smart_tender.model.entity.KnowledgeFile;
+import com.ithsd.smart_tender.model.result.PageResult;
+import com.ithsd.smart_tender.model.result.Result;
 import com.ithsd.smart_tender.service.KnowledgeFileService;
-import com.ithsd.smart_tender.service.preview.DocumentPreviewService;
-import com.ithsd.smart_tender.service.storage.StoragePathService;
+import com.ithsd.smart_tender.service.DocumentPreviewService;
+import com.ithsd.smart_tender.service.StoragePathService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.DeleteMapping;

@@ -137,7 +137,7 @@ pub struct RawRect {
 /// 包围盒（Bounding Box）—— 描述一个轴对齐的矩形区域。
 ///
 /// 坐标系原点为页面左上角，X 轴向右，Y 轴向下（与 PDF 坐标系一致）。
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BBox {
     /// 矩形左上角的 X 坐标
     pub x0: f64,

@@ -62,7 +62,7 @@ fn init_search_backend() -> (
             .expect("DashScope 搜索后端初始化失败。请设置 DASHSCOPE_API_KEY");
         eprintln!(
             "  搜索后端: DashScope (model={})",
-            env::var("DASHSCOPE_SEARCH_MODEL").unwrap_or_else(|_| "qwen-turbo".to_string())
+            env::var("DASHSCOPE_SEARCH_MODEL").or_else(|_| env::var("DASHSCOPE_MODEL")).unwrap_or_else(|_| "qwen-plus".to_string())
         );
         (Some(Arc::new(ds)), None)
     }
@@ -131,8 +131,8 @@ fn make_tools_factory(
     buffer: Option<Arc<SearchBuffer>>,
     chunks: Arc<HashMap<String, Chunk>>,
     chunk_order: Arc<Vec<String>>,
-) -> Box<dyn Fn() -> ToolRegistry + Send + Sync> {
-    Box::new(move || {
+) -> Arc<dyn Fn() -> ToolRegistry + Send + Sync> {
+    Arc::new(move || {
         let mut registry = ToolRegistry::new();
         if let Some(ref ds) = ds_search {
             registry.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
@@ -167,6 +167,7 @@ fn build_chunk_data(clauses: &[ReviewClause]) -> (Arc<HashMap<String, Chunk>>, A
                 page_start: c.page_start,
                 page_end: c.page_end,
                 source_block_ids: Vec::new(),
+                bbox_refs: Vec::new(),
             },
         );
     }
@@ -195,8 +196,8 @@ fn make_coordinator(
     chunk_order: Arc<Vec<String>>,
 ) -> Coordinator {
     let registry = AgentRegistry::builtin();
-    let llm_factory: Box<dyn Fn() -> Box<dyn ai_bid::agents::react_loop::LlmClient> + Send + Sync> =
-        Box::new(move || {
+    let llm_factory: Arc<dyn Fn() -> Box<dyn ai_bid::agents::react_loop::LlmClient> + Send + Sync> =
+        Arc::new(move || {
             create_llm_client().expect("创建 LLM 客户端失败。请检查 API 密钥环境变量")
         });
     let tools_factory = make_tools_factory(ds_search, buffer, chunks, chunk_order);

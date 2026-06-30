@@ -431,7 +431,7 @@ mod tests {
         let def = registry.get(AgentId::LegalVerify).unwrap();
         let config = def.to_agent_config();
         assert_eq!(config.name, "LegalVerifyAgent");
-        assert_eq!(config.default_max_turns, 5);
+        assert_eq!(config.default_max_turns, 8);
         // LegalVerify 不参与路由，section_keywords 为空
         assert!(def.section_keywords.is_empty());
     }

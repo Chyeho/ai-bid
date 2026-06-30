@@ -1,0 +1,79 @@
+package com.ithsd.smart_tender.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+/**
+ * Rust 审核引擎 HTTP API 配置。
+ *
+ * <p>对应 application.yml 中的 {@code rust.api} 前缀。</p>
+ */
+@Component
+@ConfigurationProperties(prefix = "rust.api")
+public class RustApiProperties {
+
+    /** Rust HTTP 服务地址，默认 {@code http://127.0.0.1:3001} */
+    private String baseUrl = "http://127.0.0.1:3001";
+
+    /** 连接超时（毫秒），默认 5000 */
+    private int connectTimeoutMs = 5000;
+
+    /** 读取超时（毫秒），默认 300000（5 分钟，审核管线可能很慢） */
+    private int readTimeoutMs = 300_000;
+
+    /** 启动时是否校验 Rust 健康检查，默认 true */
+    private boolean healthCheckEnabled = true;
+
+    /** 异步审核等待超时（分钟），默认 30 */
+    private int reviewTimeoutMinutes = 30;
+
+    // ── getters / setters ──────────────────────────────────────────
+
+    public String getBaseUrl() {
+        return baseUrl;
+    }
+
+    public void setBaseUrl(String baseUrl) {
+        this.baseUrl = baseUrl != null ? baseUrl.replaceAll("/+$", "") : null;
+    }
+
+    public int getConnectTimeoutMs() {
+        return connectTimeoutMs;
+    }
+
+    public void setConnectTimeoutMs(int connectTimeoutMs) {
+        this.connectTimeoutMs = connectTimeoutMs;
+    }
+
+    public int getReadTimeoutMs() {
+        return readTimeoutMs;
+    }
+
+    public void setReadTimeoutMs(int readTimeoutMs) {
+        this.readTimeoutMs = readTimeoutMs;
+    }
+
+    public boolean isHealthCheckEnabled() {
+        return healthCheckEnabled;
+    }
+
+    public void setHealthCheckEnabled(boolean healthCheckEnabled) {
+        this.healthCheckEnabled = healthCheckEnabled;
+    }
+
+    public int getReviewTimeoutMinutes() {
+        return reviewTimeoutMinutes;
+    }
+
+    public void setReviewTimeoutMinutes(int reviewTimeoutMinutes) {
+        this.reviewTimeoutMinutes = reviewTimeoutMinutes;
+    }
+
+    // ── 派生方法 ──────────────────────────────────────────────────
+
+    /** 构建完整 API URL，自动去除尾部斜杠。 */
+    public String apiUrl(String path) {
+        String normalized = path.startsWith("/") ? path : "/" + path;
+        return baseUrl + normalized;
+    }
+}

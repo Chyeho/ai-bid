@@ -2,7 +2,6 @@ import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { auditIssuesListOptions } from '../api/auditIssuesList';
 import type { IssueQueryParams, AuditIssue } from '../types';
-
 export const useAuditIssuesList = (
    taskId: string,
    params: IssueQueryParams
@@ -13,8 +12,10 @@ export const useAuditIssuesList = (
    });
 
    const filteredIssues = useMemo(() => {
-      const allIssues = data?.issues ?? [];
-      if (!allIssues.length) return [];
+      const rawIssues = data?.issues ?? [];
+      if (!rawIssues.length) return [];
+
+      const allIssues: AuditIssue[] = rawIssues as AuditIssue[];
 
       return allIssues.filter((issue: AuditIssue) => {
          const matchSeverity =

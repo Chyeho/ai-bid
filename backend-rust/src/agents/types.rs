@@ -191,6 +191,10 @@ pub struct RiskFinding {
     /// 框架会自动填充，LLM 无需输出此字段。
     #[serde(default)]
     pub clause_ids: Vec<String>,
+    /// 关联的原始 block_id 列表（从 chunk.source_block_ids 框架自动填充）。
+    /// 前端用于 bbox-based PDF 精确高亮。
+    #[serde(default)]
+    pub block_ids: Vec<String>,
     /// 输出此发现的 Agent 名称
     /// 框架会自动填充，LLM 无需输出此字段。
     #[serde(default)]
@@ -243,6 +247,17 @@ pub struct RiskFinding {
     /// 每条 Citation 对应一个唯一的搜索来源 URL
     #[serde(default)]
     pub citations: Vec<Citation>,
+
+    // ── 框架自动填充的定位字段（用于 Java 侧映射 AuditIssueEntity） ──
+    /// 起始页码 (0-based)，框架从关联 ReviewClause 自动填充
+    #[serde(default)]
+    pub page_number: Option<usize>,
+    /// 章节路径（从根到当前节点的标题链），框架自动填充
+    #[serde(default)]
+    pub section_path: Option<Vec<String>>,
+    /// 条款原文上下文（截取前 500 字符），框架自动填充
+    #[serde(default)]
+    pub context: Option<String>,
 }
 
 /// 搜索来源引用 — 前端渲染推理过程时，可用此字段将法条/案例文本
@@ -270,6 +285,7 @@ impl RiskFinding {
         Self {
             risk_id,
             clause_ids: vec![clause_id],
+            block_ids: Vec::new(),
             agent: agent.to_string(),
             no_risk: true,
             severity: RiskSeverity::Info,
@@ -286,6 +302,9 @@ impl RiskFinding {
             truncated: false,
             suggested_agent: None,
             citations: Vec::new(),
+            page_number: None,
+            section_path: None,
+            context: None,
         }
     }
 
@@ -301,6 +320,7 @@ impl RiskFinding {
         Self {
             risk_id,
             clause_ids: vec![clause_id],
+            block_ids: Vec::new(),
             agent: agent.to_string(),
             no_risk: true,
             severity: RiskSeverity::Info,
@@ -320,6 +340,9 @@ impl RiskFinding {
             truncated: true,
             suggested_agent: None,
             citations: Vec::new(),
+            page_number: None,
+            section_path: None,
+            context: None,
         }
     }
 }
@@ -580,6 +603,8 @@ pub struct CoordinatorConfig {
     pub blind_spot_max_turns: usize,
     /// BlindSpot ReAct 失败时是否回退到静态 fallback
     pub blind_spot_fallback_enabled: bool,
+    /// 最大并行审查条款数（同一 Agent 内并行处理的条款上限）
+    pub max_parallel_clauses: usize,
 }
 
 impl Default for CoordinatorConfig {
@@ -590,6 +615,7 @@ impl Default for CoordinatorConfig {
             legal_verify_max_turns: 3,
             blind_spot_max_turns: 10,
             blind_spot_fallback_enabled: true,
+            max_parallel_clauses: 5,
         }
     }
 }
@@ -820,6 +846,8 @@ pub struct BBox {
 pub struct ChatResponse {
     /// 自然语言回答（含 [b_xxx] 标记 → 前端渲染链接）
     pub answer: String,
+    /// 推理链（按 ReAct turn 顺序，每条为 LLM 在该轮的 thought）
+    pub reasoning: Vec<String>,
     /// 原文引用（前端按 block_id 高亮 PDF）
     pub references: Vec<BlockRef>,
     /// 法规/案例引用
@@ -898,6 +926,31 @@ pub struct ChatProfile {
     pub document_search_count: usize,
     /// read_section 次数
     pub read_section_count: usize,
+}
+
+// ─── ChatAgent 流式事件 ─────────────────────────────────────────
+
+/// SSE streaming events emitted by [`ChatAgent::chat_stream()`].
+///
+/// Sent over an mpsc channel from the agent to the HTTP handler,
+/// which maps each variant to an SSE event with matching event type
+/// and inner data payload.
+#[derive(Debug, Clone)]
+pub enum ChatStreamEvent {
+    /// Agent starts processing or encounters a milestone.
+    Thinking { message: String },
+
+    /// Agent is about to execute a tool call.
+    ToolCall { name: String, args: String },
+
+    /// Agent produced the final answer.
+    Answer(ChatResponse),
+
+    /// Stream complete — contains the final ChatResponse.
+    Done(ChatResponse),
+
+    /// An error occurred during streaming.
+    Error(String),
 }
 
 // ─── 测试 ────────────────────────────────────────────────────────
@@ -1120,6 +1173,7 @@ mod tests {
         let f = RiskFinding {
             risk_id: "R_003".into(),
             clause_ids: vec!["ch_003".into()],
+            block_ids: Vec::new(),
             agent: "SemanticRiskAgent".into(),
             no_risk: false,
             severity: RiskSeverity::High,
@@ -1145,6 +1199,9 @@ mod tests {
                 url: "https://example.com".into(),
                 site_name: "example".into(),
             }],
+            page_number: Some(0),
+            section_path: Some(vec!["测试章节".into()]),
+            context: Some("须采用XX品牌 测试上下文".into()),
         };
 
         let json = serde_json::to_string(&f).expect("序列化失败");

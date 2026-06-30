@@ -95,7 +95,7 @@ export const IssueTypePieChart: React.FC<IssueTypePieChartProps> = ({
             问题类型分布
          </Title>
 
-         <span style={{ fontSize: 12 }}>预算合规、政策合法、需求合规。</span>
+         <span style={{ fontSize: 12 }}>合规性、法律法规、采购需求等维度分布。</span>
 
          <div ref={chartRef} style={{ width: '100%', height: 250 }} />
       </div>

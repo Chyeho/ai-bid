@@ -1,4 +1,4 @@
-//! 条款级 Chunk 切分服务
+﻿//! 条款级 Chunk 切分服务
 //!
 //! 本模块负责从 [`Section`] 树切分为 Agent 可独立消费的条款级语义块。
 //! 采用五条确定性规则，无 LLM 参与：
@@ -21,8 +21,10 @@
 //! 采用代码规则而非 LLM——确定性 100%、速度 < 10ms、零成本。
 //! LLM 的角色是切分完成后的**质量审查**：抽样检查语义完整性。
 
-use crate::domain::chunk::{Chunk, ChunkType, ChunkingConfig};
+use crate::domain::chunk::{BlockBBox, Chunk, ChunkType, ChunkingConfig};
+use crate::domain::raw_document::RawDocument;
 use crate::services::sectionize_service::Section;
+use std::collections::HashMap;
 
 // ─── 主入口 ──────────────────────────────────────────────────
 
@@ -107,6 +109,7 @@ fn traverse_and_chunk(
                 page_start: section.page_start,
                 page_end: section.page_end,
                 source_block_ids: section.block_ids.clone(),
+                bbox_refs: Vec::new(),
             });
         }
         return;
@@ -128,6 +131,7 @@ fn traverse_and_chunk(
                 page_start: section.body_page_start,
                 page_end: section.body_page_end,
                 source_block_ids: section.block_ids.clone(),
+                bbox_refs: Vec::new(),
             });
         }
     }
@@ -192,6 +196,7 @@ fn try_chunk_leaf(
         page_start: section.body_page_start,
         page_end: section.body_page_end,
         source_block_ids: section.block_ids.clone(),
+        bbox_refs: Vec::new(),
     });
     true
 }
@@ -268,6 +273,7 @@ fn merge_adjacent_leaves(
                     page_start: leaf.body_page_start,
                     page_end: leaf.body_page_end,
                     source_block_ids: leaf.block_ids.clone(),
+                    bbox_refs: Vec::new(),
                 });
             }
         }
@@ -307,6 +313,7 @@ fn flush_merge_buffer(
                 page_start: leaf.body_page_start,
                 page_end: leaf.body_page_end,
                 source_block_ids: leaf.block_ids.clone(),
+                bbox_refs: Vec::new(),
             });
         }
         return;
@@ -370,6 +377,7 @@ fn flush_merge_buffer(
         page_start,
         page_end,
         source_block_ids: all_block_ids,
+        bbox_refs: Vec::new(),
     });
 }
 
@@ -398,6 +406,7 @@ fn split_long_chunk(
             page_start: section.body_page_start,
             page_end: section.body_page_end,
             source_block_ids: section.block_ids.clone(),
+            bbox_refs: Vec::new(),
         });
         return;
     }
@@ -470,6 +479,7 @@ fn split_long_chunk(
             page_start: section.body_page_start,
             page_end: section.body_page_end,
             source_block_ids: section.block_ids.clone(),
+            bbox_refs: Vec::new(),
         });
     }
 }
@@ -888,6 +898,43 @@ fn extract_table_keys(text: &str) -> Vec<String> {
     keys
 }
 
+// ─── BBox 缓存填充 ─────────────────────────────────────────────
+
+/// 填充每个 Chunk 的 `bbox_refs` 字段。
+///
+/// 从 `RawDocument` 构建 `block_id → (page_index, bbox, page_width)` 的
+/// 内存索引，然后遍历每个 chunk 的 `source_block_ids` 查表填充。
+///
+/// 调用时机：`chunk_sections()` 之后、序列化到 JSON 或存入 `DocumentState` 之前。
+pub fn populate_bbox_refs(chunks: &mut [Chunk], raw_doc: &RawDocument) {
+    let mut block_map: HashMap<String, (usize, crate::domain::raw_document::BBox, f64)> =
+        HashMap::new();
+
+    for page in &raw_doc.pages {
+        for block in &page.blocks {
+            block_map.insert(
+                block.id.clone(),
+                (page.page_index, block.bbox.clone(), page.width),
+            );
+        }
+    }
+
+    for chunk in chunks.iter_mut() {
+        let mut refs: Vec<BlockBBox> = Vec::with_capacity(chunk.source_block_ids.len());
+        for block_id in &chunk.source_block_ids {
+            if let Some((page, bbox, page_width)) = block_map.get(block_id) {
+                refs.push(BlockBBox {
+                    block_id: block_id.clone(),
+                    page: *page,
+                    bbox: bbox.clone(),
+                    page_width: *page_width,
+                });
+            }
+        }
+        chunk.bbox_refs = refs;
+    }
+}
+
 // ─── 测试 ────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1024,6 +1071,7 @@ mod tests {
     #[test]
     fn test_rule5_embed_text() {
         let chunk = Chunk {
+            bbox_refs: Vec::new(),
             chunk_id: "ch_042".to_string(),
             chunk_type: ChunkType::Leaf,
             section_path: vec![
@@ -1443,6 +1491,7 @@ mod tests {
     fn test_rule5_ctx_depth_exceeds_path() {
         // ctx_depth 超过 path 长度时取全部，不 panic
         let chunk = Chunk {
+            bbox_refs: Vec::new(),
             chunk_id: "ch_test".to_string(),
             chunk_type: ChunkType::Leaf,
             section_path: vec!["第一章".to_string(), "一、概述".to_string()],
@@ -1461,6 +1510,7 @@ mod tests {
     #[test]
     fn test_rule5_empty_path() {
         let chunk = Chunk {
+            bbox_refs: Vec::new(),
             chunk_id: "ch_test".to_string(),
             chunk_type: ChunkType::Leaf,
             section_path: Vec::new(),
@@ -1480,6 +1530,7 @@ mod tests {
     #[test]
     fn test_rule5_ctx_depth_one() {
         let chunk = Chunk {
+            bbox_refs: Vec::new(),
             chunk_id: "ch_test".to_string(),
             chunk_type: ChunkType::Leaf,
             section_path: vec![
@@ -1503,6 +1554,7 @@ mod tests {
     fn test_rule5_path_truncation() {
         // embed_path_max_len > 0 时，过长的路径元素应被截断
         let chunk = Chunk {
+            bbox_refs: Vec::new(),
             chunk_id: "ch_test".to_string(),
             chunk_type: ChunkType::Leaf,
             section_path: vec![
@@ -1540,6 +1592,7 @@ mod tests {
         let long_text = "这是足够长的正常正文内容，确保超过 min_chunk_size 的默认阈值三十个字符。";
         let chunks = vec![
             Chunk {
+                bbox_refs: Vec::new(),
                 chunk_id: "ch_000".to_string(),
                 chunk_type: ChunkType::Leaf,
                 section_path: vec!["第一章".to_string()],
@@ -1549,6 +1602,7 @@ mod tests {
                 source_block_ids: vec!["b_0_0".to_string()],
             },
             Chunk {
+                bbox_refs: Vec::new(),
                 chunk_id: "ch_001".to_string(),
                 chunk_type: ChunkType::Leaf,
                 section_path: vec!["第一章".to_string()],
@@ -1558,6 +1612,7 @@ mod tests {
                 source_block_ids: vec!["b_1_0".to_string()],
             },
             Chunk {
+                bbox_refs: Vec::new(),
                 chunk_id: "ch_002".to_string(),
                 chunk_type: ChunkType::Leaf,
                 section_path: vec!["第一章".to_string()],
@@ -1585,6 +1640,7 @@ mod tests {
         // min_chunk_size=0 → 不合并
         let chunks = vec![
             Chunk {
+                bbox_refs: Vec::new(),
                 chunk_id: "ch_000".to_string(),
                 chunk_type: ChunkType::Leaf,
                 section_path: vec!["第一章".to_string()],

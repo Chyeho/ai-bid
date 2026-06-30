@@ -1,8 +1,8 @@
 package com.ithsd.smart_tender.service;
 
 import com.baomidou.mybatisplus.extension.service.IService;
-import com.ithsd.smart_tender.pojo.entity.KnowledgeFile;
-import com.ithsd.smart_tender.pojo.result.PageResult;
+import com.ithsd.smart_tender.model.entity.KnowledgeFile;
+import com.ithsd.smart_tender.model.result.PageResult;
 import org.springframework.web.multipart.MultipartFile;
 
 public interface KnowledgeFileService extends IService<KnowledgeFile> {

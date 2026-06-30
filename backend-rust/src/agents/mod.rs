@@ -6,6 +6,7 @@ pub mod procedure;
 pub mod prompts;
 pub mod react_loop;
 pub mod registry;
+pub mod review_event;
 pub mod semantic_risk;
 pub mod session_graph;
 pub mod testing;

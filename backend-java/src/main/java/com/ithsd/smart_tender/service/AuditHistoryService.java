@@ -1,8 +1,8 @@
 package com.ithsd.smart_tender.service;
 
-import com.ithsd.smart_tender.pojo.dto.AuditHistoryPageQueryDTO;
-import com.ithsd.smart_tender.pojo.result.PageResult;
-import com.ithsd.smart_tender.pojo.vo.AuditHistoryDetailVO;
+import com.ithsd.smart_tender.model.dto.AuditHistoryPageQueryDTO;
+import com.ithsd.smart_tender.model.result.PageResult;
+import com.ithsd.smart_tender.model.vo.AuditHistoryDetailVO;
 
 import java.util.Map;
 

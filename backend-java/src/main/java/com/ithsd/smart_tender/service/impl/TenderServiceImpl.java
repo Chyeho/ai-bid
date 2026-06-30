@@ -3,26 +3,26 @@ package com.ithsd.smart_tender.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import com.ithsd.smart_tender.context.BaseContext;
-import com.ithsd.smart_tender.exception.BizException;
+import com.ithsd.smart_tender.common.BaseContext;
+import com.ithsd.smart_tender.common.BizException;
 import com.ithsd.smart_tender.mapper.AuditTaskMapper;
 import com.ithsd.smart_tender.mapper.TenderMapper;
-import com.ithsd.smart_tender.pojo.entity.AuditTask;
-import com.ithsd.smart_tender.pojo.enums.AuditTaskStatusEnum;
+import com.ithsd.smart_tender.model.entity.AuditTask;
+import com.ithsd.smart_tender.model.enums.AuditTaskStatusEnum;
 import com.ithsd.smart_tender.mapper.UserMapper;
-import com.ithsd.smart_tender.pojo.entity.User;
-import com.ithsd.smart_tender.pojo.entity.Project;
-import com.ithsd.smart_tender.pojo.dto.TenderDTO;
-import com.ithsd.smart_tender.pojo.dto.TenderPageQueryDTO;
-import com.ithsd.smart_tender.pojo.entity.Tender;
-import com.ithsd.smart_tender.pojo.result.PageResult;
-import com.ithsd.smart_tender.pojo.vo.TenderProjectVO;
-import com.ithsd.smart_tender.pojo.vo.TenderStatsVO;
-import com.ithsd.smart_tender.pojo.vo.TenderVO;
-import com.ithsd.smart_tender.service.KnowledgeChunkService;
+import com.ithsd.smart_tender.model.entity.User;
+import com.ithsd.smart_tender.model.entity.Project;
+import com.ithsd.smart_tender.model.dto.TenderDTO;
+import com.ithsd.smart_tender.model.dto.TenderPageQueryDTO;
+import com.ithsd.smart_tender.model.entity.Tender;
+import com.ithsd.smart_tender.model.result.PageResult;
+import com.ithsd.smart_tender.model.vo.TenderProjectVO;
+import com.ithsd.smart_tender.model.vo.TenderStatsVO;
+import com.ithsd.smart_tender.model.vo.TenderVO;
+
 import com.ithsd.smart_tender.service.AuditTaskService;
-import com.ithsd.smart_tender.service.storage.StoragePathService;
-import com.ithsd.smart_tender.pojo.dto.CreateAuditTaskRequest;
+import com.ithsd.smart_tender.service.StoragePathService;
+import com.ithsd.smart_tender.model.dto.CreateAuditTaskRequest;
 import com.ithsd.smart_tender.service.TenderService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -48,16 +48,14 @@ public class TenderServiceImpl implements TenderService {
     private final AuditTaskMapper auditTaskMapper;
     private final UserMapper userMapper;
     private final com.ithsd.smart_tender.mapper.ProjectMapper projectMapper;
-    private final KnowledgeChunkService knowledgeChunkService;
     private final AuditTaskService auditTaskService;
     private final StoragePathService storagePathService;
 
-    public TenderServiceImpl(TenderMapper tenderMapper, AuditTaskMapper auditTaskMapper, UserMapper userMapper, com.ithsd.smart_tender.mapper.ProjectMapper projectMapper, KnowledgeChunkService knowledgeChunkService, @Lazy AuditTaskService auditTaskService, StoragePathService storagePathService) {
+    public TenderServiceImpl(TenderMapper tenderMapper, AuditTaskMapper auditTaskMapper, UserMapper userMapper, com.ithsd.smart_tender.mapper.ProjectMapper projectMapper, @Lazy AuditTaskService auditTaskService, StoragePathService storagePathService) {
         this.tenderMapper = tenderMapper;
         this.auditTaskMapper = auditTaskMapper;
         this.userMapper = userMapper;
         this.projectMapper = projectMapper;
-        this.knowledgeChunkService = knowledgeChunkService;
         this.auditTaskService = auditTaskService;
         this.storagePathService = storagePathService;
     }
@@ -174,21 +172,6 @@ public class TenderServiceImpl implements TenderService {
         tender.setProjectId(tenderDTO.getProjectId());
         tenderMapper.insert(tender);
         refreshProjectLatestVersion(tender.getProjectId(), tender.getVersion());
-
-        try {
-            // 调用切片服务，它内部会执行分块，并写入 rag_trigger_outbox 触发 Python RAG 端入库
-            knowledgeChunkService.processFileChunks(tender.getId(), dest.toString(), "tender");
-            
-            // 如果是标书，并且需要自动触发审核，可以在这里调用创建审核任务的逻辑
-            // if ("bid".equals(tender.getFileCategory())) {
-            //     CreateAuditTaskRequest auditRequest = new CreateAuditTaskRequest();
-            //     auditRequest.setBidId(tender.getId());
-            //     // auditTaskService.createTask(auditRequest); // 根据实际业务决定是否在上传时直接触发
-            // }
-        } catch (Exception e) {
-            // 切片如果失败，仅记录日志，不影响标书本身上传成功（可根据业务决定是否抛异常回滚）
-            log.error("标书文件上传后触发切片/RAG任务失败: id={}", tender.getId(), e);
-        }
 
         TenderVO vo = new TenderVO();
         BeanUtils.copyProperties(tender, vo);
@@ -380,7 +363,11 @@ public class TenderServiceImpl implements TenderService {
         if (task == null) {
             return null;
         }
-        return task.getAuditResult();
+        // auditResult 已废弃，基于 taskStatus 映射结果
+        Integer status = task.getTaskStatus();
+        if (AuditTaskStatusEnum.COMPLETED.getCode().equals(status)) return "pass";
+        if (AuditTaskStatusEnum.FAILED.getCode().equals(status)) return "reject";
+        return "pending";
     }
 
     @Override

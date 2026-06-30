@@ -2,10 +2,10 @@ package com.ithsd.smart_tender.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.ithsd.smart_tender.context.BaseContext;
+import com.ithsd.smart_tender.common.BaseContext;
 import com.ithsd.smart_tender.mapper.AuditIssueMapper;
 import com.ithsd.smart_tender.mapper.AuditTaskMapper;
-import com.ithsd.smart_tender.pojo.entity.AuditIssue;
+import com.ithsd.smart_tender.model.entity.AuditIssue;
 import com.ithsd.smart_tender.service.AuditIssueService;
 import com.ithsd.smart_tender.service.AuditTaskService;
 import com.ithsd.smart_tender.service.TenderService;

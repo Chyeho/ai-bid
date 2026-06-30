@@ -3,10 +3,10 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use ai_bid::domain::chunk::{Chunk, ChunkType, ChunkingConfig};
+use ai_bid::domain::chunk::{BlockBBox, Chunk, ChunkType, ChunkingConfig};
 use ai_bid::domain::raw_document::RawDocument;
 use ai_bid::paths::data_path_str;
-use ai_bid::services::chunking_service::chunk_sections;
+use ai_bid::services::chunking_service::{chunk_sections, populate_bbox_refs};
 use ai_bid::services::docx_convert_service::convert_docx_to_pdf;
 use ai_bid::services::pdf_extract_service::{extract_pdf_to_raw_json, extract_with_python};
 use ai_bid::services::sectionize_service::sectionize;
@@ -85,6 +85,7 @@ struct ChunkOutputItem {
     page_start: usize,
     page_end: usize,
     source_block_ids: Vec<String>,
+    bbox_refs: Vec<BlockBBox>,
     embed_text: String,
 }
 
@@ -154,6 +155,7 @@ impl ChunkingOutput {
                     page_start: c.page_start,
                     page_end: c.page_end,
                     source_block_ids: c.source_block_ids.clone(),
+                    bbox_refs: c.bbox_refs.clone(),
                     embed_text: c.embed_text(config.embed_ctx_depth, config.embed_path_max_len),
                 }
             })
@@ -426,7 +428,8 @@ async fn main() -> Result<()> {
     // ─── 阶段 3: Sections → Chunks ────────────────────────────
 
     println!("正在进行条款级 Chunk 切分 (chunking)...");
-    let chunks = chunk_sections(&all_sections, &chunking_config);
+    let mut chunks = chunk_sections(&all_sections, &chunking_config);
+    populate_bbox_refs(&mut chunks, &raw_doc);
 
     let chunks_dir = data_path_str("output/chunks");
     fs::create_dir_all(&chunks_dir)
@@ -685,6 +688,12 @@ async fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(5);
 
+    let max_parallel: usize = env::var("AIBID_MAX_PARALLEL_CLAUSES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    println!("  最大并行条款: {} (设置 AIBID_MAX_PARALLEL_CLAUSES 调整)", max_parallel);
+
     let review_clauses: Vec<ReviewClause> = chunks
         .iter()
         .take(max_clauses)
@@ -738,7 +747,7 @@ async fn main() -> Result<()> {
             let ds = DashScopeSearchBackend::from_env()
                 .expect("DashScope 搜索后端初始化失败。请设置 DASHSCOPE_API_KEY");
             println!("  DashScope 联网搜索后端已启用 (model={})",
-                std::env::var("DASHSCOPE_SEARCH_MODEL").unwrap_or_else(|_| "qwen-turbo".to_string()));
+                std::env::var("DASHSCOPE_SEARCH_MODEL").or_else(|_| std::env::var("DASHSCOPE_MODEL")).unwrap_or_else(|_| "qwen-plus".to_string()));
             Some(Arc::new(ds))
         } else {
             None
@@ -795,12 +804,15 @@ async fn main() -> Result<()> {
         println!("  模式: Coordinator (Multi-Agent)");
         println!("  搜索后端: {}", search_backend);
 
-        let config = CoordinatorConfig::default();
+        let config = CoordinatorConfig {
+            max_parallel_clauses: max_parallel,
+            ..Default::default()
+        };
         let coordinator = Coordinator::new(
             config,
             registry,
-            Box::new(llm_factory),
-            Box::new(tools_factory),
+            Arc::new(llm_factory),
+            Arc::new(tools_factory),
             bus,
             graph,
             trace,
@@ -813,11 +825,17 @@ async fn main() -> Result<()> {
         println!("  模式: 单 Agent (向后兼容 MVP)");
         println!("  提示: 设置 AIBID_COORDINATOR=1 启用 Multi-Agent 模式");
 
-        let llm = create_llm_client()
-            .context("创建 LLM 客户端失败。请检查 AIBID_LLM_PROTOCOL 及相关 API 密钥环境变量")?;
-        let tools = tools_factory();
-        let agent = create_fact_check_agent(llm, tools);
-        let findings = agent.review(&review_clauses).await;
+        let findings = ai_bid::agents::react_loop::review_clauses_parallel(
+            &review_clauses,
+            create_fact_check_agent,
+            &llm_factory,
+            &tools_factory,
+            max_parallel,
+            None,
+            None,
+            "FactCheckAgent",
+        )
+        .await;
 
         CoordinatorOutput {
             findings,

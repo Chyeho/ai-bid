@@ -500,6 +500,7 @@ mod tests {
             finding: RiskFinding {
                 risk_id: risk_id.to_string(),
                 clause_ids: vec![chunk_id.to_string()],
+                block_ids: Vec::new(),
                 agent: "TestAgent".to_string(),
                 no_risk: false,
                 severity: RiskSeverity::High,
@@ -516,6 +517,9 @@ mod tests {
                 truncated: false,
                 suggested_agent: None,
                 citations: Vec::new(),
+                page_number: None,
+                section_path: None,
+                context: None,
             },
             law_refs: vec!["《测试法》第1条".to_string()],
         }

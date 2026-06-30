@@ -1,10 +1,11 @@
 package com.ithsd.smart_tender.controller;
 
-import com.ithsd.smart_tender.pojo.dto.CreateAuditTaskRequest;
-import com.ithsd.smart_tender.pojo.result.Result;
-import com.ithsd.smart_tender.pojo.vo.AuditTaskCreateVO;
-import com.ithsd.smart_tender.pojo.vo.AuditTaskStatusVO;
-import com.ithsd.smart_tender.pojo.vo.ResultVO;
+import com.ithsd.smart_tender.model.dto.CreateAuditTaskRequest;
+import com.ithsd.smart_tender.model.dto.rust.RustBlockBBoxResponse;
+import com.ithsd.smart_tender.model.result.Result;
+import com.ithsd.smart_tender.model.vo.AuditTaskCreateVO;
+import com.ithsd.smart_tender.model.vo.AuditTaskStatusVO;
+import com.ithsd.smart_tender.model.vo.ResultVO;
 import com.ithsd.smart_tender.service.AuditTaskService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
@@ -21,6 +22,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.List;
 import java.util.Map;
 
 @Validated
@@ -77,6 +79,18 @@ public class AuditTaskController {
     ) {
         auditTaskService.processAuditResult(taskId, responseBody);
         return Result.success();
+    }
+
+    /**
+     * 查询指定 block_id 的 BBox 坐标（代理到 Rust 引擎）。
+     * 前端用于 bbox-based PDF 精确高亮。
+     */
+    @GetMapping("/{taskId}/blocks")
+    public Result<List<RustBlockBBoxResponse>> getBlockBboxes(
+            @PathVariable @NotBlank(message = "taskId不能为空") String taskId,
+            @RequestParam("ids") String blockIds
+    ) {
+        return Result.success(auditTaskService.getBlockBboxes(taskId, blockIds));
     }
 
 }

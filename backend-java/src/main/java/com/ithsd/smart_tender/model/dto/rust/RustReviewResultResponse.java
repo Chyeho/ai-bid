@@ -1,0 +1,37 @@
+package com.ithsd.smart_tender.model.dto.rust;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import lombok.Data;
+
+/**
+ * Rust {@code GET /api/v1/review/:doc_id/result} 返回体。
+ *
+ * <p>异步审核结果查询：</p>
+ * <ul>
+ *   <li>{@code "completed"} → {@code result} 有值</li>
+ *   <li>{@code "pending"} → 审查仍在进行中</li>
+ *   <li>{@code "failed"} → {@code error} 有值</li>
+ * </ul>
+ */
+@Data
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class RustReviewResultResponse {
+    /** "pending" | "completed" | "failed" */
+    private String status;
+    /** 审核结果（仅 completed 时有值） */
+    private RustReviewResponse result;
+    /** 错误消息（仅 failed 时有值） */
+    private String error;
+
+    public boolean isCompleted() {
+        return "completed".equals(status);
+    }
+
+    public boolean isPending() {
+        return "pending".equals(status);
+    }
+
+    public boolean isFailed() {
+        return "failed".equals(status);
+    }
+}

@@ -1,6 +1,6 @@
 package com.ithsd.smart_tender.service;
 
-import com.ithsd.smart_tender.pojo.entity.KnowledgeChunk;
+import com.ithsd.smart_tender.model.entity.KnowledgeChunk;
 import java.io.IOException;
 import java.util.List;
 

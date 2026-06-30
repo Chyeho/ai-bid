@@ -1,11 +1,11 @@
 package com.ithsd.smart_tender.service;
 
-import com.ithsd.smart_tender.pojo.dto.TenderDTO;
-import com.ithsd.smart_tender.pojo.dto.TenderPageQueryDTO;
-import com.ithsd.smart_tender.pojo.result.PageResult;
-import com.ithsd.smart_tender.pojo.vo.TenderProjectVO;
-import com.ithsd.smart_tender.pojo.vo.TenderStatsVO;
-import com.ithsd.smart_tender.pojo.vo.TenderVO;
+import com.ithsd.smart_tender.model.dto.TenderDTO;
+import com.ithsd.smart_tender.model.dto.TenderPageQueryDTO;
+import com.ithsd.smart_tender.model.result.PageResult;
+import com.ithsd.smart_tender.model.vo.TenderProjectVO;
+import com.ithsd.smart_tender.model.vo.TenderStatsVO;
+import com.ithsd.smart_tender.model.vo.TenderVO;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;

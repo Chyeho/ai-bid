@@ -1,6 +1,6 @@
 package com.ithsd.smart_tender.sse;
 
-import com.ithsd.smart_tender.pojo.enums.SseEventTypeEnum;
+import com.ithsd.smart_tender.model.enums.SseEventTypeEnum;
 
 public class ReplaySseEvent {
     private String eventId;

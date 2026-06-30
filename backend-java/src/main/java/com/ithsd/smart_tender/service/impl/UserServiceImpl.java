@@ -2,11 +2,12 @@ package com.ithsd.smart_tender.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ithsd.smart_tender.mapper.UserMapper;
-import com.ithsd.smart_tender.pojo.dto.UserLoginDTO;
-import com.ithsd.smart_tender.pojo.dto.UserRegisterDTO;
-import com.ithsd.smart_tender.pojo.entity.User;
+import com.ithsd.smart_tender.model.dto.UserLoginDTO;
+import com.ithsd.smart_tender.model.dto.UserRegisterDTO;
+import com.ithsd.smart_tender.model.entity.User;
 import com.ithsd.smart_tender.service.UserService;
-import com.ithsd.smart_tender.utils.MD5Util;
+import com.ithsd.smart_tender.common.BizException;
+import com.ithsd.smart_tender.common.util.MD5Util;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
@@ -46,14 +47,14 @@ public class UserServiceImpl implements UserService {
         User existUser = userMapper.selectOne(wrapper);
         
         if (existUser != null) {
-            throw new RuntimeException("U用户名已存在");
+            throw new BizException("用户名已存在");
         }
 
         LambdaQueryWrapper<User> phoneWrapper = new LambdaQueryWrapper<>();
         phoneWrapper.eq(User::getPhone, userRegisterDTO.getPhone());
         User existPhone = userMapper.selectOne(phoneWrapper);
         if (existPhone != null) {
-             throw new RuntimeException("手机号已存在");
+             throw new BizException("手机号已存在");
         }
 
         String password = userRegisterDTO.getPassword();

@@ -77,7 +77,7 @@ export const HeaderToolbar: React.FC<HeaderToolbarProps> = ({ isMobile }) => {
                         alignItems: 'center',
                      }}
                   >
-                     {userInfo?.realName || '未知用户'}
+                     {userInfo?.realName || userInfo?.username || '未知用户'}
                   </span>
                )}
             </Space>

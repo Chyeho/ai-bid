@@ -74,7 +74,7 @@ export const MobileFileCard: React.FC<MobileFileCardProps> = ({
     <div className="mobile-file-card">
       <div className="mobile-file-card-header">
         <div className="mobile-file-card-title-row">
-          <span className="mobile-file-card-name">{file.file_name}</span>
+          <span className="mobile-file-card-name">{file.fileName}</span>
           <div className="mobile-file-card-badges">
             <Tag color={categoryColorMap[file.category]} className="mobile-file-card-category">
               {categoryMap[file.category]}
@@ -90,7 +90,7 @@ export const MobileFileCard: React.FC<MobileFileCardProps> = ({
       </div>
       <div className="mobile-file-card-info">
         <span className="mobile-file-card-meta">
-          {file.upload_time} · {scopeMap[file.applicable_scope]} · {file.upload_user_name}
+          {file.uploadTime} · {scopeMap[file.applicableScope]} · {file.uploadUserName}
         </span>
       </div>
       <div className="mobile-file-card-actions">

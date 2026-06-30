@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useDispatch } from 'react-redux';
 
-import { Form, message } from 'antd';
+import { Form, App } from 'antd';
 
 import { setCredentials } from '@/store/slices/authSlice';
 
@@ -16,6 +16,8 @@ export function LoginPage() {
    const navigate = useNavigate();
    const location = useLocation();
    const dispatch = useDispatch();
+
+   const { message } = App.useApp();
 
    const [activeTab, setActiveTab] = useState('login');
    const [loginForm] = Form.useForm<LoginFormValues>();
@@ -65,7 +67,13 @@ export function LoginPage() {
          } else {
             message.error(response.msg || '注册失败');
          }
-      } catch {}
+      } catch (error: any) {
+         const errMsg =
+            error?.response?.data?.msg ||
+            error?.message ||
+            '注册失败，请稍后重试';
+         message.error(errMsg);
+      }
    };
 
    return (

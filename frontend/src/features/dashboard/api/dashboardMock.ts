@@ -39,7 +39,7 @@ const generateMockData = (): ProjectItem[] => {
             filePath: `/files/bid_${index + 1}.pdf`,
             fileSize: Math.floor(Math.random() * 10000000) + 1000000,
             fileType: Math.random() > 0.5 ? 'pdf' : 'word',
-            fileCategory: Math.random() > 0.5 ? '标书' : '合同',
+            fileCategory: Math.random() > 0.5 ? 'bid' : 'contract',
             bidName: mockProjectNames[index],
             supplierName: mockSuppliers[index],
             budgetAmount: Math.floor(Math.random() * 1000000) + 100000,

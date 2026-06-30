@@ -1,8 +1,7 @@
 import { Tag, type TableColumnsType } from 'antd';
-import { CATEGORY_MAP } from '@/features/bidAudit/types';
 import { EllipsisTooltip } from '@/components/EllipsisTooltip/EllipsisTooltip';
 import type { GlobalToken } from 'antd';
-import type { AuditCategory, AuditIssue } from '../types';
+import type { AuditIssue } from '../types';
 
 export const useTableColumns = (
    currentPage: number = 1,
@@ -48,7 +47,7 @@ export const useTableColumns = (
          dataIndex: 'category',
          align: 'center',
          width: 120,
-         render: (cat: string) => CATEGORY_MAP[cat as AuditCategory] ?? cat,
+         render: (cat: string) => cat,
       },
       {
          title: '问题描述',

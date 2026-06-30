@@ -1,5 +1,7 @@
 package com.ithsd.smart_tender.service.queue;
 
+import com.ithsd.smart_tender.service.engine.queue.AuditQueueProperties;
+import com.ithsd.smart_tender.service.engine.queue.RedisListAuditTaskDispatcher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;

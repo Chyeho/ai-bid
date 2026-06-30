@@ -1,7 +1,6 @@
 import React from 'react';
-import { Tabs, Input, Select, Button } from 'antd';
+import { Tabs, Input, Button } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
-import { CATEGORY_MAP } from '@/features/bidAudit/types';
 import { useStyles } from '../style';
 import { useIsMobile } from '@/hooks/useMediaQuery';
 
@@ -19,7 +18,6 @@ interface IssueTableFilterProps {
 
 export const IssueTableFilter: React.FC<IssueTableFilterProps> = ({
    severity,
-   category,
    keyword,
    onChange,
    onReset,
@@ -34,9 +32,10 @@ export const IssueTableFilter: React.FC<IssueTableFilterProps> = ({
             onChange={(val) => onChange({ severity: val })}
             items={[
                { key: 'all', label: '全部' },
-               { key: 'critical', label: '严重' },
-               { key: 'warning', label: '一般' },
-               { key: 'info', label: '提示' },
+               { key: 'high', label: '高风险' },
+               { key: 'medium', label: '中风险' },
+               { key: 'low', label: '低风险' },
+               { key: 'info', label: '信息' },
             ]}
             style={{ marginBottom: -16 }}
             size='small'
@@ -53,21 +52,6 @@ export const IssueTableFilter: React.FC<IssueTableFilterProps> = ({
                   height: isMobile ? 40 : 32,
                }}
                allowClear
-            />
-
-            <Select
-               placeholder='类型筛选'
-               allowClear
-               style={{
-                  width: isMobile ? '100%' : 120,
-                  height: isMobile ? 40 : 32,
-               }}
-               value={category === 'all' ? undefined : category}
-               onChange={(val) => onChange({ category: val || 'all' })}
-               options={Object.entries(CATEGORY_MAP).map(([key, val]) => ({
-                  value: key,
-                  label: val,
-               }))}
             />
 
             <Button

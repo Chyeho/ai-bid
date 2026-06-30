@@ -3,21 +3,21 @@ package com.ithsd.smart_tender.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.CollectionUtils;
-import com.ithsd.smart_tender.context.BaseContext;
+import com.ithsd.smart_tender.common.BaseContext;
 import com.ithsd.smart_tender.mapper.AuditIssueMapper;
 import com.ithsd.smart_tender.mapper.AuditReportMapper;
 import com.ithsd.smart_tender.mapper.AuditTaskMapper;
 import com.ithsd.smart_tender.mapper.ProjectMapper;
 import com.ithsd.smart_tender.mapper.TenderMapper;
-import com.ithsd.smart_tender.pojo.dto.ProjectDTO;
-import com.ithsd.smart_tender.pojo.entity.AuditIssue;
-import com.ithsd.smart_tender.pojo.entity.AuditReport;
-import com.ithsd.smart_tender.pojo.entity.AuditTask;
-import com.ithsd.smart_tender.pojo.entity.Project;
-import com.ithsd.smart_tender.pojo.entity.Tender;
-import com.ithsd.smart_tender.pojo.enums.AuditTaskStatusEnum;
-import com.ithsd.smart_tender.pojo.vo.ProjectVO;
-import com.ithsd.smart_tender.pojo.vo.TenderWithAuditVO;
+import com.ithsd.smart_tender.model.dto.ProjectDTO;
+import com.ithsd.smart_tender.model.entity.AuditIssue;
+import com.ithsd.smart_tender.model.entity.AuditReport;
+import com.ithsd.smart_tender.model.entity.AuditTask;
+import com.ithsd.smart_tender.model.entity.Project;
+import com.ithsd.smart_tender.model.entity.Tender;
+import com.ithsd.smart_tender.model.enums.AuditTaskStatusEnum;
+import com.ithsd.smart_tender.model.vo.ProjectVO;
+import com.ithsd.smart_tender.model.vo.TenderWithAuditVO;
 import com.ithsd.smart_tender.service.ProjectService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.BeanUtils;
@@ -251,6 +251,10 @@ public class ProjectServiceImpl implements ProjectService {
         if (task == null) {
             return null;
         }
-        return task.getAuditResult();
+        // auditResult 已废弃，基于 taskStatus 映射结果
+        Integer status = task.getTaskStatus();
+        if (AuditTaskStatusEnum.COMPLETED.getCode().equals(status)) return "pass";
+        if (AuditTaskStatusEnum.FAILED.getCode().equals(status)) return "reject";
+        return "pending";
     }
 }

@@ -49,10 +49,24 @@ export const getBidDetail = async (id: number): Promise<BidDetail> => {
    return res.data;
 };
 
+/** 所有 SSE 事件类型（与 Java SseEventTypeEnum 对齐） */
+export type SseEventType =
+   | 'progress'
+   | 'issue'
+   | 'issues'
+   | 'complete'
+   | 'agent_progress'
+   | 'trace'
+   | 'phase'
+   | 'stats'
+   | 'finding_added'
+   | 'finding_updated'
+   | 'finding_removed';
+
 export const connectStream = async (
    taskId: string,
    lastEventId: string,
-   onMessage: (type: 'progress' | 'issues', data: unknown) => void,
+   onMessage: (type: SseEventType, data: unknown) => void,
    onComplete: () => void,
    onError: (err: Error) => void
 ) => {
@@ -77,7 +91,13 @@ export const connectStream = async (
       const decoder = new TextDecoder('utf-8');
 
       let buffer = '';
-      let currentEvent = 'message'; // 默认事件类型
+
+      // 所有需要转发到 onMessage 的事件类型
+      const knownTypes = new Set([
+         'issue', 'issues', 'progress', 'agent_progress',
+         'trace', 'phase', 'stats', 'finding_added',
+         'finding_updated', 'finding_removed',
+      ]);
 
       while (true) {
          const { done, value } = await reader.read();
@@ -87,9 +107,24 @@ export const connectStream = async (
          const lines = buffer.split('\n'); // 按行分割
          buffer = lines.pop() || ''; // 保留最后一行(可能未读取完整)
 
+         let currentEvent = 'message';
+         let lastId = '';
+
          for (const line of lines) {
             const trimmedLine = line.trim();
-            if (!trimmedLine) continue;
+            if (!trimmedLine) {
+               currentEvent = 'message';
+               continue;
+            }
+
+            // 0. 捕获 id（存 localStorage 用于断线重连）
+            if (trimmedLine.startsWith('id:')) {
+               lastId = trimmedLine.slice(3).trim();
+               try {
+                  localStorage.setItem(`auditLastEvent:${taskId}`, lastId);
+               } catch { /* ignore */ }
+               continue;
+            }
 
             // 1. 捕获 event 类型
             if (trimmedLine.startsWith('event:')) {
@@ -109,13 +144,16 @@ export const connectStream = async (
                      return;
                   }
 
-                  // 2) ISSUE 事件：后端使用 event: issue（单数）
-                  if (currentEvent === 'issue' || currentEvent === 'issues') {
-                     onMessage('issues', parsed);
+                  // 2) 通用事件转发：已知类型 → onMessage
+                  if (knownTypes.has(currentEvent)) {
+                     onMessage(currentEvent as SseEventType, parsed);
                   }
-                  // 3) PROGRESS 事件
-                  else if (currentEvent === 'progress') {
-                     onMessage('progress', parsed);
+                  // 3) 默认 event: message — 检查 JSON 内 event 字段（兼容旧格式）
+                  else if (currentEvent === 'message' && parsed.event) {
+                     const innerType = parsed.event as string;
+                     if (knownTypes.has(innerType)) {
+                        onMessage(innerType as SseEventType, parsed.data ?? parsed);
+                     }
                   }
                } catch {
                   console.warn('[SSE] 数据解析失败:', dataStr);

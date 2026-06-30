@@ -467,6 +467,7 @@ mod tests {
             page_start: 0,
             page_end: 1,
             source_block_ids: vec![],
+            bbox_refs: vec![],
         }
     }
 

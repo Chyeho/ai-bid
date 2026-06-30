@@ -2,12 +2,14 @@
 backend-rust/target
 backend-rust/output
 backend-rust/models
+backend-rust/tmp
 
 # ── 后端 Java (业务平台) ──
 backend-java/target
 backend-java/build
 backend-java/.gradle
 backend-java/node_modules
+backend-java/logs
 
 # ── 前端 (React) ──
 frontend/node_modules
@@ -18,3 +20,8 @@ target/
 
 # ── 共享 ──
 .env
+
+# ── 运行时产物 ──
+output/
+tmp/
+logs/

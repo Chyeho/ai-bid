@@ -1,4 +1,4 @@
-//! LLM 客户端抽象 — 多协议支持（DashScope 原生 + OpenAI 兼容）。
+﻿//! LLM 客户端抽象 — 多协议支持（DashScope 原生 + OpenAI 兼容）。
 //!
 //! ## 协议选择
 //!
@@ -24,6 +24,7 @@ use serde_json::Value;
 
 /// 根据 `AIBID_LLM_PROTOCOL` 环境变量创建对应的 LLM 客户端。
 ///
+/// 用于批量审核等业务场景，模型由 `DASHSCOPE_MODEL` / `LLM_MODEL` 控制。
 /// * `dashscope` — DashScope 原生 API（默认）
 /// * `openai_compatible` — OpenAI 兼容端点
 pub fn create_llm_client() -> Result<Box<dyn LlmClient>> {
@@ -79,7 +80,7 @@ impl DashScopeNativeClient {
         }
     }
 
-    /// 从环境变量创建。
+    /// 从环境变量创建（业务模型）。
     ///
     /// 读取顺序：
     /// - `DASHSCOPE_API_KEY` → `OPENAI_API_KEY`（回退）
@@ -164,7 +165,13 @@ impl DashScopeNativeClient {
             .context("DashScope 返回空 output.choices")?;
 
         let msg = &choice["message"];
-        let content = msg["content"]
+        // 提取 reasoning_content（DeepSeek-R1 / qwq 等推理模型专用字段）
+        let reasoning = msg["reasoning_content"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let raw_content = msg["content"]
             .as_str()
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
@@ -189,7 +196,18 @@ impl DashScopeNativeClient {
             })
             .unwrap_or_default();
 
-        Ok(LlmResponse { content, tool_calls })
+        let has_tool_calls = !tool_calls.is_empty();
+
+        // 推理分配：reasoning_content 优先 -> content+tool_calls -> 纯回答
+        let (thought, content) = if let Some(reason) = reasoning {
+            (Some(reason), raw_content)
+        } else if has_tool_calls && raw_content.is_some() {
+            (raw_content, None)
+        } else {
+            (None, raw_content)
+        };
+
+        Ok(LlmResponse { content, thought, tool_calls })
     }
 }
 
@@ -305,7 +323,7 @@ impl OpenAICompatibleClient {
         }
     }
 
-    /// 使用环境变量 OPENAI_API_KEY 和 OPENAI_BASE_URL 创建。
+    /// 使用环境变量创建（业务模型）。
     pub fn from_env() -> Result<Self> {
         let api_key =
             std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY 环境变量未设置")?;
@@ -370,7 +388,14 @@ impl OpenAICompatibleClient {
             .context("LLM 返回空 choices")?;
 
         let msg = &choice["message"];
-        let content = msg["content"]
+
+        // 提取 reasoning_content（DeepSeek-R1 等推理模型专用字段）
+        let reasoning = msg["reasoning_content"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let raw_content = msg["content"]
             .as_str()
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
@@ -395,7 +420,18 @@ impl OpenAICompatibleClient {
             })
             .unwrap_or_default();
 
-        Ok(LlmResponse { content, tool_calls })
+        let has_tool_calls = !tool_calls.is_empty();
+
+        // 推理分配：reasoning_content 优先 -> content+tool_calls -> 纯回答
+        let (thought, content) = if let Some(reason) = reasoning {
+            (Some(reason), raw_content)
+        } else if has_tool_calls && raw_content.is_some() {
+            (raw_content, None)
+        } else {
+            (None, raw_content)
+        };
+
+        Ok(LlmResponse { content, thought, tool_calls })
     }
 }
 

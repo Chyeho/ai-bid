@@ -1,13 +1,13 @@
 package com.ithsd.smart_tender.sse;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ithsd.smart_tender.pojo.entity.AuditTaskEventEntity;
-import com.ithsd.smart_tender.pojo.enums.SseEventTypeEnum;
-import com.ithsd.smart_tender.repository.AuditTaskEventRepository;
+import com.ithsd.smart_tender.mapper.AuditTaskEventMapper;
+import com.ithsd.smart_tender.model.entity.AuditTaskEvent;
+import com.ithsd.smart_tender.model.enums.SseEventTypeEnum;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -19,11 +19,11 @@ import java.util.List;
 public class AuditTaskEventService {
     private static final Logger log = LoggerFactory.getLogger(AuditTaskEventService.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private final AuditTaskEventRepository eventRepository;
+    private final AuditTaskEventMapper eventMapper;
     private final AuditSseProperties sseProperties;
 
-    public AuditTaskEventService(AuditTaskEventRepository eventRepository, AuditSseProperties sseProperties) {
-        this.eventRepository = eventRepository;
+    public AuditTaskEventService(AuditTaskEventMapper eventMapper, AuditSseProperties sseProperties) {
+        this.eventMapper = eventMapper;
         this.sseProperties = sseProperties;
     }
 
@@ -32,13 +32,13 @@ public class AuditTaskEventService {
             return null;
         }
         try {
-            AuditTaskEventEntity event = new AuditTaskEventEntity();
+            AuditTaskEvent event = new AuditTaskEvent();
             event.setTaskId(taskId);
             event.setEventType(eventType.getEventName());
             event.setEventData(OBJECT_MAPPER.writeValueAsString(payload));
             event.setCreatedAt(LocalDateTime.now());
-            AuditTaskEventEntity saved = eventRepository.save(event);
-            return String.valueOf(saved.getId());
+            eventMapper.insert(event);
+            return String.valueOf(event.getId());
         } catch (RuntimeException | JsonProcessingException ex) {
             log.warn("persist task event failed, taskId={}, eventType={}", taskId, eventType.getEventName(), ex);
             return null;
@@ -52,8 +52,15 @@ public class AuditTaskEventService {
         }
         long startId = parseLastEventId(lastEventId);
         int limit = Math.max(1, sseProperties.getReplayMaxEvents());
-        List<AuditTaskEventEntity> entities = eventRepository.findByTaskIdAndIdGreaterThanOrderByIdAsc(taskId, startId, PageRequest.of(0, limit));
-        for (AuditTaskEventEntity entity : entities) {
+
+        LambdaQueryWrapper<AuditTaskEvent> qw = new LambdaQueryWrapper<AuditTaskEvent>()
+                .eq(AuditTaskEvent::getTaskId, taskId)
+                .gt(AuditTaskEvent::getId, startId)
+                .orderByAsc(AuditTaskEvent::getId)
+                .last("LIMIT " + limit);
+        List<AuditTaskEvent> entities = eventMapper.selectList(qw);
+
+        for (AuditTaskEvent entity : entities) {
             SseEventTypeEnum eventType = SseEventTypeEnum.fromEventName(entity.getEventType());
             if (eventType == null) {
                 continue;

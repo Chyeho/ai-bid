@@ -12,13 +12,47 @@ export default defineConfig({
    },
    server: {
       host: '127.0.0.1',
-      port: 3001,
+      port: 5173,
       strictPort: false,
       proxy: {
-         '/api': {
-            target: 'http://localhost:8086',
+         // SSE 端点 — 优先匹配，禁用缓冲确保事件实时推送
+         '/api/chat/stream': {
+            target: 'http://127.0.0.1:8086',
             changeOrigin: true,
-            // rewrite: (path) => path.replace(/^\/api/, ''), // 【按需开启】如果后端接口本身没有 /api 前缀，把这行注释打开
+            selfHandleResponse: true,
+            configure: (proxy) => {
+               proxy.on('proxyRes', (proxyRes, _req, res) => {
+                  // Handle upstream errors
+                  proxyRes.on('error', () => {
+                     if (!res.headersSent) {
+                        res.writeHead(502);
+                        res.end(JSON.stringify({ message: 'Upstream error' }));
+                     }
+                  });
+                  // Handle client disconnect
+                  res.on('close', () => {
+                     proxyRes.destroy();
+                  });
+                  res.writeHead(proxyRes.statusCode || 200, {
+                     'Content-Type': 'text/event-stream',
+                     'Cache-Control': 'no-cache',
+                     'Connection': 'keep-alive',
+                     ...proxyRes.headers,
+                  });
+                  proxyRes.pipe(res);
+               });
+               // Handle proxy-level errors (e.g. connection refused)
+               proxy.on('error', (_err, _req, res: any) => {
+                  if (res?.writeHead) {
+                     res.writeHead(502, { 'Content-Type': 'application/json' });
+                     res.end(JSON.stringify({ message: 'Proxy error' }));
+                  }
+               });
+            },
+         },
+         '/api': {
+            target: 'http://127.0.0.1:8086',
+            changeOrigin: true,
          },
       },
    },

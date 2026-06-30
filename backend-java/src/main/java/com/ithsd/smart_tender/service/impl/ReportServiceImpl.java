@@ -6,12 +6,13 @@ import com.ithsd.smart_tender.mapper.AuditReportMapper;
 import com.ithsd.smart_tender.mapper.AuditTaskMapper;
 import com.ithsd.smart_tender.mapper.TenderMapper;
 import com.ithsd.smart_tender.mapper.UserMapper;
-import com.ithsd.smart_tender.pojo.entity.AuditIssue;
-import com.ithsd.smart_tender.pojo.entity.AuditReport;
-import com.ithsd.smart_tender.pojo.entity.AuditTask;
-import com.ithsd.smart_tender.pojo.entity.Tender;
-import com.ithsd.smart_tender.pojo.entity.User;
-import com.ithsd.smart_tender.pojo.vo.ReportVO;
+import com.ithsd.smart_tender.model.entity.AuditIssue;
+import com.ithsd.smart_tender.model.entity.AuditReport;
+import com.ithsd.smart_tender.model.entity.AuditTask;
+import com.ithsd.smart_tender.model.entity.Tender;
+import com.ithsd.smart_tender.model.entity.User;
+import com.ithsd.smart_tender.model.enums.AuditTaskStatusEnum;
+import com.ithsd.smart_tender.model.vo.ReportVO;
 import com.ithsd.smart_tender.service.ReportService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.BeanUtils;
@@ -154,17 +155,23 @@ public class ReportServiceImpl implements ReportService {
         md.append("\n---\n\n");
         
         md.append("## 二、审核结论\n\n");
-        md.append("**审核结果：** ").append(getAuditResultText(task.getAuditResult())).append("  \n\n");
-        md.append("**综合评价：** ").append(getEvaluationText(task)).append("  \n");
+        md.append("**审核结果：** ").append(getAuditResultText(task)).append("  \n\n");
+        md.append("**综合评价：** ").append(getEvaluationText(task, issues)).append("  \n");
         md.append("\n---\n\n");
         
+        // 从 issues 列表计算统计（不再依赖 AuditTask 中的废弃字段）
+        long issueCount = issues.size();
+        long criticalCount = issues.stream().filter(i -> "high".equals(i.getSeverity())).count();
+        long warningCount = issues.stream().filter(i -> "medium".equals(i.getSeverity())).count();
+        long infoCount = issues.stream().filter(i -> "low".equals(i.getSeverity()) || "info".equals(i.getSeverity())).count();
+
         md.append("## 三、问题汇总统计\n\n");
         md.append("| 统计项 | 数量 |\n");
         md.append("| --- | --- |\n");
-        md.append("| 问题总数 | ").append(task.getIssueCount() != null ? task.getIssueCount() : 0).append(" |\n");
-        md.append("| 严重问题数量 | ").append(task.getCriticalCount() != null ? task.getCriticalCount() : 0).append(" |\n");
-        md.append("| 一般问题数量 | ").append(task.getWarningCount() != null ? task.getWarningCount() : 0).append(" |\n");
-        md.append("| 提示信息数量 | ").append(task.getInfoCount() != null ? task.getInfoCount() : 0).append(" |\n");
+        md.append("| 问题总数 | ").append(issueCount).append(" |\n");
+        md.append("| 严重问题数量 | ").append(criticalCount).append(" |\n");
+        md.append("| 一般问题数量 | ").append(warningCount).append(" |\n");
+        md.append("| 提示信息数量 | ").append(infoCount).append(" |\n");
         
         Map<String, Long> categoryCount = issues.stream()
                 .filter(i -> i.getCategory() != null)
@@ -244,24 +251,23 @@ public class ReportServiceImpl implements ReportService {
         };
     }
 
-    private String getAuditResultText(String auditResult) {
-        if (auditResult == null) return "待审核";
-        return switch (auditResult) {
-            case "pass" -> "✓ 通过";
-            case "reject" -> "✗ 不通过";
-            case "revise" -> "⚠ 需修改";
-            default -> auditResult;
-        };
+    private String getAuditResultText(AuditTask task) {
+        if (task.getTaskStatus() == null) return "待审核";
+        Integer status = task.getTaskStatus();
+        if (AuditTaskStatusEnum.COMPLETED.getCode().equals(status)) return "✓ 已完成";
+        if (AuditTaskStatusEnum.FAILED.getCode().equals(status)) return "✗ 失败";
+        if (AuditTaskStatusEnum.PROCESSING.getCode().equals(status)) return "⏳ 进行中";
+        return "待审核";
     }
 
-    private String getEvaluationText(AuditTask task) {
-        if (task.getAuditResult() == null) {
+    private String getEvaluationText(AuditTask task, List<AuditIssue> issues) {
+        if (!AuditTaskStatusEnum.COMPLETED.getCode().equals(task.getTaskStatus())) {
             return "审核尚未完成";
         }
-        
-        int criticalCount = task.getCriticalCount() != null ? task.getCriticalCount() : 0;
-        int warningCount = task.getWarningCount() != null ? task.getWarningCount() : 0;
-        
+
+        long criticalCount = issues.stream().filter(i -> "high".equals(i.getSeverity())).count();
+        long warningCount = issues.stream().filter(i -> "medium".equals(i.getSeverity())).count();
+
         if (criticalCount > 0) {
             return "标书存在严重问题，建议不通过或要求供应商修改后重新提交。";
         } else if (warningCount > 0) {

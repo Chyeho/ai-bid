@@ -19,14 +19,17 @@
 //! 审查过程中支持动态升降级（turn 2 检测）。
 
 use crate::agents::bus::{AgentBus, BusMessage};
+use crate::agents::review_event::{ReviewEvent, ReviewEventBus};
 use crate::agents::session_graph::SessionGraph;
 use crate::agents::trace::{TraceEventType, TraceLog};
 use crate::agents::types::*;
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
+use tokio::task::JoinSet;
 
 // ─── LLM 客户端抽象 ───────────────────────────────────────────
 
@@ -43,6 +46,13 @@ pub struct ToolCall {
 pub struct LlmResponse {
     /// 文本回复（可能为 None，当 LLM 只返回 tool_calls 时）
     pub content: Option<String>,
+    /// LLM 在调用工具前的推理/思考文本（ReAct Thought）。
+    ///
+    /// 来源优先级:
+    /// 1. API 响应中的 `reasoning_content` 字段（DeepSeek-R1、qwq 等推理模型）
+    /// 2. 当 `content` 与 `tool_calls` 同时存在时，`content` 识别为 thought
+    /// 3. 仅 content（无工具调用）→ content 直接作为回答，thought 为 None
+    pub thought: Option<String>,
     /// 工具调用列表
     pub tool_calls: Vec<ToolCall>,
 }
@@ -227,6 +237,8 @@ pub struct ReActLoop {
     /// ★ stderr 打印锁：多个 Agent 并行时，确保每个 Agent 的多行日志块不交叠。
     /// 仅用于 eprintln 序列化，不在 await 期间持有。
     pub print_lock: Option<Arc<std::sync::Mutex<()>>>,
+    /// SSE 实时推送通道（可选，仅 HTTP server 模式启用）
+    pub review_events: Option<Arc<ReviewEventBus>>,
 }
 
 impl ReActLoop {
@@ -246,6 +258,7 @@ impl ReActLoop {
             search_cache: Mutex::new(HashMap::new()),
             trace: Arc::new(Mutex::new(TraceLog::new())),
             print_lock: None,
+            review_events: None,
         }
     }
 
@@ -272,11 +285,18 @@ impl ReActLoop {
         self
     }
 
+    /// 设置 SSE 实时推送通道（仅在 HTTP server 模式下启用）。
+    pub fn with_review_events(mut self, events: Arc<ReviewEventBus>) -> Self {
+        self.review_events = Some(events);
+        self
+    }
+
     // ── 主入口 ──────────────────────────────────────────────
 
     /// 审查一组条款。每个条款运行独立的 ReAct 循环。
     pub async fn review(&self, clauses: &[ReviewClause]) -> Vec<RiskFinding> {
         let mut findings = Vec::with_capacity(clauses.len());
+        let total = clauses.len();
 
         for (idx, clause) in clauses.iter().enumerate() {
             // 优先从 SessionGraph 获取全局唯一 risk_id，避免多 Agent 并发下 ID 碰撞。
@@ -288,9 +308,30 @@ impl ReActLoop {
                 .unwrap_or_else(|| format!("R_{:03}", idx + 1));
             let finding = self.react_loop(clause, &risk_id).await;
             findings.push(finding);
+
+            // 每审完一条条款后，发送 AgentProgress（SSE 实时推送）
+            if let Some(ref events) = self.review_events {
+                let raw_findings = findings.iter().filter(|f| !f.no_risk).count();
+                events.emit(&ReviewEvent::AgentProgress {
+                    agent_id: self.config.name.clone(),
+                    agent_label: self.config.name.clone(),
+                    clauses_done: idx + 1,
+                    clauses_total: total,
+                    raw_findings,
+                    status: "running".to_string(),
+                });
+            }
         }
 
         findings
+    }
+
+    /// 审查单条条款（公开入口，供并行调度使用）。
+    ///
+    /// 与 `react_loop` 功能相同，但作为公开 API 暴露，
+    /// 使外部并行调度器可以为每条条款创建独立 task。
+    pub async fn review_single(&self, clause: &ReviewClause, risk_id: &str) -> RiskFinding {
+        self.react_loop(clause, risk_id).await
     }
 
     // ── 核心 ReAct 循环 ─────────────────────────────────────
@@ -345,6 +386,18 @@ impl ReActLoop {
         let mut turn = 0u32;
         while turn < max_turns as u32 {
             turn += 1;
+
+            // SSE: turn_start
+            if let Some(ref events) = self.review_events {
+                events.emit(&ReviewEvent::Trace {
+                    event_type: "turn_start".to_string(),
+                    agent_name: agent_name.clone(),
+                    turn,
+                    clause_id: Some(clause.chunk_id.clone()),
+                    summary: format!("{} 第 {} 轮审查", agent_name, turn),
+                    payload: None,
+                });
+            }
 
             // ── Step 0a: Query SessionGraph — 拉取已知上下文 ──
             if let Some(graph) = &self.graph {
@@ -489,6 +542,23 @@ impl ReActLoop {
                 .await
             {
                 Ok(r) => {
+                    // SSE: agent_thought (推理摘要)
+                    if let Some(ref events) = self.review_events {
+                        let thought_summary = r.content.as_ref()
+                            .map(|c| c.chars().take(200).collect::<String>())
+                            .unwrap_or_default();
+                        if !thought_summary.is_empty() {
+                            events.emit(&ReviewEvent::Trace {
+                                event_type: "agent_thought".to_string(),
+                                agent_name: agent_name.clone(),
+                                turn,
+                                clause_id: Some(clause.chunk_id.clone()),
+                                summary: thought_summary,
+                                payload: None,
+                            });
+                        }
+                    }
+
                     // ── 详细日志：LLM 响应（加锁避免并行 Agent 交叠）──
                     {
                         let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
@@ -525,6 +595,7 @@ impl ReActLoop {
                     return RiskFinding {
                         risk_id: risk_id.to_string(),
                         clause_ids: vec![clause.chunk_id.clone()],
+                        block_ids: Vec::new(),
                         agent: agent_name.clone(),
                         no_risk: true,
                         severity: RiskSeverity::Info,
@@ -541,6 +612,9 @@ impl ReActLoop {
                         truncated: false,
                         suggested_agent: None,
                         citations: Vec::new(),
+                        page_number: None,
+                        section_path: None,
+                        context: None,
                     };
                 }
             };
@@ -623,6 +697,17 @@ impl ReActLoop {
                             finding.truncated = false;
                             finding.risk_id = risk_id.to_string();
 
+                            // ── 自动填充定位字段（§6.4 框架填充约定） ──
+                            // types.rs 注释声明"框架从关联 ReviewClause 自动填充"，
+                            // 此前缺失实现 → 前端收到 page_number=null → 显示"页码待定位"。
+                            // +1: clause.page_start 是 0-based，前端 PDF 页码是 1-based
+                            // 且 JS 中 0 是 falsy 会导致 if(!page)return 短路
+                            finding.page_number = Some(clause.page_start + 1);
+                            finding.section_path = Some(clause.section_path.clone());
+                            finding.context = Some(clause.text.chars().take(500).collect());
+                            // block_ids 暂不自动填充（clause 不含 source_block_ids），
+                            // 前端会走 text-match / bbox-api fallback 路径。
+
                             // ── 自动填充 citations：从 search_cache 提取所有搜索来源 URL ──
                             finding.citations = self.extract_citations().await;
                             if !finding.citations.is_empty() {
@@ -656,6 +741,29 @@ impl ReActLoop {
                                 eprintln!("✅ output_finding 解析成功，审查完成");
                             }
 
+                            // SSE: output_finding
+                            if let Some(ref events) = self.review_events {
+                                let sev_str = match finding.severity {
+                                    RiskSeverity::High => "high",
+                                    RiskSeverity::Medium => "medium",
+                                    RiskSeverity::Low => "low",
+                                    RiskSeverity::Info => "info",
+                                };
+                                events.emit(&ReviewEvent::Trace {
+                                    event_type: "output_finding".to_string(),
+                                    agent_name: agent_name.clone(),
+                                    turn,
+                                    clause_id: Some(clause.chunk_id.clone()),
+                                    summary: format!("发现: {} ({})", finding.risk_type, sev_str),
+                                    payload: Some(serde_json::json!({
+                                        "risk_id": risk_id,
+                                        "severity": sev_str,
+                                        "risk_type": finding.risk_type,
+                                        "confidence": finding.confidence,
+                                    })),
+                                });
+                            }
+
                             // ── 实时广播 High 风险到 AgentBus ──
                             // 不等所有条款完成，让其他 Agent 在本轮即可感知
                             if finding.severity == RiskSeverity::High {
@@ -686,6 +794,22 @@ impl ReActLoop {
                                                     "severity": "high",
                                                 }),
                                             );
+                                        }
+                                        // SSE: agent_bus_send
+                                        if let Some(ref events) = self.review_events {
+                                            events.emit(&ReviewEvent::Trace {
+                                                event_type: "agent_bus_send".to_string(),
+                                                agent_name: agent_name.clone(),
+                                                turn,
+                                                clause_id: Some(clause.chunk_id.clone()),
+                                                summary: format!("High risk broadcast: {} ({})", finding.risk_type, finding.severity),
+                                                payload: Some(serde_json::json!({
+                                                    "from": agent_id.to_string(),
+                                                    "risk_type": finding.risk_type,
+                                                    "clause_ids": finding.clause_ids,
+                                                    "severity": "high",
+                                                })),
+                                            });
                                         }
                                     }
                                 }
@@ -755,6 +879,27 @@ impl ReActLoop {
             for tc in &assistant_tool_calls {
                 let tool_name = &tc.name;
 
+                // SSE: tool_call
+                if let Some(ref events) = self.review_events {
+                    let query = tc.arguments.get("query")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let summary = if query.is_empty() {
+                        format!("调用工具: {}", tool_name)
+                    } else {
+                        format!("{}: {}", tool_name,
+                            query.chars().take(80).collect::<String>())
+                    };
+                    events.emit(&ReviewEvent::Trace {
+                        event_type: "tool_call".to_string(),
+                        agent_name: agent_name.clone(),
+                        turn,
+                        clause_id: Some(clause.chunk_id.clone()),
+                        summary,
+                        payload: None,
+                    });
+                }
+
                 // 搜索缓存逻辑（search_knowledge / web_search 共用）
                 let result = if self.is_search_tool(tool_name) {
                     self.cached_search_knowledge(&tc.arguments).await
@@ -819,6 +964,39 @@ impl ReActLoop {
                         _ => {}
                     }
                 } // 释放打印锁
+
+                // SSE: tool_result
+                if let Some(ref events) = self.review_events {
+                    let summary = if self.is_search_tool(tool_name) {
+                        let hits = Self::count_search_hits(&result);
+                        format!("{} 返回 {} 条结果", tool_name, hits)
+                    } else if tool_name == "read_section" {
+                        let chars = result.get("char_count")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        format!("read_section 返回 {} 字符", chars)
+                    } else {
+                        format!("{} 执行完成", tool_name)
+                    };
+                    let payload = if self.is_search_tool(tool_name) || tool_name == "search_document" {
+                        let sources = Self::extract_search_sources_for_sse(&result, 5);
+                        if sources.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::json!({ "sources": sources }))
+                        }
+                    } else {
+                        None
+                    };
+                    events.emit(&ReviewEvent::Trace {
+                        event_type: "tool_result".to_string(),
+                        agent_name: agent_name.clone(),
+                        turn,
+                        clause_id: Some(clause.chunk_id.clone()),
+                        summary,
+                        payload,
+                    });
+                }
 
                 // 检测空搜索结果
                 if self.is_search_tool(tool_name) || tool_name == "search_document" {
@@ -1065,6 +1243,40 @@ impl ReActLoop {
         }
     }
 
+    /// 从搜索结果中提取 top-N 条 {title, url}，用于 SSE 推送前端展示。
+    fn extract_search_sources_for_sse(result: &serde_json::Value, n: usize) -> Vec<serde_json::Value> {
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        // 1) DashScope / SearXNG: sources 数组
+        if let Some(arr) = result.get("sources").and_then(|s| s.as_array()) {
+            for item in arr.iter().take(n) {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let url = item.get("url")
+                    .or_else(|| item.get("link"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !url.is_empty() {
+                    items.push(serde_json::json!({ "title": title, "url": url }));
+                }
+            }
+        }
+        // 2) search_document: hits 数组（没有 URL，用 score + snippet 代替）
+        if items.is_empty() {
+            if let Some(arr) = result.get("hits").and_then(|h| h.as_array()) {
+                for item in arr.iter().take(n) {
+                    let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    let score = item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    if !title.is_empty() {
+                        items.push(serde_json::json!({
+                            "title": title,
+                            "score": format!("{:.2}", score)
+                        }));
+                    }
+                }
+            }
+        }
+        items
+    }
+
     /// 带缓存的 search_knowledge / web_search 调用。
     async fn cached_search_knowledge(
         &self,
@@ -1153,4 +1365,123 @@ impl ReActLoop {
 
         citations
     }
+}
+
+// ─── 并行条款审查调度器 ────────────────────────────────────────
+
+/// 并行审查多条条款。
+///
+/// 为每条条款创建独立的 LLM 客户端和工具集，通过 `tokio::task::JoinSet`
+/// 并行执行 ReAct 循环，受 `Semaphore` 控制最大并发数。
+///
+/// # 参数
+///
+/// * `clauses` — 待审查条款列表
+/// * `make_agent` — Agent 工厂闭包，接收 (LLM客户端, 工具集) → 返回完全配置的 ReActLoop
+/// * `llm_factory` — LLM 客户端工厂（每条 task 调用一次，创建独立实例）
+/// * `tools_factory` — 工具集工厂（每条 task 调用一次，创建独立实例）
+/// * `max_parallel` — 最大并行审查条款数（Semaphore permits）
+/// * `graph` — SessionGraph（用于生成全局唯一 risk_id，None 时回退到索引编号）
+/// * `review_events` — SSE 推送通道（None 时不推送）
+/// * `agent_name` — Agent 名称（用于日志和进度事件）
+#[allow(clippy::too_many_arguments)]
+pub async fn review_clauses_parallel<F>(
+    clauses: &[ReviewClause],
+    make_agent: F,
+    llm_factory: &(dyn Fn() -> Box<dyn LlmClient> + Send + Sync),
+    tools_factory: &(dyn Fn() -> crate::agents::tools::ToolRegistry + Send + Sync),
+    max_parallel: usize,
+    graph: Option<Arc<SessionGraph>>,
+    review_events: Option<Arc<ReviewEventBus>>,
+    agent_name: &str,
+) -> Vec<RiskFinding>
+where
+    F: Fn(Box<dyn LlmClient>, crate::agents::tools::ToolRegistry) -> ReActLoop + Send + Sync + 'static,
+{
+    if clauses.is_empty() {
+        return vec![];
+    }
+
+    let sem = Arc::new(tokio::sync::Semaphore::new(max_parallel.max(1)));
+    let total = clauses.len();
+    let done = Arc::new(AtomicUsize::new(0));
+    let raw_findings_total = Arc::new(AtomicUsize::new(0));
+    let mut join_set = JoinSet::new();
+
+    for (idx, clause) in clauses.iter().enumerate() {
+        let llm = llm_factory();
+        let tools = tools_factory();
+        let agent = make_agent(llm, tools);
+        let clause = clause.clone();
+        let sem = sem.clone();
+        let graph = graph.clone();
+        let events = review_events.clone();
+        let name = agent_name.to_string();
+        let done = done.clone();
+        let raw_findings_total = raw_findings_total.clone();
+
+        join_set.spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            let risk_id = graph
+                .as_ref()
+                .map(|g| g.next_risk_id())
+                .unwrap_or_else(|| format!("R_{:03}", idx + 1));
+            let finding = agent.review_single(&clause, &risk_id).await;
+
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            if !finding.no_risk {
+                raw_findings_total.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // SSE 实时进度推送
+            if let Some(ref events) = events {
+                events.emit(&ReviewEvent::AgentProgress {
+                    agent_id: name.clone(),
+                    agent_label: name.clone(),
+                    clauses_done: n,
+                    clauses_total: total,
+                    raw_findings: raw_findings_total.load(Ordering::Relaxed),
+                    status: if n >= total {
+                        "completed".to_string()
+                    } else {
+                        "running".to_string()
+                    },
+                });
+            }
+
+            (idx, finding)
+        });
+    }
+
+    // 收集结果，按原始顺序排列
+    let mut findings: Vec<Option<RiskFinding>> = (0..total).map(|_| None).collect();
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok((idx, finding)) => {
+                findings[idx] = Some(finding);
+            }
+            Err(e) => {
+                // task panic — 为该 clause 生成占位 finding
+                eprintln!("[PARALLEL] 条款审查 task 异常: {}", e);
+            }
+        }
+    }
+
+    // 补齐缺失的 finding（task panic 等情况）
+    findings
+        .into_iter()
+        .enumerate()
+        .map(|(i, f)| {
+            f.unwrap_or_else(|| {
+                RiskFinding::truncated_finding(
+                    format!("R_{:03}", i + 1),
+                    clauses[i].chunk_id.clone(),
+                    agent_name,
+                    clauses[i].tier,
+                    clauses[i].tier,
+                    "并行审查 task 异常终止",
+                )
+            })
+        })
+        .collect()
 }

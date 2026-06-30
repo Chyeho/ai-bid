@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import {
    createTask,
@@ -6,7 +6,15 @@ import {
    getAuditResult,
    getAuditStatus,
 } from '../api/auditDetail';
-import type { AuditIssue } from '../types';
+import type {
+  AuditIssue, AgentProgress, TraceEvent,
+  PhaseEvent, StatsEvent,
+  FindingAddedEvent, FindingUpdatedEvent, FindingRemovedEvent,
+} from '@/types/audit';
+import { ensureAuditIssue } from '../../../utils/mapFinding';
+
+/** 连续轮询失败上限，超过则停止并清 stale 数据 */
+const MAX_POLL_FAILURES = 5;
 
 type StoredAuditTaskState = {
    taskId?: string;
@@ -51,6 +59,13 @@ export const useAuditTask = (bidId?: number) => {
       }
    });
    const [elapsedSeconds, setElapsedSeconds] = useState(0);
+   const [agentProgresses, setAgentProgresses] = useState<Map<string, AgentProgress>>(new Map());
+   const [liveFeedEvents, setLiveFeedEvents] = useState<TraceEvent[]>([]);
+   const [phaseEvent, setPhaseEvent] = useState<PhaseEvent | null>(null);
+   const [phaseHistory, setPhaseHistory] = useState<PhaseEvent[]>([]);
+   const [statsEvent, setStatsEvent] = useState<StatsEvent | null>(null);
+   const [liveFindings, setLiveFindings] = useState<FindingAddedEvent[]>([]);
+   const pollFailRef = useRef(0);
    const updateFinalElapsed = useCallback(() => {
       if (auditStartedAt <= 0) return;
       const finalSeconds = Math.max(0, Math.floor((Date.now() - auditStartedAt) / 1000));
@@ -61,8 +76,6 @@ export const useAuditTask = (bidId?: number) => {
       mutationFn: (payload: { bidId: number; webSearchEnabled?: boolean; forceRefresh?: boolean }) =>
          createTask({
             bidId: payload.bidId,
-            enabledChecks: ['budget', 'legal', 'demand'],
-            webSearchEnabled: !!payload.webSearchEnabled,
             forceRefresh: !!payload.forceRefresh,
          }),
       onMutate: () => {
@@ -75,6 +88,12 @@ export const useAuditTask = (bidId?: number) => {
          setIssues([]);
          setProgress(0);
          setError(null);
+         setAgentProgresses(new Map());
+         setLiveFeedEvents([]);
+         setPhaseEvent(null);
+         setPhaseHistory([]);
+         setStatsEvent(null);
+         setLiveFindings([]);
          setCurrentStage('正在创建审核任务...');
       },
 
@@ -171,7 +190,15 @@ export const useAuditTask = (bidId?: number) => {
                setError(null);
             }
          } catch {
-            setError('历史审核恢复失败，可重新点击开始审核');
+            // 清除 stale 数据，避免死循环
+            if (storageKey) {
+               try { localStorage.removeItem(storageKey); } catch { /* ignore */ }
+            }
+            setTaskId(null);
+            setShouldConnectStream(false);
+            setHasStartedAudit(false);
+            setIsComplete(false);
+            setError(null);
          } finally {
             if (!cancelled) setHydrated(true);
          }
@@ -190,15 +217,24 @@ export const useAuditTask = (bidId?: number) => {
 
       let isMounted = true;
 
+      const lastEventId = (
+         (typeof window !== 'undefined'
+            && window.localStorage.getItem(`auditLastEvent:${taskId}`))
+         || ''
+      );
       connectStream(
          taskId,
-         '',
+         lastEventId,
          (type, payload) => {
             if (!isMounted) return;
 
-            // 根据后端协议：event: issues
-            if (type === 'issues') {
-               setIssues((prev) => [...prev, payload as AuditIssue]);
+            // 根据后端协议：event: issues / event: issue
+            if (type === 'issues' || type === 'issue') {
+               const items = Array.isArray(payload) ? payload : [payload];
+               const mapped = items.map((item) =>
+                  ensureAuditIssue(item)
+               );
+               setIssues((prev) => [...prev, ...mapped]);
             }
             // 根据后端协议：event: progress
             else if (type === 'progress') {
@@ -208,6 +244,49 @@ export const useAuditTask = (bidId?: number) => {
                };
                setProgress(progressPayload.progress || 0);
                if (progressPayload.stage) setCurrentStage(progressPayload.stage);
+            }
+            // SSE §17.1: Agent 进度
+            else if (type === 'agent_progress') {
+               const ap = payload as AgentProgress;
+               setAgentProgresses(prev => {
+                  const next = new Map(prev);
+                  next.set(ap.agent_id, ap);
+                  return next;
+               });
+               setCurrentStage('Multi-Agent 并行审查中...');
+            }
+            // SSE §17.1: 实时动态
+            else if (type === 'trace') {
+               setLiveFeedEvents(prev => [...prev.slice(-100), payload as TraceEvent]);
+            }
+            // SSE §17.1: 管线阶段切换
+            else if (type === 'phase') {
+               const pe = payload as PhaseEvent;
+               setPhaseEvent(pe);
+               setPhaseHistory(prev => [...prev, pe]);
+               setCurrentStage(pe.message);
+            }
+            // SSE §17.1: 阶段统计快照
+            else if (type === 'stats') {
+               setStatsEvent(payload as StatsEvent);
+            }
+            // SSE §17.1: 稳定后的风险发现
+            else if (type === 'finding_added') {
+               setLiveFindings(prev => [...prev, payload as FindingAddedEvent]);
+            }
+            // SSE §17.1: finding 被更新
+            else if (type === 'finding_updated') {
+               const fe = payload as FindingUpdatedEvent;
+               setLiveFindings(prev => prev.map(f =>
+                  f.risk_id === fe.risk_id
+                     ? { ...f, ...fe.changes.reduce((acc, c) => ({ ...acc, [c.field]: c.new_value }), {}) as Partial<FindingAddedEvent> }
+                     : f
+               ));
+            }
+            // SSE §17.1: finding 被移除
+            else if (type === 'finding_removed') {
+               const fr = payload as FindingRemovedEvent;
+               setLiveFindings(prev => prev.filter(f => f.risk_id !== fr.risk_id));
             }
          },
          // onComplete
@@ -287,10 +366,22 @@ export const useAuditTask = (bidId?: number) => {
             }
          } catch (e) {
             if (stopped) return;
-            console.error('[AuditTask] 状态轮询失败:', e);
+            pollFailRef.current += 1;
+            console.error(`[AuditTask] 状态轮询失败 (${pollFailRef.current}/${MAX_POLL_FAILURES}):`, e);
+            if (pollFailRef.current >= MAX_POLL_FAILURES) {
+               console.error('[AuditTask] 连续轮询失败达上限，停止轮询');
+               setError('审核任务连接失败，请刷新页面后重试');
+               setShouldConnectStream(false);
+               setHasStartedAudit(false);
+               if (storageKey) {
+                  try { localStorage.removeItem(storageKey); } catch { /* ignore */ }
+               }
+               setTaskId(null);
+            }
          }
       };
 
+      pollFailRef.current = 0;
       syncStatus();
       const timer = window.setInterval(syncStatus, 3000);
 
@@ -334,9 +425,16 @@ export const useAuditTask = (bidId?: number) => {
       error,
       summary: {
          totalIssues: issues.length,
-         critical: issues.filter((i) => i?.severity === 'critical').length,
-         warning: issues.filter((i) => i?.severity === 'warning').length,
+         high: issues.filter((i) => i?.severity === 'high').length,
+         medium: issues.filter((i) => i?.severity === 'medium').length,
+         low: issues.filter((i) => i?.severity === 'low').length,
          info: issues.filter((i) => i?.severity === 'info').length,
       },
+      agentProgresses,
+      liveFeedEvents,
+      phaseEvent,
+      phaseHistory,
+      statsEvent,
+      liveFindings,
    };
 };

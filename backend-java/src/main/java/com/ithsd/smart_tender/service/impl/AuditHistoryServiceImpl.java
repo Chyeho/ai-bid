@@ -7,16 +7,17 @@ import com.ithsd.smart_tender.mapper.AuditReportMapper;
 import com.ithsd.smart_tender.mapper.AuditTaskMapper;
 import com.ithsd.smart_tender.mapper.TenderMapper;
 import com.ithsd.smart_tender.mapper.UserMapper;
-import com.ithsd.smart_tender.pojo.dto.AuditHistoryPageQueryDTO;
-import com.ithsd.smart_tender.pojo.entity.AuditIssue;
-import com.ithsd.smart_tender.pojo.entity.AuditReport;
-import com.ithsd.smart_tender.pojo.entity.AuditTask;
-import com.ithsd.smart_tender.pojo.entity.Tender;
-import com.ithsd.smart_tender.pojo.entity.User;
-import com.ithsd.smart_tender.pojo.result.PageResult;
-import com.ithsd.smart_tender.pojo.vo.AuditHistoryDetailVO;
-import com.ithsd.smart_tender.pojo.vo.AuditHistoryVO;
-import com.ithsd.smart_tender.pojo.vo.AuditIssueVO;
+import com.ithsd.smart_tender.model.dto.AuditHistoryPageQueryDTO;
+import com.ithsd.smart_tender.model.entity.AuditIssue;
+import com.ithsd.smart_tender.model.entity.AuditReport;
+import com.ithsd.smart_tender.model.entity.AuditTask;
+import com.ithsd.smart_tender.model.entity.Tender;
+import com.ithsd.smart_tender.model.entity.User;
+import com.ithsd.smart_tender.model.enums.AuditTaskStatusEnum;
+import com.ithsd.smart_tender.model.result.PageResult;
+import com.ithsd.smart_tender.model.vo.AuditHistoryDetailVO;
+import com.ithsd.smart_tender.model.vo.AuditHistoryVO;
+import com.ithsd.smart_tender.model.vo.AuditIssueVO;
 import com.ithsd.smart_tender.service.AuditHistoryService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.BeanUtils;
@@ -46,7 +47,6 @@ public class AuditHistoryServiceImpl implements AuditHistoryService {
         LambdaQueryWrapper<AuditTask> wrapper = new LambdaQueryWrapper<>();
         
         wrapper.eq(dto.getAuditUserId() != null, AuditTask::getAuditUserId, dto.getAuditUserId())
-               .eq(StringUtils.hasText(dto.getAuditResult()), AuditTask::getAuditResult, dto.getAuditResult())
                .ge(dto.getStartDate() != null, AuditTask::getCreateTime, dto.getStartDate().atStartOfDay())
                .le(dto.getEndDate() != null, AuditTask::getCreateTime, dto.getEndDate().atTime(LocalTime.MAX))
                .orderByDesc(AuditTask::getCreateTime);
@@ -215,14 +215,13 @@ public class AuditHistoryServiceImpl implements AuditHistoryService {
                 .collect(Collectors.toList());
         
         long totalCount = filteredTasks.size();
+        // auditResult 已废弃，基于 taskStatus 统计（COMPLETED=通过, FAILED=拒绝）
         long passCount = filteredTasks.stream()
-                .filter(t -> "pass".equals(t.getAuditResult()))
+                .filter(t -> AuditTaskStatusEnum.COMPLETED.getCode().equals(t.getTaskStatus()))
                 .count();
-        long reviseCount = filteredTasks.stream()
-                .filter(t -> "revise".equals(t.getAuditResult()))
-                .count();
+        long reviseCount = 0L; // 不再单独跟踪"需修改"状态
         long rejectCount = filteredTasks.stream()
-                .filter(t -> "reject".equals(t.getAuditResult()))
+                .filter(t -> AuditTaskStatusEnum.FAILED.getCode().equals(t.getTaskStatus()))
                 .count();
         
         List<Map<String, Object>> statusList = new ArrayList<>();

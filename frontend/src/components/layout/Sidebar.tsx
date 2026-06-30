@@ -1,6 +1,6 @@
 import React from 'react';
 import { Layout, Menu, Typography } from 'antd';
-import { useNavigate, useLocation } from 'react-router';
+import { useNavigate, useLocation } from 'react-router-dom';
 import {
    LayoutDashboard,
    FileSearch,

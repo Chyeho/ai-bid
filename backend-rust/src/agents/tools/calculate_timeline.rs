@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn test_announcement_period_pass() {
         // 公告期 21 天 ≥ 20 → pass
-        let args = serde_json::json!({
+        let _args = serde_json::json!({
             "dates": [
                 {"label": "公告发布", "date_str": "2025-06-01", "event_type": "announcement"},
                 {"label": "投标截止", "date_str": "2025-06-22", "event_type": "deadline"}
@@ -609,7 +609,7 @@ mod tests {
             ]
         });
         // We can't easily test async execute here, but let's test the logic
-        let tool = CalculateTimelineTool;
+        let _tool = CalculateTimelineTool;
         let days = CalculateTimelineTool::calendar_days_between((2025, 6, 1), (2025, 6, 22));
         assert!(days >= 20);
     }

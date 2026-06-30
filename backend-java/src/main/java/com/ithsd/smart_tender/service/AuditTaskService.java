@@ -1,9 +1,10 @@
 package com.ithsd.smart_tender.service;
 
-import com.ithsd.smart_tender.pojo.dto.CreateAuditTaskRequest;
-import com.ithsd.smart_tender.pojo.vo.AuditTaskCreateVO;
-import com.ithsd.smart_tender.pojo.vo.AuditTaskStatusVO;
-import com.ithsd.smart_tender.pojo.vo.ResultVO;
+import com.ithsd.smart_tender.model.dto.CreateAuditTaskRequest;
+import com.ithsd.smart_tender.model.dto.rust.RustBlockBBoxResponse;
+import com.ithsd.smart_tender.model.vo.AuditTaskCreateVO;
+import com.ithsd.smart_tender.model.vo.AuditTaskStatusVO;
+import com.ithsd.smart_tender.model.vo.ResultVO;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
@@ -27,4 +28,7 @@ public interface AuditTaskService {
     void markTaskProcessing(String taskId);
 
     void markTaskFailed(String taskId, String errorMessage);
+
+    /** 查询指定 block_id 的 BBox 坐标（代理到 Rust 引擎） */
+    List<RustBlockBBoxResponse> getBlockBboxes(String taskId, String blockIds);
 }

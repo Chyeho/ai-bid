@@ -30,7 +30,7 @@ export const PdfToolbar: React.FC<PdfToolbarProps> = React.memo((props) => {
 
    return (
       <div className={styles.toolbar}>
-         <Space size='large'>
+         <Space size='small'>
             <Space.Compact>
                <Tooltip title='回车键(Enter)进行跳转'>
                   <InputNumber
@@ -43,13 +43,14 @@ export const PdfToolbar: React.FC<PdfToolbarProps> = React.memo((props) => {
                      }}
                      onPressEnter={handleJump}
                      onBlur={handleJump}
-                     style={{ width: 60 }}
+                     size='small'
+                     style={{ width: 48 }}
                      controls={false}
                   />
                </Tooltip>
             </Space.Compact>
 
-            <Text type='secondary' style={{ color: '#5a5a5a' }}>
+            <Text type='secondary' style={{ color: '#5a5a5a', fontSize: 12 }}>
                {props.currentPage} / {props.numPages} 页
             </Text>
          </Space>
@@ -58,16 +59,18 @@ export const PdfToolbar: React.FC<PdfToolbarProps> = React.memo((props) => {
             <Tooltip title='最小10%'>
                <Button
                   className={styles.actionBtn}
+                  size='small'
                   icon={<ZoomOutOutlined />}
                   onClick={props.onZoomOut}
                />
             </Tooltip>
 
-            <Tooltip title='单击返回 60% 比例'>
+            <Tooltip title='单击返回 100% 比例'>
                <Button
                   className={styles.actionBtn}
+                  size='small'
                   onClick={props.onResetZoom}
-                  style={{ width: 65 }}
+                  style={{ width: 48 }}
                >
                   {Math.round(props.scale * 100)}%
                </Button>
@@ -76,6 +79,7 @@ export const PdfToolbar: React.FC<PdfToolbarProps> = React.memo((props) => {
             <Tooltip title='最大100%'>
                <Button
                   className={styles.actionBtn}
+                  size='small'
                   icon={<ZoomInOutlined />}
                   onClick={props.onZoomIn}
                />

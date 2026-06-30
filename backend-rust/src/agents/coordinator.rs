@@ -27,6 +27,7 @@
 use crate::agents::bus::AgentBus;
 use crate::agents::react_loop::{LlmClient, ReActLoop};
 use crate::agents::registry::AgentRegistry;
+use crate::agents::review_event::{FindingLifecycle, ReviewEvent, ReviewEventBus};
 use crate::agents::session_graph::SessionGraph;
 use crate::agents::tools::ToolRegistry;
 use crate::agents::trace::TraceLog;
@@ -36,6 +37,21 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// 返回 RiskSeverity 的纯字符串表示（不含 emoji），用于 SSE 事件。
+fn severity_str(s: &RiskSeverity) -> &'static str {
+    match s {
+        RiskSeverity::High => "high",
+        RiskSeverity::Medium => "medium",
+        RiskSeverity::Low => "low",
+        RiskSeverity::Info => "info",
+    }
+}
+
+/// MERGE 阶段的去重结果。
+struct MergeResult {
+    retained: Vec<RiskFinding>,
+}
 
 /// 多 Agent 审查协调器。
 ///
@@ -49,10 +65,10 @@ pub struct Coordinator {
     dynamic_definitions: HashMap<String, DynamicAgentDefinition>,
     /// LLM 客户端工厂：每次调用创建新的 LlmClient
     /// ★ 避免 clone_box 传染到 LlmClient trait
-    llm_factory: Box<dyn Fn() -> Box<dyn LlmClient> + Send + Sync>,
+    llm_factory: Arc<dyn Fn() -> Box<dyn LlmClient> + Send + Sync>,
     /// 工具集工厂：每次调用创建新的 ToolRegistry
     /// ★ 避免 clone_box 传染到 AgentTool trait
-    tools_factory: Box<dyn Fn() -> ToolRegistry + Send + Sync>,
+    tools_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
     /// Agent 间广播通道
     bus: Arc<AgentBus>,
     /// Session Knowledge Graph（Blackboard 核心）
@@ -61,6 +77,8 @@ pub struct Coordinator {
     trace: Arc<Mutex<TraceLog>>,
     /// stderr 打印锁：多 Agent 并行时确保日志不交叠
     print_lock: Arc<std::sync::Mutex<()>>,
+    /// SSE 实时推送通道（可选，仅 HTTP server 模式启用）
+    review_events: Option<Arc<ReviewEventBus>>,
 }
 
 impl Coordinator {
@@ -76,8 +94,8 @@ impl Coordinator {
     pub fn new(
         config: CoordinatorConfig,
         registry: AgentRegistry,
-        llm_factory: Box<dyn Fn() -> Box<dyn LlmClient> + Send + Sync>,
-        tools_factory: Box<dyn Fn() -> ToolRegistry + Send + Sync>,
+        llm_factory: Arc<dyn Fn() -> Box<dyn LlmClient> + Send + Sync>,
+        tools_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
         bus: Arc<AgentBus>,
         graph: Arc<SessionGraph>,
         trace: Arc<Mutex<TraceLog>>,
@@ -93,6 +111,7 @@ impl Coordinator {
             graph,
             trace,
             print_lock,
+            review_events: None,
         };
 
         // 启动时加载已有动态 Agent
@@ -103,11 +122,20 @@ impl Coordinator {
         coordinator
     }
 
+    /// 设置 SSE 实时推送通道。
+    ///
+    /// 仅在 HTTP server 模式下启用（CLI 模式不设置此通道）。
+    pub fn with_review_events(mut self, events: Arc<ReviewEventBus>) -> Self {
+        self.review_events = Some(events);
+        self
+    }
+
     // ── 主入口：完整审查管线 ──────────────────────────────────
 
     /// 执行完整的多 Agent 审查管线。
     ///
     /// 7 步聚合流水线：Route → Preload → Execute → Merge → LegalVerify → BlindSpot → Triage。
+    /// 每步通过 `review_events`（如果已设置）推送实时事件到 SSE 客户端。
     pub async fn review(&self, clauses: &[ReviewClause]) -> Result<CoordinatorOutput> {
         let total_clauses = clauses.len();
         eprintln!(
@@ -127,7 +155,18 @@ impl Coordinator {
                 .join(", ")
         );
 
+        let emit = |event: &ReviewEvent| {
+            if let Some(ref bus) = self.review_events {
+                bus.emit(event);
+            }
+        };
+
         // [1] ROUTE: clauses → HashMap<AgentId, Vec<ReviewClause>>
+        emit(&ReviewEvent::Phase {
+            phase: crate::agents::review_event::PipelinePhase::Route,
+            phase_index: 1, total_phases: 7,
+            message: "关键词路由中...".to_string(),
+        });
         let routing = self.route_clauses(clauses);
 
         // [2] PRELOAD: 所有 Chunk 节点写入 SessionGraph
@@ -137,31 +176,148 @@ impl Coordinator {
         self.preload_agents();
 
         // [3] EXECUTE: 并行执行各 Agent
+        let agent_count = routing.len();
+        emit(&ReviewEvent::Phase {
+            phase: crate::agents::review_event::PipelinePhase::Execute,
+            phase_index: 2, total_phases: 7,
+            message: format!("{} 个 Agent 并行审查中...", agent_count),
+        });
+        // 发送所有 Agent 的初始进度（pending/running）
+        for (agent_id, clauses) in &routing {
+            let agent_id_str = agent_id.to_string();
+            let label = self.registry.get(agent_id.clone())
+                .map(|d| d.display_name.to_string())
+                .unwrap_or_else(|| agent_id_str.clone());
+            emit(&ReviewEvent::AgentProgress {
+                agent_id: agent_id_str,
+                agent_label: label,
+                clauses_done: 0,
+                clauses_total: clauses.len(),
+                raw_findings: 0,
+                status: "running".to_string(),
+            });
+        }
         let all_findings = self.execute_agents(&routing).await;
 
+        // 发射 execute 阶段统计
+        let raw_total = all_findings.len();
+        let raw_high = all_findings.iter().filter(|f| f.severity == RiskSeverity::High).count();
+        let raw_medium = all_findings.iter().filter(|f| f.severity == RiskSeverity::Medium).count();
+        let raw_low = all_findings.iter().filter(|f| f.severity == RiskSeverity::Low).count();
+        let raw_info = all_findings.iter().filter(|f| f.severity == RiskSeverity::Info).count();
+        emit(&ReviewEvent::Stats {
+            phase: crate::agents::review_event::PipelinePhase::Execute,
+            total_raw: raw_total, total_merged: raw_total, total_verified: 0,
+            high: raw_high, medium: raw_medium, low: raw_low, info: raw_info,
+        });
+
         // [4] MERGE: 合并 + 去重
-        let mut merged = self.merge_findings(all_findings);
+        emit(&ReviewEvent::Phase {
+            phase: crate::agents::review_event::PipelinePhase::Merge,
+            phase_index: 3, total_phases: 7,
+            message: format!("去重合并中 ({} 条原始发现)...", all_findings.len()),
+        });
+        let merge_result = self.merge_findings_with_events(all_findings, &emit);
+        let mut merged = merge_result.retained;
 
         // [4b] LINK: 跨 Agent 同类型风险关联推导
         self.derive_cross_agent_links(&merged);
 
+        let merge_high = merged.iter().filter(|f| f.severity == RiskSeverity::High && !f.no_risk).count();
+        let merge_medium = merged.iter().filter(|f| f.severity == RiskSeverity::Medium && !f.no_risk).count();
+        let merge_low = merged.iter().filter(|f| f.severity == RiskSeverity::Low && !f.no_risk).count();
+        let merge_info = merged.iter().filter(|f| f.severity == RiskSeverity::Info && !f.no_risk).count();
+        emit(&ReviewEvent::Stats {
+            phase: crate::agents::review_event::PipelinePhase::Merge,
+            total_raw: raw_total, total_merged: merged.len(), total_verified: 0,
+            high: merge_high, medium: merge_medium, low: merge_low, info: merge_info,
+        });
+
         // [5] LEGAL VERIFY: 对抗法条验证
         let legal_verify_count = if self.config.enable_legal_verify {
-            self.legal_verify(&mut merged).await
+            emit(&ReviewEvent::Phase {
+                phase: crate::agents::review_event::PipelinePhase::LegalVerify,
+                phase_index: 4, total_phases: 7,
+                message: "法条引用对抗验证中...".to_string(),
+            });
+            let lv_count = self.legal_verify(&mut merged).await;
+            // 逐条发射通过验证的 finding（进入 L1 主视图）
+            for f in merged.iter().filter(|f| !f.no_risk) {
+                emit(&ReviewEvent::FindingAdded {
+                    risk_id: f.risk_id.clone(),
+                    severity: severity_str(&f.severity).to_string(),
+                    risk_type: f.risk_type.clone(),
+                    agent: f.agent.clone(),
+                    confidence: f.confidence as f64,
+                    clause_ids: f.clause_ids.clone(),
+                    source_quote: f.source_quote.chars().take(500).collect(),
+                    legal_basis: f.legal_basis.clone(),
+                    reason: f.reason.chars().take(500).collect(),
+                    suggestion: f.suggestion.clone(),
+                    lifecycle: FindingLifecycle::Verified,
+                    page_number: f.page_number,
+                    section_path: f.section_path.clone(),
+                });
+            }
+            lv_count
         } else {
             0
         };
 
+        let verified_high = merged.iter().filter(|f| f.severity == RiskSeverity::High && !f.no_risk).count();
+        let verified_medium = merged.iter().filter(|f| f.severity == RiskSeverity::Medium && !f.no_risk).count();
+        let verified_low = merged.iter().filter(|f| f.severity == RiskSeverity::Low && !f.no_risk).count();
+        let verified_info = merged.iter().filter(|f| f.severity == RiskSeverity::Info && !f.no_risk).count();
+        emit(&ReviewEvent::Stats {
+            phase: crate::agents::review_event::PipelinePhase::LegalVerify,
+            total_raw: raw_total, total_merged: merged.len(), total_verified: legal_verify_count,
+            high: verified_high, medium: verified_medium, low: verified_low, info: verified_info,
+        });
+
         // [6] BLINDSPOT: BlindSpotAgent 读取完整 SessionGraph
+        emit(&ReviewEvent::Phase {
+            phase: crate::agents::review_event::PipelinePhase::BlindSpot,
+            phase_index: 5, total_phases: 7,
+            message: "盲点扫描中...".to_string(),
+        });
         let blind_spot_findings = self.blind_spot_scan().await;
+        for f in &blind_spot_findings {
+            if !f.no_risk {
+                emit(&ReviewEvent::FindingAdded {
+                    risk_id: f.risk_id.clone(),
+                    severity: severity_str(&f.severity).to_string(),
+                    risk_type: f.risk_type.clone(),
+                    agent: f.agent.clone(),
+                    confidence: f.confidence as f64,
+                    clause_ids: f.clause_ids.clone(),
+                    source_quote: f.source_quote.chars().take(500).collect(),
+                    legal_basis: f.legal_basis.clone(),
+                    reason: f.reason.chars().take(500).collect(),
+                    suggestion: f.suggestion.clone(),
+                    lifecycle: FindingLifecycle::BlindSpot,
+                    page_number: f.page_number,
+                    section_path: f.section_path.clone(),
+                });
+            }
+        }
 
         // [6.5] DEBATE: 高风险 + 低置信度正反辩论
+        emit(&ReviewEvent::Phase {
+            phase: crate::agents::review_event::PipelinePhase::Debate,
+            phase_index: 6, total_phases: 7,
+            message: "高风险辩论裁决中...".to_string(),
+        });
         self.debate_high_risk(&mut merged).await;
 
         // [6.6] REGISTER: 扫描 suggest_agent → 写入 dynamic_agents.json
         self.register_dynamic_agents(&blind_spot_findings);
 
         // [7] TRIAGE: 按 severity + confidence 分流
+        emit(&ReviewEvent::Phase {
+            phase: crate::agents::review_event::PipelinePhase::Triage,
+            phase_index: 7, total_phases: 7,
+            message: "最终排序中...".to_string(),
+        });
         merged.extend(blind_spot_findings);
         let findings = self.triage(merged);
 
@@ -325,40 +481,85 @@ impl Coordinator {
 
             let agent_id = agent_id.clone();
             let clauses = clauses.clone();
-            let llm = (self.llm_factory)();
-            let tools = (self.tools_factory)();
+            let clauses_total = clauses.len();
             let bus = self.bus.clone();
             let graph = self.graph.clone();
             let trace = self.trace.clone();
             let print_lock = self.print_lock.clone();
             let registry_def = self.registry.get(agent_id.clone()).cloned();
+            let review_events = self.review_events.clone();
+            let agent_id_str = agent_id.to_string();
+            let agent_label = registry_def
+                .as_ref()
+                .map(|d| d.display_name.to_string())
+                .unwrap_or_else(|| agent_id_str.clone());
 
             // Clone Arcs before moving into the spawned task
             let graph_for_write = graph.clone();
+            let llm_factory = self.llm_factory.clone();
+            let tools_factory = self.tools_factory.clone();
+            let max_parallel = self.config.max_parallel_clauses;
 
             let handle = tokio::spawn(async move {
-                // 使用 AgentRegistry 的 Builder 模式创建 Agent
                 let agent_name = agent_id.to_string();
                 if let Some(def) = registry_def {
-                    let config = def.to_agent_config();
-                    let mut agent = ReActLoop::new(config, llm, tools);
-                    agent = agent
-                        .with_bus(bus)
-                        .with_graph(graph)
-                        .with_print_lock(print_lock);
-                    agent.trace = trace;
-
                     eprintln!(
-                        "  [EXECUTE] {} 开始审查 {} 条条款...",
+                        "  [EXECUTE] {} 开始审查 {} 条条款 (并行 max={})...",
                         agent_name,
-                        clauses.len()
+                        clauses.len(),
+                        max_parallel,
                     );
-                    let findings = agent.review(&clauses).await;
+
+                    let findings = crate::agents::react_loop::review_clauses_parallel(
+                        &clauses,
+                        {
+                            let def = def.clone();
+                            let bus = bus.clone();
+                            let graph = graph.clone();
+                            let print_lock = print_lock.clone();
+                            let trace = trace.clone();
+                            let review_events = review_events.clone();
+                            move |llm, tools| {
+                                let config = def.to_agent_config();
+                                let mut agent = ReActLoop::new(config, llm, tools);
+                                agent = agent
+                                    .with_bus(bus.clone())
+                                    .with_graph(graph.clone())
+                                    .with_print_lock(print_lock.clone());
+                                agent.trace = trace.clone();
+                                if let Some(ref events) = review_events {
+                                    agent = agent.with_review_events(events.clone());
+                                }
+                                agent
+                            }
+                        },
+                        &*llm_factory,
+                        &*tools_factory,
+                        max_parallel,
+                        Some(graph_for_write.clone()),
+                        review_events.clone(),
+                        &agent_name,
+                    )
+                    .await;
+
+                    let raw_findings = findings.iter().filter(|f| !f.no_risk).count();
                     eprintln!(
                         "  [EXECUTE] {} 完成，发现 {} 条风险",
                         agent_name,
-                        findings.iter().filter(|f| !f.no_risk).count()
+                        raw_findings
                     );
+
+                    // 发送 AgentProgress → SSE（完成事件）
+                    if let Some(ref events) = review_events {
+                        events.emit(&ReviewEvent::AgentProgress {
+                            agent_id: agent_name.clone(),
+                            agent_label: agent_label.clone(),
+                            clauses_done: clauses_total,
+                            clauses_total,
+                            raw_findings,
+                            status: "completed".to_string(),
+                        });
+                    }
 
                     // 将发现写入 SessionGraph（共享工作区）
                     for finding in &findings {
@@ -403,16 +604,38 @@ impl Coordinator {
 
     // ── [4] MERGE: 合并 + 去重 ───────────────────────────────
 
+    /// 合并 + 去重（无 SSE 事件发射的快捷版本，用于测试）。
+    #[allow(dead_code)]
     fn merge_findings(&self, findings: Vec<RiskFinding>) -> Vec<RiskFinding> {
+        self.merge_findings_with_events(findings, &|_| {}).retained
+    }
+
+    fn merge_findings_with_events(
+        &self,
+        findings: Vec<RiskFinding>,
+        emit: &dyn Fn(&ReviewEvent),
+    ) -> MergeResult {
         let total = findings.len();
-        // 简单去重：按 risk_id + agent 组合去重
+        // 简单去重：按 risk_type|clause_ids|agent 组合去重
         let mut seen: HashMap<String, RiskFinding> = HashMap::new();
         for f in findings {
             let key = format!("{}|{}|{}", f.risk_type, f.clause_ids.join(","), f.agent);
-            // 保留 confidence 更高的
             if let Some(existing) = seen.get(&key) {
                 if f.confidence > existing.confidence {
+                    // 旧的被替换，通知前端移除旧 risk_id
+                    emit(&ReviewEvent::FindingRemoved {
+                        risk_id: existing.risk_id.clone(),
+                        reason: "去重合并（保留置信度更高的）".to_string(),
+                        merged_into: Some(f.risk_id.clone()),
+                    });
                     seen.insert(key, f);
+                } else {
+                    // 当前 finding 被合并掉了
+                    emit(&ReviewEvent::FindingRemoved {
+                        risk_id: f.risk_id.clone(),
+                        reason: "去重合并（保留置信度更高的）".to_string(),
+                        merged_into: Some(existing.risk_id.clone()),
+                    });
                 }
             } else {
                 seen.insert(key, f);
@@ -421,13 +644,15 @@ impl Coordinator {
 
         let merged: Vec<RiskFinding> = seen.into_values().collect();
         let risk_count = merged.iter().filter(|f| !f.no_risk).count();
+        let removed_count = total - merged.len();
         eprintln!(
-            "  [MERGE] {} → {} 条发现（去重后），{} 条风险",
+            "  [MERGE] {} → {} 条发现（去重 {} 条），{} 条风险",
             total,
             merged.len(),
+            removed_count,
             risk_count
         );
-        merged
+        MergeResult { retained: merged }
     }
 
     // ── [4b] LINK: 跨 Agent 同类型风险 linked_to 推导 ──────────
@@ -639,66 +864,79 @@ impl Coordinator {
             return;
         }
 
-        for candidate in &candidates {
-            // 构造辩论 clause
-            let debate_text = format!(
-                "## 辩论任务\n\n对以下高风险发现进行正反辩论：\n\n\
-                 **risk_type**: {}\n\
-                 **severity**: {}\n\
-                 **confidence**: {:.2}\n\
-                 **source_quote**: {}\n\
-                 **legal_basis**: {}\n\
-                 **reason**: {}\n\
-                 **suggestion**: {}\n\n\
-                 按 Defender → Challenger → Arbiter 三角色执行辩论，输出裁决结果。",
-                candidate.risk_type,
-                candidate.severity,
-                candidate.confidence,
-                candidate.source_quote,
-                candidate.legal_basis.join("; "),
-                candidate.reason,
-                candidate.suggestion,
-            );
+        // ★ 并行辩论，不要串行等
+        let debate_handles: Vec<_> = candidates
+            .iter()
+            .map(|candidate| {
+                let debate_text = format!(
+                    "## 辩论任务\n\n对以下高风险发现进行正反辩论：\n\n\
+                     **risk_type**: {}\n\
+                     **severity**: {}\n\
+                     **confidence**: {:.2}\n\
+                     **source_quote**: {}\n\
+                     **legal_basis**: {}\n\
+                     **reason**: {}\n\
+                     **suggestion**: {}\n\n\
+                     按 Defender → Challenger → Arbiter 三角色执行辩论，输出裁决结果。",
+                    candidate.risk_type,
+                    candidate.severity,
+                    candidate.confidence,
+                    candidate.source_quote,
+                    candidate.legal_basis.join("; "),
+                    candidate.reason,
+                    candidate.suggestion,
+                );
 
-            let debate_clause = ReviewClause {
-                chunk_id: format!("debate_{}", candidate.risk_id),
-                section_path: vec!["辩论".to_string(), candidate.risk_type.clone()],
-                text: debate_text,
-                page_start: 0,
-                page_end: 0,
-                tier: RiskTier::High,
-                tier_max_turns: 8,
-            };
+                let debate_clause = ReviewClause {
+                    chunk_id: format!("debate_{}", candidate.risk_id),
+                    section_path: vec!["辩论".to_string(), candidate.risk_type.clone()],
+                    text: debate_text,
+                    page_start: 0,
+                    page_end: 0,
+                    tier: RiskTier::High,
+                    tier_max_turns: 8,
+                };
 
-            let def = debate_def.unwrap();
-            let config = def.to_agent_config();
-            let llm = (self.llm_factory)();
-            let tools = (self.tools_factory)();
-            let agent = ReActLoop::new(config, llm, tools)
-                .with_print_lock(self.print_lock.clone());
-            let debate_findings = agent.review(&[debate_clause]).await;
+                let def = debate_def.unwrap();
+                let config = def.to_agent_config();
+                let llm = (self.llm_factory)();
+                let tools = (self.tools_factory)();
+                let agent = ReActLoop::new(config, llm, tools)
+                    .with_print_lock(self.print_lock.clone());
+                let risk_id = candidate.risk_id.clone();
+                tokio::spawn(async move {
+                    (risk_id, agent.review(&[debate_clause]).await)
+                })
+            })
+            .collect();
 
-            // 将辩论裁决合并回原 finding
-            for df in &debate_findings {
-                if df.no_risk {
-                    continue;
+        for handle in debate_handles {
+            match handle.await {
+                Ok((risk_id, debate_findings)) => {
+                    for df in &debate_findings {
+                        if df.no_risk {
+                            continue;
+                        }
+                        if let Some(original) = findings
+                            .iter_mut()
+                            .find(|f| f.risk_id == risk_id)
+                        {
+                            original.severity = df.severity;
+                            original.confidence = df.confidence;
+                            original.reason = format!(
+                                "{}\n\n[Debate] 辩论裁决: {}",
+                                original.reason, df.reason
+                            );
+                            original.suggestion = df.suggestion.clone();
+                            eprintln!(
+                                "  [DEBATE] {} → severity={} confidence={:.2}",
+                                risk_id, df.severity, df.confidence
+                            );
+                        }
+                    }
                 }
-                // 查找原 finding 并更新
-                if let Some(original) = findings
-                    .iter_mut()
-                    .find(|f| f.risk_id == candidate.risk_id)
-                {
-                    original.severity = df.severity;
-                    original.confidence = df.confidence;
-                    original.reason = format!(
-                        "{}\n\n[Debate] 辩论裁决: {}",
-                        original.reason, df.reason
-                    );
-                    original.suggestion = df.suggestion.clone();
-                    eprintln!(
-                        "  [DEBATE] {} → severity={} confidence={:.2}",
-                        candidate.risk_id, df.severity, df.confidence
-                    );
+                Err(e) => {
+                    eprintln!("  [DEBATE] spawn 失败: {}", e);
                 }
             }
         }
@@ -1070,6 +1308,7 @@ impl Coordinator {
                 blind_findings.push(RiskFinding {
                     risk_id: format!("BLIND_{}", cid),
                     clause_ids: vec![(*cid).clone()],
+                    block_ids: Vec::new(),
                     agent: "BlindSpotAgent".to_string(),
                     no_risk: false,
                     severity: RiskSeverity::Info,
@@ -1090,6 +1329,9 @@ impl Coordinator {
                     truncated: false,
                     suggested_agent: None,
                     citations: Vec::new(),
+                    page_number: Some(chunk.page_start + 1),
+                    section_path: Some(chunk.section_path.clone()),
+                    context: Some(chunk.text_preview.chars().take(500).collect()),
                 });
             }
         }
@@ -1116,6 +1358,7 @@ impl Coordinator {
                     blind_findings.push(RiskFinding {
                         risk_id: format!("BLIND_NO_RISK_{}", cid),
                         clause_ids: vec![(*cid).clone()],
+                        block_ids: Vec::new(),
                         agent: "BlindSpotAgent".to_string(),
                         no_risk: true,
                         severity: RiskSeverity::Info,
@@ -1140,6 +1383,9 @@ impl Coordinator {
                         truncated: false,
                         suggested_agent: None,
                         citations: Vec::new(),
+                        page_number: Some(chunk.page_start + 1),
+                        section_path: Some(chunk.section_path.clone()),
+                        context: Some(chunk.text_preview.chars().take(500).collect()),
                     });
                 }
             }
@@ -1339,14 +1585,15 @@ mod tests {
             config,
             registry,
             dynamic_definitions: HashMap::new(),
-            llm_factory: Box::new(|| unreachable!("llm_factory 不应在离线测试中调用")),
-            tools_factory: Box::new(|| {
+            llm_factory: Arc::new(|| unreachable!("llm_factory 不应在离线测试中调用")),
+            tools_factory: Arc::new(|| {
                 unreachable!("tools_factory 不应在离线测试中调用")
             }),
             bus,
             graph,
             trace,
             print_lock: Arc::new(std::sync::Mutex::new(())),
+            review_events: None,
         }
     }
 
@@ -1366,6 +1613,7 @@ mod tests {
         RiskFinding {
             risk_id: risk_id.to_string(),
             clause_ids: vec![clause_id.to_string()],
+            block_ids: Vec::new(),
             agent: agent.to_string(),
             no_risk: false,
             severity: RiskSeverity::High,
@@ -1381,7 +1629,10 @@ mod tests {
             tier_escalated: true,
             truncated: false,
             suggested_agent: None,
-            citations: vec![],
+            citations: Vec::new(),
+            page_number: None,
+            section_path: None,
+            context: None,
         }
     }
 

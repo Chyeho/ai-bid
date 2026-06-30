@@ -1,9 +1,9 @@
 package com.ithsd.smart_tender.controller;
 
-import com.ithsd.smart_tender.pojo.dto.AuditHistoryPageQueryDTO;
-import com.ithsd.smart_tender.pojo.result.PageResult;
-import com.ithsd.smart_tender.pojo.result.Result;
-import com.ithsd.smart_tender.pojo.vo.AuditHistoryDetailVO;
+import com.ithsd.smart_tender.model.dto.AuditHistoryPageQueryDTO;
+import com.ithsd.smart_tender.model.result.PageResult;
+import com.ithsd.smart_tender.model.result.Result;
+import com.ithsd.smart_tender.model.vo.AuditHistoryDetailVO;
 import com.ithsd.smart_tender.service.AuditHistoryService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;

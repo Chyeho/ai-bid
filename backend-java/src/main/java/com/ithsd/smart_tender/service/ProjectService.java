@@ -1,7 +1,7 @@
 package com.ithsd.smart_tender.service;
 
-import com.ithsd.smart_tender.pojo.dto.ProjectDTO;
-import com.ithsd.smart_tender.pojo.vo.ProjectVO;
+import com.ithsd.smart_tender.model.dto.ProjectDTO;
+import com.ithsd.smart_tender.model.vo.ProjectVO;
 
 import java.util.List;
 

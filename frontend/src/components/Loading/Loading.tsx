@@ -18,7 +18,7 @@ export const Loading: React.FC<LoadingProps> = ({
    return (
       <Spin
          spinning={loading}
-         tip={description}
+         tip={children || fullScreen ? description : undefined}
          indicator={<LoadingOutlined style={{ fontSize: 24 }} spin />}
          style={
             fullScreen

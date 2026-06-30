@@ -1,15 +1,15 @@
 package com.ithsd.smart_tender.controller;
 
-import com.ithsd.smart_tender.pojo.dto.TenderDTO;
-import com.ithsd.smart_tender.pojo.dto.TenderPageQueryDTO;
-import com.ithsd.smart_tender.pojo.result.PageResult;
-import com.ithsd.smart_tender.pojo.result.Result;
-import com.ithsd.smart_tender.pojo.vo.TenderProjectVO;
-import com.ithsd.smart_tender.pojo.vo.TenderStatsVO;
-import com.ithsd.smart_tender.pojo.vo.TenderVO;
+import com.ithsd.smart_tender.model.dto.TenderDTO;
+import com.ithsd.smart_tender.model.dto.TenderPageQueryDTO;
+import com.ithsd.smart_tender.model.result.PageResult;
+import com.ithsd.smart_tender.model.result.Result;
+import com.ithsd.smart_tender.model.vo.TenderProjectVO;
+import com.ithsd.smart_tender.model.vo.TenderStatsVO;
+import com.ithsd.smart_tender.model.vo.TenderVO;
 import com.ithsd.smart_tender.service.TenderService;
-import com.ithsd.smart_tender.service.preview.DocumentPreviewService;
-import com.ithsd.smart_tender.service.storage.StoragePathService;
+import com.ithsd.smart_tender.service.DocumentPreviewService;
+import com.ithsd.smart_tender.service.StoragePathService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;

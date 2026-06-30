@@ -1,6 +1,6 @@
 package com.ithsd.smart_tender.config;
 
-import com.ithsd.smart_tender.interceptor.JwtTokenAdminInterceptor;
+import com.ithsd.smart_tender.common.JwtTokenAdminInterceptor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;

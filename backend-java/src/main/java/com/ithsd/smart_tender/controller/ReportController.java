@@ -1,7 +1,7 @@
 package com.ithsd.smart_tender.controller;
 
-import com.ithsd.smart_tender.pojo.result.Result;
-import com.ithsd.smart_tender.pojo.vo.ReportVO;
+import com.ithsd.smart_tender.model.result.Result;
+import com.ithsd.smart_tender.model.vo.ReportVO;
 import com.ithsd.smart_tender.service.ReportService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;

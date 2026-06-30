@@ -1,13 +1,13 @@
 package com.ithsd.smart_tender.controller;
 
-import com.ithsd.smart_tender.pojo.dto.UserLoginDTO;
-import com.ithsd.smart_tender.pojo.dto.UserRegisterDTO;
-import com.ithsd.smart_tender.pojo.entity.User;
-import com.ithsd.smart_tender.pojo.result.Result;
-import com.ithsd.smart_tender.pojo.vo.UserInfoVO;
-import com.ithsd.smart_tender.pojo.vo.UserLoginVO;
+import com.ithsd.smart_tender.model.dto.UserLoginDTO;
+import com.ithsd.smart_tender.model.dto.UserRegisterDTO;
+import com.ithsd.smart_tender.model.entity.User;
+import com.ithsd.smart_tender.model.result.Result;
+import com.ithsd.smart_tender.model.vo.UserInfoVO;
+import com.ithsd.smart_tender.model.vo.UserLoginVO;
 import com.ithsd.smart_tender.service.UserService;
-import com.ithsd.smart_tender.utils.JwtUtil;
+import com.ithsd.smart_tender.common.util.JwtUtil;
 import io.jsonwebtoken.Claims;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;

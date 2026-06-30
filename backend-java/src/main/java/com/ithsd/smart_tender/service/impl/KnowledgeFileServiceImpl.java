@@ -3,11 +3,11 @@ package com.ithsd.smart_tender.service.impl;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.ithsd.smart_tender.mapper.KnowledgeFileMapper;
-import com.ithsd.smart_tender.pojo.entity.KnowledgeFile;
-import com.ithsd.smart_tender.pojo.result.PageResult;
+import com.ithsd.smart_tender.model.entity.KnowledgeFile;
+import com.ithsd.smart_tender.model.result.PageResult;
 import com.ithsd.smart_tender.service.KnowledgeFileService;
-import com.ithsd.smart_tender.service.KnowledgeChunkService;
-import com.ithsd.smart_tender.service.storage.StoragePathService;
+
+import com.ithsd.smart_tender.service.StoragePathService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -25,7 +25,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.UUID;
 import java.util.List;
 import com.ithsd.smart_tender.mapper.UserMapper;
-import com.ithsd.smart_tender.pojo.entity.User;
+import com.ithsd.smart_tender.model.entity.User;
 import org.springframework.beans.BeanUtils;
 import org.springframework.util.StringUtils;
 
@@ -36,8 +36,6 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
     @Autowired
     private KnowledgeFileMapper knowledgeMapper;
     
-    @Autowired
-    private KnowledgeChunkService knowledgeChunkService;
 
     @Autowired
     private UserMapper userMapper;
@@ -112,9 +110,6 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
                 throw new RuntimeException("文件重命名失败");
             }
 
-            // 处理文件分块
-            knowledgeChunkService.processFileChunks(knowledgeFile.getId(), absoluteFilePath.toString(), "kb");
-
         } catch (Exception e) {
             // 数据库保存失败，删除已上传的临时文件
             if (savedFile.exists()) {
@@ -160,9 +155,9 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
         // 计算记录数
         
         // 将 KnowledgeFile 转化为 KnowledgeFileVO
-        List<com.ithsd.smart_tender.pojo.vo.KnowledgeFileVO> voList = new java.util.ArrayList<>();
+        List<com.ithsd.smart_tender.model.vo.KnowledgeFileVO> voList = new java.util.ArrayList<>();
         for (KnowledgeFile knowledgeFile : records) {
-            com.ithsd.smart_tender.pojo.vo.KnowledgeFileVO vo = new com.ithsd.smart_tender.pojo.vo.KnowledgeFileVO();
+            com.ithsd.smart_tender.model.vo.KnowledgeFileVO vo = new com.ithsd.smart_tender.model.vo.KnowledgeFileVO();
             BeanUtils.copyProperties(knowledgeFile, vo);
             
             // 查询并设置上传用户姓名
@@ -218,9 +213,9 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
         // 计算记录数
         
         // 将 KnowledgeFile 转化为 KnowledgeFileVO
-        List<com.ithsd.smart_tender.pojo.vo.KnowledgeFileVO> voList = new java.util.ArrayList<>();
+        List<com.ithsd.smart_tender.model.vo.KnowledgeFileVO> voList = new java.util.ArrayList<>();
         for (KnowledgeFile knowledgeFile : records) {
-            com.ithsd.smart_tender.pojo.vo.KnowledgeFileVO vo = new com.ithsd.smart_tender.pojo.vo.KnowledgeFileVO();
+            com.ithsd.smart_tender.model.vo.KnowledgeFileVO vo = new com.ithsd.smart_tender.model.vo.KnowledgeFileVO();
             BeanUtils.copyProperties(knowledgeFile, vo);
             
             // 查询并设置上传用户姓名
@@ -288,9 +283,6 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
         if (knowledgeFile != null) {
             knowledgeFile.setStatus(2); // 2表示已删除
             this.updateById(knowledgeFile);
-            
-            // 删除对应的分块数据
-            knowledgeChunkService.deleteChunksByFileId(fileId);
         }
     }
     
@@ -368,11 +360,6 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
                     throw new RuntimeException("文件重命名失败");
                 }
                 
-                // 处理新文件的分块
-                knowledgeChunkService.processFileChunks(knowledgeFile.getId(), absoluteFilePath.toString(), "kb");
-
-                // 删除旧文件的分块数据
-                knowledgeChunkService.deleteChunksByFileId(oldFile.getId());
             } catch (Exception e) {
                 // 数据库保存失败，删除已上传的临时文件
                 if (savedFile.exists()) {
@@ -401,25 +388,6 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
             knowledgeFile.setStatus(status);
             knowledgeFile.setUpdateTime(LocalDateTime.now());
             this.updateById(knowledgeFile);
-
-            if (status == 0) {
-                // 删除对应的分块数据
-                knowledgeChunkService.deleteChunksByFileId(fileId);
-            }
-            else if (status == 1) {
-                // 处理新文件的分块
-                try {
-                    String filePath = knowledgeFile.getFilePath();
-                    if (filePath != null && !filePath.isEmpty()) {
-                        Path absolutePath = storagePathService.resolveStoredPath(filePath);
-                        knowledgeChunkService.processFileChunks(fileId, absolutePath.toString(), "kb");
-                    } else {
-                        log.warn("文件路径为空，无法处理分块：fileId={}");
-                    }
-                } catch (IOException e) {
-                    throw new RuntimeException("处理文件分块失败：" + e.getMessage(), e);
-                }
-            }
         }
     }
 

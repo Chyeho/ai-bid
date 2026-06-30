@@ -26,7 +26,6 @@ use uuid::Uuid;
 use crate::domain::raw_document::{
     BBox, BlockType, RawBlock, RawDocument, RawLine, RawPage, RawRect, RawTable, RawWord,
 };
-use crate::paths::data_path_str;
 
 // ---------- 文本清洗工具 ----------
 
@@ -346,7 +345,8 @@ pub fn extract_pdf_to_raw_json(path: &str) -> Result<RawDocument> {
 
 /// 用 Python pdfplumber 兜底提取 PDF 内容。
 pub fn extract_with_python(input_path: &str, output_path: &str) -> Result<()> {
-    let script = data_path_str("scripts/pdf_extract.py");
+    // 编译期嵌入脚本的绝对路径（位于 backend-rust/scripts/）
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/pdf_extract.py");
 
     let output = Command::new("python")
         .args([&script, input_path, output_path])
@@ -368,4 +368,196 @@ pub fn extract_with_python(input_path: &str, output_path: &str) -> Result<()> {
     anyhow::ensure!(meta.len() > 0, "Python 兜底提取的 JSON 文件为空");
 
     Ok(())
+}
+
+// ─── 测试 ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── clean_layout_text ──────────────────────────────────────────
+
+    #[test]
+    fn test_clean_layout_text_merges_cjk_spaces() {
+        // 中文绝对定位渲染：每个字之间被空格填充
+        let input = "投  标  人  须  在  东  莞  地  区  设  有  常  驻  服  务  机  构";
+        let result = clean_layout_text(input);
+        assert_eq!(result, "投标人须在东莞地区设有常驻服务机构");
+    }
+
+    #[test]
+    fn test_clean_layout_text_preserves_cjk_between_lines() {
+        // CJK 之间空格消除，但换行保留
+        let input = "第一章  总  则\n第二条  合  同  标  的";
+        let result = clean_layout_text(input);
+        // CJK_SPACE_RE 合并所有汉-空-汉模式，包括跨词边界
+        assert_eq!(result, "第一章总则\n第二条合同标的");
+    }
+
+    #[test]
+    fn test_clean_layout_text_compresses_multiple_spaces() {
+        // CJK_RE 先合并汉字间的所有空格，MULTI_SPACE_RE 处理剩余
+        // "符合" 和 "以下" 都是 CJK，所以被 CJK_SPACE_RE 完全合并
+        let input = "符合    以下    条件";
+        let result = clean_layout_text(input);
+        assert_eq!(result, "符合以下条件");
+    }
+
+    #[test]
+    fn test_clean_layout_text_empty_input() {
+        assert_eq!(clean_layout_text(""), "");
+        assert_eq!(clean_layout_text("   \n   \n  "), "");
+    }
+
+    #[test]
+    fn test_clean_layout_text_pure_ascii() {
+        let input = "The bidder shall comply with the requirements.";
+        let result = clean_layout_text(input);
+        assert_eq!(result, "The bidder shall comply with the requirements.");
+    }
+
+    #[test]
+    fn test_clean_layout_text_mixed_cjk_and_ascii() {
+        // 中文用 CJK 规则，英文空格保留
+        let input = "项目编号  ABC-2024  投标  人";
+        let result = clean_layout_text(input);
+        assert_eq!(result, "项目编号  ABC-2024  投标人");
+    }
+
+    // ── reconstruct_text_from_words ────────────────────────────────
+
+    fn make_word(text: &str, x0: f64, top: f64, x1: f64, bottom: f64) -> RawWord {
+        RawWord {
+            id: String::new(),
+            text: text.to_string(),
+            bbox: BBox { x0, top, x1, bottom },
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_text_empty_input() {
+        let words: Vec<RawWord> = vec![];
+        let result = reconstruct_text_from_words(&words);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_reconstruct_text_single_word() {
+        let words = vec![make_word("投标人", 100.0, 200.0, 140.0, 210.0)];
+        let result = reconstruct_text_from_words(&words);
+        assert_eq!(result, "投标人");
+    }
+
+    #[test]
+    fn test_reconstruct_text_single_line() {
+        // 同一行内按 X 坐标排序拼接
+        let words = vec![
+            make_word("投标人", 100.0, 200.0, 140.0, 210.0),
+            make_word("须", 145.0, 200.0, 160.0, 210.0),
+            make_word("在", 165.0, 200.0, 180.0, 210.0),
+            make_word("东莞", 185.0, 200.0, 215.0, 210.0),
+        ];
+        let result = reconstruct_text_from_words(&words);
+        assert_eq!(result, "投标人须在东莞");
+    }
+
+    #[test]
+    fn test_reconstruct_text_multi_line() {
+        // 跨行：Y 坐标差超过 1.2 倍行高视为新行
+        let words = vec![
+            make_word("第一章", 100.0, 100.0, 140.0, 110.0),
+            make_word("总则", 145.0, 100.0, 170.0, 110.0),
+            make_word("第一条", 100.0, 130.0, 140.0, 140.0),
+            make_word("合同标的", 145.0, 130.0, 190.0, 140.0),
+        ];
+        let result = reconstruct_text_from_words(&words);
+        assert!(result.contains('\n'), "跨行文本应包含换行符");
+        assert_eq!(result, "第一章总则\n第一条合同标的");
+    }
+
+    #[test]
+    fn test_reconstruct_text_column_separation() {
+        // 大列间距（> 8 倍平均字宽）→ 用双空格分隔
+        let words = vec![
+            make_word("条款", 50.0, 100.0, 80.0, 110.0),
+            // 间隙 > 8x avg_w ≈ 80pt → 列分隔
+            make_word("说明", 200.0, 100.0, 230.0, 110.0),
+        ];
+        let result = reconstruct_text_from_words(&words);
+        assert_eq!(result, "条款  说明");
+    }
+
+    // ── compute_blocks ─────────────────────────────────────────────
+
+    #[test]
+    fn test_compute_blocks_empty_input() {
+        let words: Vec<RawWord> = vec![];
+        let blocks = compute_blocks(&words, 0);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_compute_blocks_single_line_heading() {
+        // 单行单词 ≤ 10 → heading
+        let words: Vec<RawWord> = (0..5)
+            .map(|i| make_word(&format!("w{}", i), 50.0 + i as f64 * 30.0, 100.0, 75.0 + i as f64 * 30.0, 110.0))
+            .collect();
+        let blocks = compute_blocks(&words, 0);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block_type, BlockType::Heading);
+        assert!(blocks[0].id.starts_with("b_0_"));
+    }
+
+    #[test]
+    fn test_compute_blocks_multi_line_paragraph() {
+        // 多行多个单词 → paragraph
+        let mut words = Vec::new();
+        // Line 1: 10 words
+        for i in 0..10 {
+            words.push(make_word(&format!("L1W{}", i), 50.0 + i as f64 * 30.0, 100.0, 75.0 + i as f64 * 30.0, 110.0));
+        }
+        // Line 2: 5 words (same paragraph, gap < 1.8x line_height)
+        for i in 0..5 {
+            words.push(make_word(&format!("L2W{}", i), 50.0 + i as f64 * 30.0, 118.0, 75.0 + i as f64 * 30.0, 128.0));
+        }
+        let blocks = compute_blocks(&words, 2);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block_type, BlockType::Paragraph);
+        assert!(blocks[0].id.starts_with("b_2_"));
+    }
+
+    #[test]
+    fn test_compute_blocks_paragraph_boundary() {
+        // 行间距 > 1.8x line_height → 新段落
+        let mut words = Vec::new();
+        // Paragraph 1: line at y=100, height=10
+        for i in 0..3 {
+            words.push(make_word(&format!("P1W{}", i), 50.0 + i as f64 * 30.0, 100.0, 75.0, 110.0));
+        }
+        // Paragraph 2: line at y=140, gap=30 > 1.8*10=18 → new block
+        for i in 0..3 {
+            words.push(make_word(&format!("P2W{}", i), 50.0 + i as f64 * 30.0, 140.0, 75.0, 150.0));
+        }
+        let blocks = compute_blocks(&words, 1);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].id.starts_with("b_1_"));
+        assert!(blocks[1].id.starts_with("b_1_"));
+    }
+
+    #[test]
+    fn test_compute_blocks_id_uniqueness() {
+        // 每个 block 的 ID 在同一页内唯一
+        let mut words = Vec::new();
+        for p in 0..3 {
+            let y = 100.0 + p as f64 * 40.0;
+            for i in 0..5 {
+                words.push(make_word(&format!("W{}", i), 50.0 + i as f64 * 30.0, y, 75.0, y + 10.0));
+            }
+        }
+        let blocks = compute_blocks(&words, 5);
+        assert_eq!(blocks.len(), 3);
+        let ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["b_5_0", "b_5_1", "b_5_2"]);
+    }
 }

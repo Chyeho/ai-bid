@@ -1,4 +1,4 @@
-//! ChatAgent — 交互式对话审查 Agent。
+﻿//! ChatAgent — 交互式对话审查 Agent。
 //!
 //! 与批量审查 Agent 互补：批量审查=全覆盖一次性（像跑测试套件），
 //! 对话审查=按需深挖随时（像 Debug 时问 AI）。
@@ -15,6 +15,7 @@ use crate::agents::react_loop::{
 };
 use crate::agents::tools::ToolRegistry;
 use crate::agents::types::*;
+use tokio::sync::mpsc::UnboundedSender;
 use crate::domain::chunk::Chunk;
 use crate::domain::vector_index::DocumentVectorIndex;
 use crate::services::embedding_service::EmbeddingClient;
@@ -278,6 +279,7 @@ impl ChatAgent {
                 Ok(r) => r,
                 Err(e) => {
                     return Ok(ChatResponse {
+                        reasoning: Vec::new(),
                         answer: format!("抱歉，LLM 调用失败: {}", e),
                         references: Vec::new(),
                         knowledge_refs: Vec::new(),
@@ -310,7 +312,8 @@ impl ChatAgent {
                     Ok(self.parse_answer_user(args))
                 } else {
                     Ok(ChatResponse {
-                        answer: resp.content.unwrap_or_default(),
+                        reasoning: Vec::new(),
+                        answer: Self::filter_emojis(&resp.content.unwrap_or_default()),
                         references: Vec::new(),
                         knowledge_refs: Vec::new(),
                         confidence: None,
@@ -321,6 +324,7 @@ impl ChatAgent {
             None => {
                 // max_turns 耗尽 → 返回截断信息
                 Ok(ChatResponse {
+                    reasoning: Vec::new(),
                     answer: "抱歉，我在审查该问题时达到了分析上限。请尝试用更具体的问题重新提问。"
                         .to_string(),
                     references: Vec::new(),
@@ -332,9 +336,222 @@ impl ChatAgent {
         }
     }
 
+    /// 流式对话入口。
+    ///
+    /// 与 [`chat`] 逻辑相同，但通过 mpsc channel 实时发送
+    /// [`ChatStreamEvent`] 事件，供 SSE handler 使用。
+    ///
+    /// * `tx` — 事件发送端（调用方持有 rx 端读取 SSE）
+/// 根据工具名称和参数生成人类可读的推理步骤描述。
+///
+/// 当 LLM（如 qwen-plus）不输出 `content` 只输出 `tool_calls` 时，
+/// 从工具调用的实际参数中提取关键信息作为推理步骤展示。
+fn tool_reasoning_hint(name: &str, args: &serde_json::Value) -> String {
+    match name {
+        "web_search" => {
+            let q = args["query"].as_str().unwrap_or("");
+            let cat = args["category"].as_str().unwrap_or("");
+            if !q.is_empty() {
+                let mut hint = format!("搜索法规: {}", Self::truncate_for_hint(q, 80));
+                if !cat.is_empty() {
+                    hint.push_str(&format!("（分类: {}）", cat));
+                }
+                hint
+            } else {
+                "搜索相关法规依据".to_string()
+            }
+        }
+        "search_document" => {
+            let q = args["query"].as_str().unwrap_or("");
+            if !q.is_empty() {
+                format!("搜索标书原文: {}", Self::truncate_for_hint(q, 80))
+            } else {
+                "搜索标书原文".to_string()
+            }
+        }
+        "read_section" => {
+            let block_id = args["block_id"].as_str().unwrap_or("");
+            if !block_id.is_empty() {
+                format!("精读条款 {}", block_id)
+            } else {
+                "精读条款原文".to_string()
+            }
+        }
+        "search_knowledge" => {
+            let q = args["query"].as_str().unwrap_or("");
+            if !q.is_empty() {
+                format!("检索知识库: {}", Self::truncate_for_hint(q, 80))
+            } else {
+                "检索知识库".to_string()
+            }
+        }
+        "answer_user" => {
+            // answer_user 是终端工具，其参数在 parse_answer_user 中解析
+            "整理分析结果，生成最终回答".to_string()
+        }
+        _ => format!("执行: {}", name),
+    }
+}
+
+/// 截断文本用于推理提示，超长加 "..."
+fn truncate_for_hint(text: &str, max_len: usize) -> String {
+    let cleaned = text.replace('\n', " ").replace('\r', "");
+    if cleaned.chars().count() > max_len {
+        let truncated: String = cleaned.chars().take(max_len).collect();
+        format!("{}...", truncated)
+    } else {
+        cleaned
+    }
+}
+
+
+    pub async fn chat_stream(
+        &self,
+        selection: Option<TextSelection>,
+        user_input: &str,
+        history: Option<Vec<ChatMessage>>,
+        tx: UnboundedSender<ChatStreamEvent>,
+    ) -> Result<()> {
+        // P0: RAG
+        let rag_context = self.build_rag_context(user_input, &selection).await;
+
+        let mut system_prompt = self.build_system_prompt(&selection);
+        if !rag_context.is_empty() {
+            system_prompt.push_str(&rag_context);
+        }
+
+        let mut conversation: Vec<ChatMessage> = vec![ChatMessage::System {
+            content: system_prompt,
+        }];
+
+        if let Some(h) = history {
+            conversation.extend(h);
+        }
+
+        conversation.push(ChatMessage::User {
+            content: self.build_user_message(&selection, user_input),
+        });
+
+        // ReAct loop
+        let tool_defs = self.tools.definitions();
+        let mut last_response: Option<LlmResponse> = None;
+        let mut reasoning_steps: Vec<String> = Vec::new();
+
+        for turn in 1..=self.config.max_turns {
+            let tool_choice = if turn == 1 {
+                ToolChoice::Required
+            } else if turn == self.config.max_turns {
+                ToolChoice::Specific {
+                    name: "answer_user".to_string(),
+                }
+            } else {
+                ToolChoice::Auto
+            };
+
+            let result = match self.llm.chat(&conversation, &tool_defs, &tool_choice).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(ChatStreamEvent::Error(format!("LLM 调用失败: {}", e)));
+                    return Ok(());
+                }
+            };
+
+            // Stream LLM real reasoning (thought), or fallback to tool context
+            if let Some(ref thought) = result.thought {
+                let filtered = Self::filter_emojis(thought);
+                if !filtered.trim().is_empty() {
+                    reasoning_steps.push(filtered.clone());
+                    let _ = tx.send(ChatStreamEvent::Thinking { message: filtered });
+                }
+            }
+
+            // Emit tool calls with context-derived reasoning when thought is absent
+            for tc in &result.tool_calls {
+                // Generate meaningful step from actual tool args (not hardcoded label)
+                let reasoning_hint = Self::tool_reasoning_hint(&tc.name, &tc.arguments);
+                if reasoning_steps.is_empty()
+                    || reasoning_steps.last().map(|s| s.as_str()) != Some(reasoning_hint.as_str())
+                {
+                    reasoning_steps.push(reasoning_hint.clone());
+                    let _ = tx.send(ChatStreamEvent::Thinking {
+                        message: reasoning_hint,
+                    });
+                }
+                let _ = tx.send(ChatStreamEvent::ToolCall {
+                    name: tc.name.clone(),
+                    args: serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                });
+            }
+
+            // Terminal: answer_user
+            if result.has_answer_user() {
+                last_response = Some(result);
+                break;
+            }
+
+            // Execute tools
+            if let Err(e) = execute_tool_calls(&result, &self.tools, &mut conversation).await {
+                let _ = tx.send(ChatStreamEvent::Error(format!("工具执行失败: {}", e)));
+                return Ok(());
+            }
+
+            // Terminal: direct text (no tool calls)
+            if result.content.is_some() && result.tool_calls.is_empty() {
+                last_response = Some(result);
+                break;
+            }
+        }
+
+        // Parse final
+        let mut chat_response = match last_response {
+            Some(resp) => {
+                if let Some(args) = resp.get_answer() {
+                    self.parse_answer_user(args)
+                } else {
+                    ChatResponse {
+                        answer: Self::filter_emojis(&resp.content.unwrap_or_default()),
+                        reasoning: Vec::new(),
+                        references: Vec::new(),
+                        knowledge_refs: Vec::new(),
+                        confidence: None,
+                        suggested_actions: Vec::new(),
+                    }
+                }
+            }
+            None => ChatResponse {
+                answer: "抱歉，我在审查该问题时达到了分析上限。请尝试用更具体的问题重新提问。"
+                    .to_string(),
+                reasoning: Vec::new(),
+                references: Vec::new(),
+                knowledge_refs: Vec::new(),
+                confidence: None,
+                suggested_actions: vec!["尝试将问题拆分为更小的子问题".to_string()],
+            },
+        };
+
+        chat_response.reasoning = reasoning_steps;
+
+        let _ = tx.send(ChatStreamEvent::Answer(chat_response.clone()));
+        let _ = tx.send(ChatStreamEvent::Done(chat_response));
+        Ok(())
+    }
+
+    /// 过滤 Emoji 字符，仅保留纯文本内容。
+    ///
+    /// 匹配规则：
+    /// - `\p{Emoji_Presentation}` — 默认 emoji 呈现的字符（😀🎉🔴等）
+    /// - `\u{FE0F}` — 变体选择器 16（emoji 风格修饰符）
+    /// - `\u{20E3}` — 按键封装组合符（keycap 序列）
+    /// - `\u{2600}-\u{27BF}` — 杂项符号 + 丁贝符（⚠✅❌✨等）
+    fn filter_emojis(text: &str) -> String {
+        let re = Regex::new(r"[\p{Emoji_Presentation}\u{FE0F}\u{20E3}\u{2600}-\u{27BF}]")
+            .unwrap();
+        re.replace_all(text, "").to_string()
+    }
+
     /// 解析 answer_user 参数 → ChatResponse。
     fn parse_answer_user(&self, args: &serde_json::Value) -> ChatResponse {
-        let answer = args["answer"].as_str().unwrap_or("").to_string();
+        let answer = Self::filter_emojis(args["answer"].as_str().unwrap_or(""));
 
         // ── P3: 验证引用 block_id 存在性 + quote 文本匹配 ──
         let mut validation_warnings: Vec<String> = Vec::new();
@@ -442,6 +659,7 @@ impl ChatAgent {
 
         ChatResponse {
             answer: validated_answer,
+            reasoning: Vec::new(),
             references,
             knowledge_refs,
             confidence: args["confidence"].as_f64().map(|c| c as f32),
@@ -694,6 +912,7 @@ mod tests {
                     // 静态默认响应用于空队列场景
                     static DEFAULT: std::sync::LazyLock<LlmResponse> =
                         std::sync::LazyLock::new(|| LlmResponse {
+                            thought: None,
                             content: Some("mock fallback".to_string()),
                             tool_calls: vec![],
                         });
@@ -701,6 +920,7 @@ mod tests {
                 })
             };
             Ok(LlmResponse {
+                thought: None,
                 content: resp.content.clone(),
                 tool_calls: resp.tool_calls.clone(),
             })
@@ -729,6 +949,7 @@ mod tests {
 
     fn make_answer_user_response(answer: &str, confidence: f32) -> LlmResponse {
         LlmResponse {
+            thought: None,
             content: Some("我来输出最终回答".to_string()),
             tool_calls: vec![ToolCall {
                 id: "call_1".to_string(),
@@ -938,6 +1159,7 @@ mod tests {
     async fn test_chat_direct_text_response() {
         // LLM 直接输出文本（无 tool call）→ 视为最终回答
         let mock = Arc::new(MockLlmClient::new(vec![LlmResponse {
+            thought: None,
             content: Some("根据我的分析，这条条款没有合规问题。".to_string()),
             tool_calls: vec![],
         }]));
@@ -960,6 +1182,7 @@ mod tests {
         // max_turns=3 → 第3轮被强制 answer_user，但 mock 仍不调用
         let mock = Arc::new(MockLlmClient::new(vec![
             LlmResponse {
+                thought: None,
                 content: Some("我需要搜索一下法规".to_string()),
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_string(),
@@ -968,6 +1191,7 @@ mod tests {
                 }],
             },
             LlmResponse {
+                thought: None,
                 content: Some("还需要再查一下".to_string()),
                 tool_calls: vec![ToolCall {
                     id: "call_2".to_string(),
@@ -976,6 +1200,7 @@ mod tests {
                 }],
             },
             LlmResponse {
+                thought: None,
                 content: Some("还需要再查一下".to_string()),
                 tool_calls: vec![ToolCall {
                     id: "call_3".to_string(),
@@ -1086,6 +1311,7 @@ mod tests {
                 self.tool_choices.lock().unwrap().push(tool_choice.clone());
                 // 返回一个非 answer_user 的响应 → 让循环继续
                 Ok(LlmResponse {
+                    thought: None,
                     content: Some("thinking...".to_string()),
                     tool_calls: vec![ToolCall {
                         id: "call_1".to_string(),
@@ -1187,5 +1413,76 @@ mod tests {
         // 同组只有 1 个（最高分 0.9），剩余 2 个从候补补齐
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].chunk_id, "ch_001"); // 最高分
+    }
+
+    // ── filter_emojis 单元测试 ──────────────────────────────
+
+    #[test]
+    fn test_filter_emojis_no_emoji() {
+        // 纯文本无 emoji → 原样返回
+        let text = "这是正常的回答文本，包含中文和English。";
+        assert_eq!(ChatAgent::filter_emojis(text), text);
+    }
+
+    #[test]
+    fn test_filter_emojis_single_emoji() {
+        // 单个 emoji → 移除
+        assert_eq!(ChatAgent::filter_emojis("✅ 通过"), " 通过");
+        assert_eq!(ChatAgent::filter_emojis("⚠️ 警告"), " 警告");
+        assert_eq!(ChatAgent::filter_emojis("❌ 不通过"), " 不通过");
+    }
+
+    #[test]
+    fn test_filter_emojis_multiple_emojis() {
+        // 多个 emoji → 全部移除
+        assert_eq!(
+            ChatAgent::filter_emojis("🔴 高风险 🟡 中风险 🟢 低风险"),
+            " 高风险  中风险  低风险"
+        );
+    }
+
+    #[test]
+    fn test_filter_emojis_inline_emoji() {
+        // emoji 嵌入在句子中 → 仅移除 emoji
+        let filtered = ChatAgent::filter_emojis("供应商📌必须在东莞设有🔹常驻机构");
+        assert!(!filtered.contains('📌'));
+        assert!(!filtered.contains('🔹'));
+        assert!(filtered.contains("供应商"));
+        assert!(filtered.contains("必须在东莞设有"));
+        assert!(filtered.contains("常驻机构"));
+    }
+
+    #[test]
+    fn test_filter_emojis_all_emoji() {
+        // 全部是 emoji → 返回空字符串
+        let filtered = ChatAgent::filter_emojis("😀🎉✅⚠️");
+        assert!(filtered.trim().is_empty());
+    }
+
+    #[test]
+    fn test_filter_emojis_emoji_with_text_formatting() {
+        // emoji 与 markdown 格式混用
+        let filtered = ChatAgent::filter_emojis("**[重要]** ⚠️ 请核实资质文件。");
+        assert!(!filtered.contains('⚠'));
+        assert!(filtered.contains("**[重要]**"));
+        assert!(filtered.contains("请核实资质文件。"));
+    }
+
+    #[test]
+    fn test_filter_emojis_empty() {
+        // 空字符串
+        assert_eq!(ChatAgent::filter_emojis(""), "");
+    }
+
+    #[test]
+    fn test_filter_emojis_table_with_emoji() {
+        // 表格中带 emoji → 移除 emoji 保留表格结构
+        let text = "| 状态 | 说明 |\n| ✅ | 合格 |\n| ❌ | 不合格 |";
+        let filtered = ChatAgent::filter_emojis(text);
+        assert!(!filtered.contains('✅'));
+        assert!(!filtered.contains('❌'));
+        assert!(filtered.contains("| 状态 |"));
+        assert!(filtered.contains("| 合格 |"));
+        assert!(filtered.contains("| 不合格 |"));
     }
 }

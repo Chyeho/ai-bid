@@ -1,5 +1,5 @@
 import request from '@/api/request';
-import type { BaseResponse, PageResponse } from '@/api/types';
+import type { BaseResponse } from '@/api/types';
 import type {
    AuditCount,
    IssueChartItem,
@@ -8,7 +8,6 @@ import type {
    ProjectParams,
    AuditCountItem,
 } from '../types';
-import type { ProjectItem as AuditListProjectItem } from '@/features/bidAudit/types';
 import { mutationOptions, queryOptions } from '@tanstack/react-query';
 import { getMockDashboardList } from './dashboardMock';
 
@@ -30,24 +29,10 @@ export const getDashboardList = async (): Promise<ProjectItem[]> => {
 
    const res = await request.get<
       unknown,
-      BaseResponse<PageResponse<AuditListProjectItem>>
-   >('/api/bid-documents', {
-      params: { page: 1, size: 1000 },
-   });
+      BaseResponse<ProjectItem[]>
+   >('/api/projects');
 
-   const records = res.data?.records || [];
-   return records.map((item) => ({
-      id: item.projectId,
-      userId: item.uploadUserId || 0,
-      projectName: item.bidName,
-      supplierName: item.supplierName,
-      parseStatus: item.parseStatus,
-      latestVersion: item.version,
-      createTime: item.uploadTime,
-      updateTime: item.uploadTime,
-      auditResult: item.auditResult ?? null,
-      tenders: [],
-   }));
+   return res.data || [];
 };
 
 export const createProject = async (
@@ -88,8 +73,8 @@ export const getIssueDistribution = async (): Promise<IssueChartItem[]> => {
    const data = res.data;
 
    return [
-      { name: '预算合规性', value: data?.budget || 0 },
-      { name: '法律风险', value: data?.legal || 0 },
+      { name: '合规性', value: data?.budget || 0 },
+      { name: '法律法规', value: data?.legal || 0 },
       { name: '采购需求', value: data?.demand || 0 },
    ];
 };

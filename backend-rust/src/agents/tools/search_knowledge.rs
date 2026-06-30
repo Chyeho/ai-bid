@@ -796,7 +796,8 @@ impl DashScopeSearchBackend {
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .context("DashScope 搜索后端需要 API 密钥。请设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY")?;
         let model = std::env::var("DASHSCOPE_SEARCH_MODEL")
-            .unwrap_or_else(|_| "qwen-turbo".to_string());
+            .or_else(|_| std::env::var("DASHSCOPE_MODEL"))
+            .unwrap_or_else(|_| "qwen-plus".to_string());
         Ok(Self::new(&api_key, &model))
     }
 

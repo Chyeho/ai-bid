@@ -18,6 +18,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::raw_document::BBox;
+
 /// 条款级语义切块，是 Agent 审查的最小单位。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
@@ -35,6 +37,11 @@ pub struct Chunk {
     pub page_end: usize,
     /// 来源 block ID（用于回溯高亮）
     pub source_block_ids: Vec<String>,
+    /// 预计算的 BBox 缓存（block_id → 页面坐标）。
+    /// 由 `populate_bbox_refs()` 在 chunk 切分完成后统一填充。
+    /// 空 Vec 表示尚未填充（如 CLI 路径中未调用 populate）。
+    #[serde(default)]
+    pub bbox_refs: Vec<BlockBBox>,
 }
 
 /// 切分方式枚举，记录 chunk 是如何从 Section 树产生的。
@@ -92,4 +99,20 @@ impl Default for ChunkingConfig {
             embed_path_max_len: 40,
         }
     }
+}
+
+/// 预计算的 BBox 信息，用于前端 bbox-based PDF 精确高亮。
+///
+/// 每个 `BlockBBox` 对应 `Chunk.source_block_ids` 中的一个 block，
+/// 包含其在原始 PDF 中的精确坐标和页面宽度（用于前端 scale 计算）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockBBox {
+    /// Block ID（如 "b_5_3"）
+    pub block_id: String,
+    /// 所在页码 (0-based)
+    pub page: usize,
+    /// 包围盒坐标（PDF points，原点左上角）
+    pub bbox: BBox,
+    /// 原始 PDF 页面宽度 (pt)，用于前端 scale = renderedWidth / pageWidth
+    pub page_width: f64,
 }

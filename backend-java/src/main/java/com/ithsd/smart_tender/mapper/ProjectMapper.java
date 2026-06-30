@@ -1,7 +1,7 @@
 package com.ithsd.smart_tender.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.ithsd.smart_tender.pojo.entity.Project;
+import com.ithsd.smart_tender.model.entity.Project;
 import org.apache.ibatis.annotations.Mapper;
 
 @Mapper

@@ -684,3 +684,80 @@ pub fn load_index(dir: &str, stem: &str) -> Result<DocumentVectorIndex> {
         embeddings,
     })
 }
+
+// ─── 测试 ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── l2_normalize_in_place ──────────────────────────────────────
+
+    #[test]
+    fn test_l2_normalize_unit_vector() {
+        // 已经是单位向量 → 不变
+        let v = vec![1.0, 0.0, 0.0];
+        let result = l2_normalize_in_place(v);
+        for (i, &val) in result.iter().enumerate() {
+            let expected = if i == 0 { 1.0 } else { 0.0 };
+            assert!((val - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_l2_normalize_scale_to_unit() {
+        // 向量 [3.0, 4.0] 的 L2 norm = 5 → [0.6, 0.8]
+        let v = vec![3.0, 4.0];
+        let result = l2_normalize_in_place(v);
+        assert!((result[0] - 0.6).abs() < 1e-6);
+        assert!((result[1] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_l2_normalize_preserves_direction() {
+        let v = vec![2.0, 2.0, 2.0];
+        let result = l2_normalize_in_place(v);
+        // 归一化后的各分量应相等
+        assert!((result[0] - result[1]).abs() < 1e-6);
+        assert!((result[1] - result[2]).abs() < 1e-6);
+        // L2 norm 应为 1
+        let norm: f32 = result.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_l2_normalize_zero_vector() {
+        // 零向量 → 保持为零向量（不除零）
+        let v = vec![0.0, 0.0, 0.0];
+        let result = l2_normalize_in_place(v);
+        assert_eq!(result, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_l2_normalize_empty_vector() {
+        let v: Vec<f32> = vec![];
+        let result = l2_normalize_in_place(v);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_l2_normalize_high_dimensional() {
+        // 1024 维随机向量 → L2 norm = 1
+        let v: Vec<f32> = (0..1024).map(|i| (i as f32).sin()).collect();
+        let result = l2_normalize_in_place(v);
+        let norm: f32 = result.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_l2_normalize_negative_values() {
+        let v = vec![-1.0, -2.0, 3.0];
+        let result = l2_normalize_in_place(v);
+        let norm: f32 = result.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+        // 符号应保留（方向不变）
+        assert!(result[0] < 0.0);
+        assert!(result[1] < 0.0);
+        assert!(result[2] > 0.0);
+    }
+}

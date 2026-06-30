@@ -1,7 +1,7 @@
 package com.ithsd.smart_tender.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.ithsd.smart_tender.pojo.entity.AuditTask;
+import com.ithsd.smart_tender.model.entity.AuditTask;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Param;

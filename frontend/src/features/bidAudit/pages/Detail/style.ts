@@ -4,21 +4,22 @@ export const useStyles = createStyles(({ css, token, isDarkMode }) => ({
    container: css`
       display: flex;
       flex-direction: column;
-      height: calc(100vh - 84px);
-      min-height: calc(100vh - 84px);
+      height: calc(100vh - 60px);
+      min-height: calc(100vh - 60px);
+      margin: -12px;
       position: relative;
       background-color: ${token.colorBgLayout};
       overflow: hidden;
 
       .ant-tabs-tab-btn {
-         font-size: 1.2rem;
+         font-size: 1.5rem;
       }
    `,
 
    mainContent: css`
       display: flex;
-      gap: 1rem;
-      padding: 1rem;
+      gap: 0.5rem;
+      padding: 0;
       flex: 1;
       height: 100%;
       min-height: 0;
@@ -35,9 +36,8 @@ export const useStyles = createStyles(({ css, token, isDarkMode }) => ({
       min-height: 0;
       display: flex;
       flex-direction: column;
-      padding: 1rem;
-      border-radius: 5px;
-      background-color: ${token.colorBgContainer};
+      padding: 0.5rem;
+      overflow: hidden;
 
       @media (max-width: 768px) {
          flex: none;
@@ -47,24 +47,32 @@ export const useStyles = createStyles(({ css, token, isDarkMode }) => ({
       }
    `,
 
+   pdfPanel: css`
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+   `,
+
    rightPanel: css`
       flex: 0 0 44%;
       min-height: 0;
       min-width: 0;
       position: relative;
       overflow: hidden;
-      border-radius: 5px;
-      padding: 1rem;
-      background-color: ${token.colorBgContainer};
+      padding: 0.5rem;
       display: flex;
       flex-direction: column;
-      gap: 1rem;
+      gap: 0.5rem;
 
       .ant-tabs-nav-list {
-         flex: 1;
+         display: grid !important;
+         grid-template-columns: 1fr 1fr 1fr !important;
+         width: 100% !important;
 
          .ant-tabs-tab {
-            justify-content: center;
+            justify-content: center !important;
+            margin: 0 !important;
          }
       }
 
@@ -110,27 +118,15 @@ export const useStyles = createStyles(({ css, token, isDarkMode }) => ({
       }
    `,
 
-   previewHeader: css`
-      padding-bottom: 1rem;
-      background: ${token.colorBgContainer};
-      flex-shrink: 0;
-   `,
-
-   pdfScrollArea: css`
+pdfScrollArea: css`
       flex: 1;
       overflow-y: auto;
       display: flex;
       background-color: ${isDarkMode ? '#1a1a1a' : '#f0f2f5'};
       flex-direction: column;
       align-items: center;
-      overscroll-behavior: contain;
-   `,
-
-   pdfContentCenter: css`
-      display: flex;
-      flex-direction: column;
-      align-items: center;
       gap: 24px;
+      overscroll-behavior: contain;
    `,
 
    pageItem: css`
@@ -193,15 +189,13 @@ export const useStyles = createStyles(({ css, token, isDarkMode }) => ({
 
    // pdfToolbar
    toolbar: css`
-      background-color: ${isDarkMode
-         ? 'rgba(232, 245, 233, 0.7)'
-         : 'rgba(46, 125, 50, 0.15)'};
-      padding: 1rem 2rem;
+      background-color: ${token.colorBgContainer};
+      padding: 0.4rem 1rem;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 1rem;
-      border-bottom: 1px solid ${token.colorBorderSecondary};
+      gap: 0.5rem;
+      border-top: 1px solid ${token.colorBorderSecondary};
       flex-shrink: 0;
    `,
 
@@ -209,8 +203,15 @@ export const useStyles = createStyles(({ css, token, isDarkMode }) => ({
       color: ${token.colorPrimary};
       border-color: transparent;
       background: transparent;
+      font-size: 12px;
       &:hover {
          background-color: rgba(46, 125, 50, 0.1);
+      }
+   `,
+
+   severityFilter: css`
+      .ant-segmented-item-selected {
+         background: #e8f5e9 !important;
       }
    `,
 

@@ -254,17 +254,40 @@ def validate_chunks(name, path):
 
 
 if __name__ == '__main__':
-    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import glob as glob_mod
 
-    bids = [
-        ("智慧教室环境改造工程", "output/chunks/智慧教室环境改造工程_chunks.json"),
-        ("清华大学深圳国际研究生院智慧校园项目", "output/chunks/清华大学深圳国际研究生院智慧校园项目公开招标文件_chunks.json"),
-    ]
+    # 数据目录优先级: AIBID_DATA_DIR > ../ > ./
+    data_root = os.environ.get("AIBID_DATA_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    chunks_dir = os.path.join(data_root, "output", "chunks")
+    if not os.path.isdir(chunks_dir):
+        # Try parent directory
+        chunks_dir = os.path.join(os.path.dirname(data_root), "output", "chunks")
+    if not os.path.isdir(chunks_dir):
+        print(f"[ERROR] chunks 目录不存在: {chunks_dir}")
+        print(f"  设置 AIBID_DATA_DIR 环境变量指定项目根目录")
+        sys.exit(1)
+
+    os.chdir(data_root)
+
+    # 自动发现所有 chunks JSON 文件
+    chunk_files = sorted(glob_mod.glob(os.path.join(chunks_dir, "*_chunks.json")))
+    if not chunk_files:
+        # 如果传入命令行参数，使用它们
+        chunk_files = sys.argv[1:] if len(sys.argv) > 1 else []
+    if not chunk_files:
+        print(f"[ERROR] 未找到 chunks JSON 文件: {chunks_dir}")
+        print(f"  用法: python validate_chunks.py [file1.json file2.json ...]")
+        sys.exit(1)
 
     all_issues = {}
-    for name, path in bids:
-        issues = validate_chunks(name, path)
-        all_issues[name] = issues
+    for path in chunk_files:
+        name = os.path.splitext(os.path.basename(path))[0].replace("_chunks", "")
+        try:
+            issues = validate_chunks(name, path)
+            all_issues[name] = issues
+        except Exception as e:
+            print(f"\n[ERROR] 验证失败: {name} — {e}")
+            all_issues[name] = [f"脚本异常: {e}"]
 
     print(f"\n\n{'='*60}")
     print(f"  总结")
