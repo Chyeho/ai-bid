@@ -13,6 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use utoipa::ToSchema;
 
 // ─── 风险分级 ──────────────────────────────────────────────────
 
@@ -20,7 +21,7 @@ use std::collections::HashMap;
 ///
 /// 分级通过关键词扫描实现（零 LLM 成本），在 Coordinator 路由前完成。
 /// 审查过程中支持动态升降级（turn 2 检测）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub enum RiskTier {
     /// L1：低风险，纯信息/格式条款。max_turns=8，仅 FactCheckAgent。
     #[serde(rename = "L1")]
@@ -153,7 +154,7 @@ impl ReviewClause {
 
 // ─── 风险严重程度 ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ToSchema)]
 pub enum RiskSeverity {
     #[serde(rename = "info")]
     Info,
@@ -181,7 +182,7 @@ impl std::fmt::Display for RiskSeverity {
 /// Agent output_finding 工具输出的结构化风险发现。
 ///
 /// 设计文档 §6.4 定义的完整输出格式。每个字段都有明确的用途。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RiskFinding {
     /// 风险唯一标识，格式 "R_XXX"
     /// 框架会自动填充，LLM 无需输出此字段。
@@ -248,6 +249,23 @@ pub struct RiskFinding {
     #[serde(default)]
     pub citations: Vec<Citation>,
 
+    // ── STS 架构字段 ──
+    /// 此发现的角色（Scout=Hypothesis, Phase 2 Agent=Verified）
+    #[serde(default)]
+    pub finding_role: FindingRole,
+    /// 知识来源（Scout 填 "training_knowledge"，Phase 2 填 "search_verified"）
+    #[serde(default)]
+    pub knowledge_source: String,
+    /// Scout 标记的待验证法规列表（引导 Phase 2 Agent 搜索）
+    #[serde(default)]
+    pub verification_required: Vec<String>,
+    /// 哪些 Agent 参与了初筛（Hypothesis 来源）
+    #[serde(default)]
+    pub hypothesized_by: Vec<String>,
+    /// 哪些 Agent 验证了此发现（Verified 来源）
+    #[serde(default)]
+    pub verified_by: Vec<String>,
+
     // ── 框架自动填充的定位字段（用于 Java 侧映射 AuditIssueEntity） ──
     /// 起始页码 (0-based)，框架从关联 ReviewClause 自动填充
     #[serde(default)]
@@ -260,9 +278,24 @@ pub struct RiskFinding {
     pub context: Option<String>,
 }
 
+// ─── 发现角色 ──────────────────────────────────────────────────
+
+/// 发现的角色：区分初筛假设和已验证结论。
+///
+/// Scout 产出 Hypothesis（待验证假设，不进入最终 findings），
+/// Phase 2 专业 Agent 产出 Verified（已验证结论，进入最终输出）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
+pub enum FindingRole {
+    /// Scout 产出: 待验证假设（不进最终 findings, 不参与 LegalVerify/Debate/Triage）
+    Hypothesis,
+    /// 专业 Agent 产出: 已验证结论
+    #[default]
+    Verified,
+}
+
 /// 搜索来源引用 — 前端渲染推理过程时，可用此字段将法条/案例文本
 /// 转为可点击的超链接。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Citation {
     /// 来源标题（如 "《政府采购法》第5条"）
     pub title: String,
@@ -302,6 +335,11 @@ impl RiskFinding {
             truncated: false,
             suggested_agent: None,
             citations: Vec::new(),
+            finding_role: FindingRole::default(),
+            knowledge_source: String::new(),
+            verification_required: Vec::new(),
+            hypothesized_by: Vec::new(),
+            verified_by: Vec::new(),
             page_number: None,
             section_path: None,
             context: None,
@@ -340,6 +378,11 @@ impl RiskFinding {
             truncated: true,
             suggested_agent: None,
             citations: Vec::new(),
+            finding_role: FindingRole::default(),
+            knowledge_source: String::new(),
+            verification_required: Vec::new(),
+            hypothesized_by: Vec::new(),
+            verified_by: Vec::new(),
             page_number: None,
             section_path: None,
             context: None,
@@ -353,7 +396,7 @@ impl RiskFinding {
 ///
 /// Phase E 动态 Agent 生成器的核心数据类型。Coordinator 在 TRIAGE 前
 /// 扫描所有 findings 中的 suggested_agent，写入 dynamic_agents.json。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SuggestedAgent {
     /// 语义名，如 "品牌组合排他检测"
     pub agent_name: String,
@@ -437,9 +480,129 @@ pub struct DocumentPart {
     pub route_reason: String,
 }
 
+// ─── 法律领域分类 ─────────────────────────────────────────────
+
+/// 法律领域标签 — 用于 LegalVerify 批量分组。
+///
+/// 审查发现中的 `legal_basis` 被自动分类到对应领域，
+/// 同领域的 finding 共享法规搜索上下文，批量验证。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LegalDomain {
+    /// 采购程序 — 采购方式、公告、开标评标
+    ProcurementProcedure,
+    /// 供应商资格 — 资质、业绩、准入条件
+    SupplierQualification,
+    /// 地域限制 — 本地化、分支机构、常驻
+    GeographicRestriction,
+    /// 品牌/型号指定 — 专利、原厂、独家
+    BrandDesignation,
+    /// 评分/评审 — 分值、权重、评审因素
+    ScoringEvaluation,
+    /// 合同条款 — 付款、验收、质保、违约
+    ContractTerms,
+    /// 保证金/时限 — 保证金、截止日期、期限
+    BidBondTimeline,
+    /// 技术要求 — 参数、规格、认证、国产
+    TechnicalRequirements,
+    /// 无法归类（回退到逐条模式）
+    Other,
+}
+
+impl LegalDomain {
+    /// 从 finding 的 legal_basis + risk_type 自动推断法律领域。
+    ///
+    /// 纯规则匹配（零 LLM 成本）。
+    /// 返回 `(主领域, 置信度)`，置信度用于决定是否走规则直通。
+    pub fn classify(risk_type: &str, legal_basis: &[String]) -> (Self, f32) {
+        let combined: String = risk_type
+            .to_lowercase()
+            + " "
+            + &legal_basis.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
+
+        let checks: &[(LegalDomain, &[&str], f32)] = &[
+            // 地域限制 — 最强信号
+            (LegalDomain::GeographicRestriction, &["地域", "本地", "所在地", "分支机构", "常驻", "排斥", "歧视", "地区", "第5条", "第二十条第七项"], 0.95),
+            // 品牌指定
+            (LegalDomain::BrandDesignation, &["品牌", "型号", "专利", "原厂", "独家", "排他", "指定", "唯一", "第二十条第二项", "第二十二条"], 0.90),
+            // 采购程序
+            (LegalDomain::ProcurementProcedure, &["采购方式", "公开招标", "邀请招标", "竞争性", "公告", "公示", "开标", "评标", "废标", "流标", "第二十七条", "第二十三条", "第十三条", "87号令"], 0.85),
+            // 评分评审
+            (LegalDomain::ScoringEvaluation, &["评分", "分值", "权重", "价格分", "技术分", "商务分", "评审因素", "评审标准", "第三十四条", "第55条", "第64条"], 0.90),
+            // 合同条款
+            (LegalDomain::ContractTerms, &["付款", "验收", "质保", "违约", "售后", "保修", "合同", "第43条", "第50条", "第47条", "第52条"], 0.85),
+            // 保证金/时限
+            (LegalDomain::BidBondTimeline, &["保证金", "截止", "期限", "工作日", "日历日", "第三十三条", "第二十九条", "第三十一条", "第20条"], 0.90),
+            // 供应商资格
+            (LegalDomain::SupplierQualification, &["资格", "资质", "业绩", "条件", "准入", "特定", "第二十二条", "第二十三条", "第十七条", "第二十条"], 0.85),
+            // 技术要求
+            (LegalDomain::TechnicalRequirements, &["技术", "参数", "规格", "认证", "国产", "性能", "功能", "配置", "第二十条"], 0.80),
+        ];
+
+        for (domain, keywords, confidence) in checks {
+            for kw in *keywords {
+                if combined.contains(&kw.to_lowercase()) {
+                    return (domain.clone(), *confidence);
+                }
+            }
+        }
+
+        (LegalDomain::Other, 0.5)
+    }
+
+    /// 该领域是否支持规则预筛（已知法规可直接匹配，不需要 LLM）。
+    pub fn supports_rule_prefilter(&self) -> bool {
+        matches!(
+            self,
+            LegalDomain::ProcurementProcedure
+                | LegalDomain::GeographicRestriction
+                | LegalDomain::BidBondTimeline
+                | LegalDomain::ScoringEvaluation
+        )
+    }
+}
+
+impl std::fmt::Display for LegalDomain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LegalDomain::ProcurementProcedure => write!(f, "采购程序"),
+            LegalDomain::SupplierQualification => write!(f, "供应商资格"),
+            LegalDomain::GeographicRestriction => write!(f, "地域限制"),
+            LegalDomain::BrandDesignation => write!(f, "品牌指定"),
+            LegalDomain::ScoringEvaluation => write!(f, "评分评审"),
+            LegalDomain::ContractTerms => write!(f, "合同条款"),
+            LegalDomain::BidBondTimeline => write!(f, "保证金/时限"),
+            LegalDomain::TechnicalRequirements => write!(f, "技术要求"),
+            LegalDomain::Other => write!(f, "其他"),
+        }
+    }
+}
+
+// ─── 批量法条验证 ─────────────────────────────────────────────
+
+/// 批量验证中的单条结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchVerificationEntry {
+    pub risk_id: String,
+    /// 法条引用是否有效
+    pub is_valid: bool,
+    /// 修正后的法条引用（如果 is_valid=false）
+    #[serde(default)]
+    pub corrected_legal_basis: Vec<String>,
+    /// 验证置信度 [0.0, 1.0]
+    pub confidence: f32,
+    /// 验证理由
+    pub reason: String,
+}
+
+/// 批量验证的完整输出 — 对应 `output_verification_batch` 工具的 arguments。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchVerificationOutput {
+    pub verifications: Vec<BatchVerificationEntry>,
+}
+
 // ─── Legal Verify 结果 ─────────────────────────────────────────
 
-/// Adversarial Legal Verify 的输出。
+/// Adversarial Legal Verify 的输出（逐条模式保留兼容）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegalVerifyResult {
     /// 法条引用是否成立
@@ -478,6 +641,8 @@ pub enum AgentId {
     LegalVerify,
     /// 正反辩论 — 对 High + 低置信度发现做 Defender/Challenger/Arbiter 辩论
     Debate,
+    /// Scout 初筛 Agent — 快速扫描全文档，产出 Hypothesis 引导 Phase 2 审查
+    Scout,
     /// 动态 Agent — BlindSpot 生成的补充审查 Agent
     Dynamic(String),
 }
@@ -489,8 +654,7 @@ impl AgentId {
             AgentId::FactCheck,
             AgentId::Procedure,
             AgentId::RuleEngine,
-            AgentId::SemanticRisk,
-            AgentId::Scoring,
+            // SemanticRisk + Scoring 已禁用（成本优化：效率 < 0.16 findings/call）
             AgentId::Demand,
             AgentId::Contract,
         ]
@@ -509,6 +673,7 @@ impl AgentId {
             "blindspot" | "blind_spot" | "blindspotagent" => Some(AgentId::BlindSpot),
             "legalverify" | "legal_verify" | "legalverifyagent" => Some(AgentId::LegalVerify),
             "debate" | "debateagent" => Some(AgentId::Debate),
+            "scout" | "scoutagent" => Some(AgentId::Scout),
             _ => {
                 // Dynamic_ 前缀识别
                 if s.starts_with("dynamic_") {
@@ -534,6 +699,7 @@ impl std::fmt::Display for AgentId {
             AgentId::BlindSpot => write!(f, "BlindSpotAgent"),
             AgentId::LegalVerify => write!(f, "LegalVerifyAgent"),
             AgentId::Debate => write!(f, "DebateAgent"),
+            AgentId::Scout => write!(f, "ScoutAgent"),
             AgentId::Dynamic(name) => write!(f, "{name}"),
         }
     }
@@ -611,7 +777,7 @@ impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
             enabled_agents: AgentId::all_reviewers(),
-            enable_legal_verify: true,
+            enable_legal_verify: false, // 成本优化：关闭 LLM 法条验证
             legal_verify_max_turns: 3,
             blind_spot_max_turns: 10,
             blind_spot_fallback_enabled: true,
@@ -649,7 +815,7 @@ pub struct DynamicAgentManifest {
 // ─── Coordinator 输出 ────────────────────────────────────────────
 
 /// Coordinator 审查管线的最终输出。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CoordinatorOutput {
     /// 所有 Agent 的风险发现（已去重合并）
     pub findings: Vec<RiskFinding>,
@@ -660,7 +826,7 @@ pub struct CoordinatorOutput {
 }
 
 /// Coordinator 的路由与审查统计摘要。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RoutingSummary {
     /// 审查条款总数
     pub total_clauses: usize,
@@ -743,6 +909,9 @@ impl ClauseContext {
     }
 
     /// 生成 "已知风险摘要" 文本（注入 conversation）。
+    ///
+    /// 区分 Hypothesis（Scout 初筛假设）和 Verified（Phase 2 已验证结论），
+    /// 并展示 verification_required（引导 Phase 2 Agent 搜索）和 legal_basis。
     pub fn risk_summary(&self) -> String {
         if self.risks.is_empty() {
             return "（无）".to_string();
@@ -750,10 +919,32 @@ impl ClauseContext {
         self.risks
             .iter()
             .map(|r| {
-                format!(
-                    "- [{}] {} (confidence={:.2}): {}",
-                    r.severity, r.risk_type, r.confidence, r.reason
-                )
+                let role_label = if r.finding_role == FindingRole::Hypothesis {
+                    "[Scout 假设, 待验证]"
+                } else {
+                    "[已验证]"
+                };
+                let mut line = format!(
+                    "- {} [{}] {} (confidence={:.2}): {}",
+                    role_label, r.severity, r.risk_type, r.confidence, r.reason
+                );
+
+                // Scout Hypothesis: 展示待验证法规作为 Phase 2 Agent 的搜索起点
+                if r.finding_role == FindingRole::Hypothesis && !r.verification_required.is_empty() {
+                    line.push_str(&format!(
+                        "\n  🔍 建议搜索验证: {}",
+                        r.verification_required.join(", ")
+                    ));
+                }
+
+                // 展示法规依据（Hypothesis 是推测，Verified 是确认）
+                if !r.legal_basis.is_empty() {
+                    line.push_str(&format!(
+                        "\n  法规依据: {}",
+                        r.legal_basis.join(", ")
+                    ));
+                }
+                line
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -761,7 +952,7 @@ impl ClauseContext {
 }
 
 /// SessionGraph 的完整快照（BlindSpot 审查 + 审计追溯用）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct GraphSnapshot {
     /// 所有条款节点
     pub chunks: HashMap<String, ChunkNode>,
@@ -820,7 +1011,7 @@ impl Default for GraphSnapshot {
 /// 用户在 PDF 上划词选中的文本。可为 None（纯对话模式）。
 ///
 /// 对标 AI 编程工具的"划词 + 提问"交互。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TextSelection {
     /// 选中的原文
     pub text: String,
@@ -833,7 +1024,7 @@ pub struct TextSelection {
 }
 
 /// 选区包围盒（简化版，用于 ChatAgent 类型。完整版见 domain::raw_document::BBox）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BBox {
     pub x0: f64,
     pub top: f64,
@@ -842,7 +1033,7 @@ pub struct BBox {
 }
 
 /// ChatAgent 的返回结构。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatResponse {
     /// 自然语言回答（含 [b_xxx] 标记 → 前端渲染链接）
     pub answer: String,
@@ -859,7 +1050,7 @@ pub struct ChatResponse {
 }
 
 /// 原文引用 — 前端用 block_id 查询 bbox 渲染 PDF 高亮。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BlockRef {
     /// 前端查询 bbox 渲染高亮
     pub block_id: String,
@@ -872,7 +1063,7 @@ pub struct BlockRef {
 }
 
 /// 外部知识引用。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct KnowledgeRef {
     /// "law" | "case" | "negative_list"
     pub ref_type: String,
@@ -951,6 +1142,24 @@ pub enum ChatStreamEvent {
 
     /// An error occurred during streaming.
     Error(String),
+}
+
+// ─── 预搜索结果缓存 ──────────────────────────────────────────────
+
+/// 预搜索结果条目，存储于 SessionGraph.search_results。
+///
+/// Coordinator 批量搜索阶段产出的结构化缓存，
+/// 在 Execute Phase 注入 Agent prompt 供直接引用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchCacheEntry {
+    /// 搜索查询词
+    pub query: String,
+    /// 搜索类别（"法规" / "案例" / "负面清单"）
+    pub category: String,
+    /// AI 生成的搜索摘要
+    pub answer: String,
+    /// 来源 URL 列表
+    pub sources: Vec<Citation>,
 }
 
 // ─── 测试 ────────────────────────────────────────────────────────
@@ -1199,6 +1408,11 @@ mod tests {
                 url: "https://example.com".into(),
                 site_name: "example".into(),
             }],
+            finding_role: FindingRole::default(),
+            knowledge_source: "search_verified".into(),
+            verification_required: vec!["《政府采购法》".into()],
+            hypothesized_by: vec!["ScoutAgent".into()],
+            verified_by: vec!["SemanticRiskAgent".into()],
             page_number: Some(0),
             section_path: Some(vec!["测试章节".into()]),
             context: Some("须采用XX品牌 测试上下文".into()),

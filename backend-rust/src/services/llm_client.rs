@@ -16,9 +16,43 @@
 //! 当前固定从环境变量获取。未来产品侧支持扫码/列表选择模型后，
 //! 工厂函数将改为接受 `&ModelConfig` 参数。
 
-use crate::agents::react_loop::{ChatMessage, LlmClient, LlmResponse, ToolCall, ToolChoice};
+use crate::agents::react_loop::{ChatMessage, LlmClient, LlmResponse, TokenUsage, ToolCall, ToolChoice};
 use anyhow::{Context, Result};
 use serde_json::Value;
+
+/// 从 API 响应中提取 Token 使用量（兼容 DashScope 和 OpenAI 格式）。
+fn parse_usage(body: &Value) -> Option<TokenUsage> {
+    // DashScope 原生格式: output.usage.{input_tokens, output_tokens, total_tokens}
+    if let Some(u) = body.get("output").and_then(|o| o.get("usage")) {
+        return Some(TokenUsage {
+            input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        });
+    }
+    // DashScope message 格式 / OpenAI 格式: usage 在顶层
+    // 字段名两者不同，需同时兼容：
+    //   DashScope: input_tokens / output_tokens
+    //   OpenAI:    prompt_tokens / completion_tokens
+    if let Some(u) = body.get("usage") {
+        let input = u
+            .get("input_tokens")
+            .or_else(|| u.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let output = u
+            .get("output_tokens")
+            .or_else(|| u.get("completion_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let total = u
+            .get("total_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or((input + output) as u64) as u32;
+        return Some(TokenUsage { input_tokens: input, output_tokens: output, total_tokens: total });
+    }
+    None
+}
 
 // ── 工厂函数 ──────────────────────────────────────────────────────
 
@@ -207,7 +241,12 @@ impl DashScopeNativeClient {
             (None, raw_content)
         };
 
-        Ok(LlmResponse { content, thought, tool_calls })
+        Ok(LlmResponse {
+            content,
+            thought,
+            tool_calls,
+            usage: parse_usage(body),
+        })
     }
 }
 
@@ -431,7 +470,12 @@ impl OpenAICompatibleClient {
             (None, raw_content)
         };
 
-        Ok(LlmResponse { content, thought, tool_calls })
+        Ok(LlmResponse {
+            content,
+            thought,
+            tool_calls,
+            usage: parse_usage(body),
+        })
     }
 }
 

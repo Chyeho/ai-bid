@@ -1,4 +1,4 @@
-//! ReAct 循环引擎 — Agent 审查的核心运行时。
+﻿//! ReAct 循环引擎 — Agent 审查的核心运行时。
 //!
 //! 设计文档 §7.2-7.3 定义的 while 循环模式：
 //! ```text
@@ -41,6 +41,14 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// LLM API 返回的 Token 使用量。
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub total_tokens: u32,
+}
+
 /// LLM 的一次响应。
 #[derive(Debug, Clone)]
 pub struct LlmResponse {
@@ -55,6 +63,8 @@ pub struct LlmResponse {
     pub thought: Option<String>,
     /// 工具调用列表
     pub tool_calls: Vec<ToolCall>,
+    /// Token 使用量（从 API 响应的 usage 字段提取）
+    pub usage: Option<TokenUsage>,
 }
 
 impl LlmResponse {
@@ -81,6 +91,21 @@ impl LlmResponse {
         self.tool_calls
             .iter()
             .find(|tc| tc.name == "answer_user")
+            .map(|tc| &tc.arguments)
+    }
+
+    /// 检查是否包含 output_verification_batch 工具调用（触发批量验证退出）。
+    pub fn has_output_verification_batch(&self) -> bool {
+        self.tool_calls
+            .iter()
+            .any(|tc| tc.name == "output_verification_batch")
+    }
+
+    /// 获取第一个 output_verification_batch 工具调用的 arguments。
+    pub fn get_verification_batch(&self) -> Option<&serde_json::Value> {
+        self.tool_calls
+            .iter()
+            .find(|tc| tc.name == "output_verification_batch")
             .map(|tc| &tc.arguments)
     }
 }
@@ -210,6 +235,54 @@ pub async fn execute_tool_calls(
     Ok(())
 }
 
+/// 提取工具调用的关键参数摘要（用于指标采集）。
+///
+/// 不同工具提取不同的关键字段：
+/// - read_section → section_id 或 "全文"
+/// - search_knowledge / web_search → 搜索问题
+/// - search_document → 查询文本
+/// - output_finding → risk_type + severity（如果有）
+/// - 其他 → arguments 前 80 字符
+fn summarize_tool_arg(name: &str, args: &serde_json::Value) -> String {
+    match name {
+        "read_section" => args
+            .get("section_id")
+            .or_else(|| args.get("chunk_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "全文".to_string()),
+        "search_knowledge" | "web_search" => args
+            .get("question")
+            .or_else(|| args.get("query"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        "search_document" => args
+            .get("query")
+            .or_else(|| args.get("question"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        "output_finding" => {
+            let risk_type = args
+                .get("risk_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let no_risk = args.get("no_risk").and_then(|v| v.as_bool()).unwrap_or(false);
+            if no_risk {
+                format!("无风险:{}", risk_type)
+            } else {
+                let severity = args
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                format!("{}:{}", severity, risk_type)
+            }
+        }
+        _ => args.to_string(),
+    }
+}
+
 // ─── ReActLoop ─────────────────────────────────────────────────
 
 /// ReAct 循环引擎 — Agent 审查的运行时。
@@ -231,7 +304,8 @@ pub struct ReActLoop {
     /// ★ SessionGraph 引用（Blackboard 拉取侧）
     pub graph: Option<Arc<SessionGraph>>,
     /// 搜索缓存：(query, category) → 搜索结果 JSON
-    pub search_cache: Mutex<HashMap<(String, String), serde_json::Value>>,
+    /// ★ 使用 Arc 支持跨 Agent 共享（Coordinator 注入同一实例）
+    pub search_cache: Arc<Mutex<HashMap<(String, String), serde_json::Value>>>,
     /// 审查追溯日志
     pub trace: Arc<Mutex<TraceLog>>,
     /// ★ stderr 打印锁：多个 Agent 并行时，确保每个 Agent 的多行日志块不交叠。
@@ -239,6 +313,8 @@ pub struct ReActLoop {
     pub print_lock: Option<Arc<std::sync::Mutex<()>>>,
     /// SSE 实时推送通道（可选，仅 HTTP server 模式启用）
     pub review_events: Option<Arc<ReviewEventBus>>,
+    /// 指标采集器（可选，启用时记录所有 LLM 调用明细）
+    pub metrics: Option<Arc<Mutex<crate::metrics::MetricsCollector>>>,
 }
 
 impl ReActLoop {
@@ -255,10 +331,11 @@ impl ReActLoop {
             bus: None,
             bus_rx: None,
             graph: None,
-            search_cache: Mutex::new(HashMap::new()),
+            search_cache: Arc::new(Mutex::new(HashMap::new())),
             trace: Arc::new(Mutex::new(TraceLog::new())),
             print_lock: None,
             review_events: None,
+            metrics: None,
         }
     }
 
@@ -288,6 +365,27 @@ impl ReActLoop {
     /// 设置 SSE 实时推送通道（仅在 HTTP server 模式下启用）。
     pub fn with_review_events(mut self, events: Arc<ReviewEventBus>) -> Self {
         self.review_events = Some(events);
+        self
+    }
+
+    /// 设置指标采集器（用于记录 LLM 调用明细）。
+    pub fn with_metrics(
+        mut self,
+        collector: Arc<Mutex<crate::metrics::MetricsCollector>>,
+    ) -> Self {
+        self.metrics = Some(collector);
+        self
+    }
+
+    /// 注入共享搜索缓存（跨 Agent 复用搜索结果）。
+    ///
+    /// 如果不设置，每个 ReActLoop 实例使用独立的空缓存。
+    /// Coordinator 应创建共享缓存并通过此方法注入到所有 Agent。
+    pub fn with_search_cache(
+        mut self,
+        cache: Arc<Mutex<HashMap<(String, String), serde_json::Value>>>,
+    ) -> Self {
+        self.search_cache = cache;
         self
     }
 
@@ -357,6 +455,13 @@ impl ReActLoop {
         let mut web_search_count = 0u32; // 硬性限制 web_search 调用次数
         let mut consecutive_duplicate_searches = 0u32; // 连续重复搜索结果计数
         let mut last_search_urls: Vec<String> = Vec::new(); // 上次搜索的 top-3 URL
+        // ★ 新增：read_section 重复检测 + 确认搜索拦截
+        let mut read_section_count: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new(); // chunk_id → 读取次数
+        let mut found_actionable_law = false; // 是否已找到可直接支撑判断的法规
+        let mut post_law_search_count = 0u32; // 找到法规后仍继续搜索的次数
+        let mut seen_law_refs: std::collections::HashSet<String> =
+            std::collections::HashSet::new(); // 已见过的法规引用（用于判断搜索是否带来新信息）
 
         // ── 条款头日志 ──
         let _print_lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
@@ -536,25 +641,93 @@ impl ReActLoop {
             }
 
             let tool_defs = self.tools.definitions_filtered(&self.config.tool_names);
+            let api_start = std::time::Instant::now();
             let response = match self
                 .llm
                 .chat(&conversation, &tool_defs, &tool_choice)
                 .await
             {
                 Ok(r) => {
-                    // SSE: agent_thought (推理摘要)
+                    let api_duration_ms = api_start.elapsed().as_millis() as u64;
+
+                    // ── 指标采集：记录 LLM 调用 ──
+                    if let Some(ref metrics) = self.metrics {
+                        let tools_called: Vec<String> =
+                            r.tool_calls.iter().map(|tc| tc.name.clone()).collect();
+                        let tool_args: Vec<String> = r
+                            .tool_calls
+                            .iter()
+                            .map(|tc| summarize_tool_arg(&tc.name, &tc.arguments))
+                            .collect();
+                        let thought_preview = r
+                            .thought
+                            .as_ref()
+                            .or(r.content.as_ref())
+                            .map(|t| t.to_string());
+                        let usage = r.usage.as_ref();
+                        let mut collector = metrics.lock().await;
+                        collector.record_llm_call(
+                            crate::metrics::schema::LlmCallRecord {
+                                agent_name: agent_name.clone(),
+                                turn: turn as usize,
+                                tokens_input: usage.map(|u| u.input_tokens).unwrap_or(0),
+                                tokens_output: usage.map(|u| u.output_tokens).unwrap_or(0),
+                                duration_ms: api_duration_ms,
+                                tools_called: tools_called.clone(),
+                                tool_args,
+                                thought_preview,
+                                produced_finding: r.has_output_finding(),
+                                finding_parsed_ok: false, // 由后续 output_finding 解析更新
+                            },
+                        );
+                    }
+
+                    // SSE: call_log — 每次 LLM 调用的统计信息
                     if let Some(ref events) = self.review_events {
-                        let thought_summary = r.content.as_ref()
-                            .map(|c| c.chars().take(200).collect::<String>())
-                            .unwrap_or_default();
-                        if !thought_summary.is_empty() {
+                        let usage = r.usage.as_ref();
+                        let tools_called: Vec<String> =
+                            r.tool_calls.iter().map(|tc| tc.name.clone()).collect();
+                        events.emit(&ReviewEvent::Trace {
+                            event_type: "call_log".to_string(),
+                            agent_name: agent_name.clone(),
+                            turn,
+                            clause_id: Some(clause.chunk_id.clone()),
+                            summary: format!(
+                                "{}K+{} {}ms {}",
+                                usage.map(|u| u.input_tokens).unwrap_or(0) / 1000,
+                                usage.map(|u| u.output_tokens).unwrap_or(0),
+                                api_duration_ms,
+                                tools_called.join(", ")
+                            ),
+                            payload: Some(serde_json::json!({
+                                "tokens_input": usage.map(|u| u.input_tokens).unwrap_or(0),
+                                "tokens_output": usage.map(|u| u.output_tokens).unwrap_or(0),
+                                "duration_ms": api_duration_ms,
+                                "tools_called": tools_called,
+                                "produced_finding": r.has_output_finding(),
+                            })),
+                        });
+                    }
+
+                    // SSE: agent_thought — 发送完整推理内容到前端
+                    if let Some(ref events) = self.review_events {
+                        let full_content = r.content.clone().unwrap_or_default();
+                        let thought_summary = full_content
+                            .chars().take(200).collect::<String>();
+                        if !full_content.is_empty() {
                             events.emit(&ReviewEvent::Trace {
                                 event_type: "agent_thought".to_string(),
                                 agent_name: agent_name.clone(),
                                 turn,
                                 clause_id: Some(clause.chunk_id.clone()),
-                                summary: thought_summary,
-                                payload: None,
+                                summary: if thought_summary.is_empty() {
+                                    "(推理内容省略)".to_string()
+                                } else {
+                                    thought_summary
+                                },
+                                payload: Some(serde_json::json!({
+                                    "content": full_content,
+                                })),
                             });
                         }
                     }
@@ -612,6 +785,11 @@ impl ReActLoop {
                         truncated: false,
                         suggested_agent: None,
                         citations: Vec::new(),
+                        finding_role: FindingRole::default(),
+                        knowledge_source: String::new(),
+                        verification_required: Vec::new(),
+                        hypothesized_by: Vec::new(),
+                        verified_by: Vec::new(),
                         page_number: None,
                         section_path: None,
                         context: None,
@@ -655,6 +833,49 @@ impl ReActLoop {
                             ),
                         });
                     }
+                }
+            }
+
+            // ── Step 3: 检查 output_verification_batch（批量法条验证模式）──
+            if response.has_output_verification_batch() {
+                if let Some(args) = response.get_verification_batch() {
+                    // 将批量验证结果编码为特殊 finding，由 Coordinator 解析
+                    let raw_pretty = serde_json::to_string_pretty(args);
+                    {
+                        let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
+                        eprintln!("📤 output_verification_batch 原始参数:");
+                        eprintln!("{}", raw_pretty.as_deref().unwrap_or(&format!("{:?}", args)));
+                    }
+
+                    return RiskFinding {
+                        risk_id: risk_id.to_string(),
+                        clause_ids: vec![clause.chunk_id.clone()],
+                        block_ids: Vec::new(),
+                        agent: agent_name.clone(),
+                        no_risk: false,
+                        severity: RiskSeverity::Info,
+                        risk_type: "__BATCH_VERIFICATION__".to_string(),
+                        source_quote: serde_json::to_string(args).unwrap_or_default(),
+                        legal_basis: Vec::new(),
+                        case_refs: Vec::new(),
+                        reason: "批量法条验证结果（由 Coordinator 解析）".to_string(),
+                        suggestion: String::new(),
+                        confidence: 1.0,
+                        initial_tier,
+                        final_tier: tier,
+                        tier_escalated,
+                        truncated: false,
+                        suggested_agent: None,
+                        citations: Vec::new(),
+                        finding_role: FindingRole::default(),
+                        knowledge_source: String::new(),
+                        verification_required: Vec::new(),
+                        hypothesized_by: Vec::new(),
+                        verified_by: Vec::new(),
+                        page_number: None,
+                        section_path: None,
+                        context: None,
+                    };
                 }
             }
 
@@ -740,8 +961,13 @@ impl ReActLoop {
                                 let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
                                 eprintln!("✅ output_finding 解析成功，审查完成");
                             }
+                            // 标记最近一次 LLM 调用的 finding 解析成功
+                            if let Some(ref metrics) = self.metrics {
+                                let mut collector = metrics.lock().await;
+                                collector.mark_last_finding_parsed_ok();
+                            }
 
-                            // SSE: output_finding
+                            // SSE: output_finding — 发送完整发现数据到前端
                             if let Some(ref events) = self.review_events {
                                 let sev_str = match finding.severity {
                                     RiskSeverity::High => "high",
@@ -760,6 +986,19 @@ impl ReActLoop {
                                         "severity": sev_str,
                                         "risk_type": finding.risk_type,
                                         "confidence": finding.confidence,
+                                        "no_risk": finding.no_risk,
+                                        "reason": finding.reason,
+                                        "suggestion": finding.suggestion,
+                                        "source_quote": finding.source_quote,
+                                        "legal_basis": finding.legal_basis,
+                                        "case_refs": finding.case_refs,
+                                        "citations": finding.citations,
+                                        "truncated": finding.truncated,
+                                        "tier_escalated": finding.tier_escalated,
+                                        "initial_tier": finding.initial_tier.to_string(),
+                                        "final_tier": finding.final_tier.to_string(),
+                                        "page_number": finding.page_number,
+                                        "section_path": finding.section_path,
                                     })),
                                 });
                             }
@@ -879,7 +1118,7 @@ impl ReActLoop {
             for tc in &assistant_tool_calls {
                 let tool_name = &tc.name;
 
-                // SSE: tool_call
+                // SSE: tool_call — 发送完整工具参数到前端
                 if let Some(ref events) = self.review_events {
                     let query = tc.arguments.get("query")
                         .and_then(|v| v.as_str())
@@ -890,13 +1129,26 @@ impl ReActLoop {
                         format!("{}: {}", tool_name,
                             query.chars().take(80).collect::<String>())
                     };
+                    // 构建精简的 payload：含完整参数 + 人类可读描述
+                    let mut tc_payload = tc.arguments.clone();
+                    // 为 read_section 补充人类可读的 clause_id 描述
+                    if tool_name == "read_section" {
+                        if let Some(cid) = tc.arguments.get("clause_id").and_then(|v| v.as_str()) {
+                            tc_payload["_clause_label"] = serde_json::Value::String(
+                                format!("条款 {}", cid)
+                            );
+                        }
+                    }
                     events.emit(&ReviewEvent::Trace {
                         event_type: "tool_call".to_string(),
                         agent_name: agent_name.clone(),
                         turn,
                         clause_id: Some(clause.chunk_id.clone()),
                         summary,
-                        payload: None,
+                        payload: Some(serde_json::json!({
+                            "tool_name": tool_name,
+                            "arguments": tc_payload,
+                        })),
                     });
                 }
 
@@ -965,7 +1217,7 @@ impl ReActLoop {
                     }
                 } // 释放打印锁
 
-                // SSE: tool_result
+                // SSE: tool_result — 发送工具返回的实际数据到前端
                 if let Some(ref events) = self.review_events {
                     let summary = if self.is_search_tool(tool_name) {
                         let hits = Self::count_search_hits(&result);
@@ -974,20 +1226,57 @@ impl ReActLoop {
                         let chars = result.get("char_count")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        format!("read_section 返回 {} 字符", chars)
+                        let section_title = result.get("section_path")
+                            .and_then(|p| p.as_array())
+                            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" > "))
+                            .unwrap_or_else(|| "(未知)".to_string());
+                        format!("read_section → {} ({} 字符)", section_title, chars)
                     } else {
                         format!("{} 执行完成", tool_name)
                     };
+
+                    // 构建 payload：根据工具类型提取前端需要的数据
                     let payload = if self.is_search_tool(tool_name) || tool_name == "search_document" {
                         let sources = Self::extract_search_sources_for_sse(&result, 5);
-                        if sources.is_empty() {
+                        let items: Vec<serde_json::Value> = result
+                            .get("sources")
+                            .and_then(|s| s.as_array())
+                            .or_else(|| result.get("hits").and_then(|h| h.as_array()))
+                            .map(|a| a.iter().take(5).cloned().collect())
+                            .unwrap_or_default();
+                        if sources.is_empty() && items.is_empty() {
                             None
                         } else {
-                            Some(serde_json::json!({ "sources": sources }))
+                            Some(serde_json::json!({
+                                "sources": sources,
+                                "items": items,
+                                "hit_count": Self::count_search_hits(&result),
+                            }))
                         }
+                    } else if tool_name == "read_section" {
+                        let text = result.get("text")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        // 发送前 2000 字符的文本预览（足够前端判断内容）
+                        let text_preview: String = text.chars().take(2000).collect();
+                        Some(serde_json::json!({
+                            "char_count": result.get("char_count").and_then(|v| v.as_i64()).unwrap_or(0),
+                            "section_path": result.get("section_path"),
+                            "page_start": result.get("page_start"),
+                            "page_end": result.get("page_end"),
+                            "text_preview": text_preview,
+                            "truncated": text.chars().count() > 2000,
+                        }))
                     } else {
-                        None
+                        // 其他工具：发送完整返回结果（限制大小）
+                        let result_str = serde_json::to_string(&result).unwrap_or_default();
+                        let preview: String = result_str.chars().take(2000).collect();
+                        Some(serde_json::json!({
+                            "raw_preview": preview,
+                            "truncated": result_str.chars().count() > 2000,
+                        }))
                     };
+
                     events.emit(&ReviewEvent::Trace {
                         event_type: "tool_result".to_string(),
                         agent_name: agent_name.clone(),
@@ -996,6 +1285,48 @@ impl ReActLoop {
                         summary,
                         payload,
                     });
+                }
+
+                // ★ read_section 重复读取检测
+                if tool_name == "read_section" {
+                    if let Some(chunk_id) = tc
+                        .arguments
+                        .get("chunk_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                    {
+                        let count = read_section_count.entry(chunk_id.clone()).or_insert(0);
+                        *count += 1;
+                        if *count >= 3 {
+                            // 同一 chunk 读了 3 次 → 强制停止
+                            conversation.push(ChatMessage::Tool {
+                                tool_call_id: tc.id.clone(),
+                                content: serde_json::to_string(&result).unwrap_or_default(),
+                            });
+                            conversation.push(ChatMessage::System {
+                                content: format!(
+                                    "🛑 你已经 {} 次读取 chunk_id={} 的原文。不要再重复读了。\n\
+                                    基于已掌握的原文信息 + 搜索到的法规依据，立即调用 output_finding 输出结论。",
+                                    count, chunk_id
+                                ),
+                            });
+                            continue;
+                        } else if *count >= 2 {
+                            // 同一 chunk 读了 2 次 → 温和提示
+                            conversation.push(ChatMessage::Tool {
+                                tool_call_id: tc.id.clone(),
+                                content: serde_json::to_string(&result).unwrap_or_default(),
+                            });
+                            conversation.push(ChatMessage::System {
+                                content: format!(
+                                    "⚠️ 你已经 {} 次读取 chunk_id={} 的原文。\
+                                    如果原文信息已经够用，请尽快 output_finding，不要反复精读。",
+                                    count, chunk_id
+                                ),
+                            });
+                            continue;
+                        }
+                    }
                 }
 
                 // 检测空搜索结果
@@ -1074,20 +1405,73 @@ impl ReActLoop {
                             }
                         }
 
-                        // 硬性限制: web_search 最多 5 次（与 prompt 中的约束一致）
+                        // 硬性限制: web_search 按 tier 分级限制
                         if self.is_search_tool(tool_name) {
                             web_search_count += 1;
-                            if web_search_count >= 5 {
+
+                            // ★ 法规引用提取：检查本次搜索是否带来了新的法规引用
+                            let new_law_refs = Self::extract_law_refs(&result);
+                            let novel_refs: Vec<_> = new_law_refs
+                                .iter()
+                                .filter(|r| !seen_law_refs.contains(*r))
+                                .collect();
+                            if !novel_refs.is_empty() {
+                                // 有新法规引用 → 重置确认搜索计数器
+                                seen_law_refs.extend(new_law_refs);
+                                if web_search_count >= 2 {
+                                    // 第 2 次及以后的搜索带来了新法规 → 标记"已找到可用的法规"
+                                    found_actionable_law = true;
+                                }
+                                post_law_search_count = 0;
+                            } else if found_actionable_law {
+                                // 已找到法规，但本次搜索没有新法规引用 → 确认搜索
+                                post_law_search_count += 1;
+                            }
+
+                            // ★ 确认搜索拦截：已找到法规 + 又做了 1 次无新法规的搜索 → 停
+                            if found_actionable_law && post_law_search_count >= 1 {
                                 conversation.push(ChatMessage::Tool {
                                     tool_call_id: tc.id.clone(),
                                     content: serde_json::to_string(&result).unwrap_or_default(),
                                 });
                                 conversation.push(ChatMessage::System {
-                                    content: "🛑 你已调用 web_search 5 次，达到硬性上限。\n\
-                                        禁止再调用 web_search。\n\
+                                    content: "🛑 你已经找到了可以支撑判断的法规依据，本次搜索没有带来新的法规引用。\n\
+                                        法条本身就是最高依据，不需要案例「佐证」或重复搜索确认。\n\
+                                        禁止再调用 web_search。立即调用 output_finding 输出结论。"
+                                        .to_string(),
+                                });
+                                continue;
+                            }
+
+                            // ★ Tier 分级硬上限
+                            let search_limit = match tier {
+                                RiskTier::Low => 1,   // L1 纯格式/信息，基本不需要搜索
+                                RiskTier::Medium => 2, // L2 标准审查，1-2 次法规搜索够用
+                                RiskTier::High => 4,   // L3 深度审查，需要多角度搜索
+                            };
+                            if web_search_count >= search_limit {
+                                conversation.push(ChatMessage::Tool {
+                                    tool_call_id: tc.id.clone(),
+                                    content: serde_json::to_string(&result).unwrap_or_default(),
+                                });
+                                let limit_msg = match tier {
+                                    RiskTier::Low => {
+                                        "此条款为 L1 格式/信息类，无需搜索。\n".to_string()
+                                    }
+                                    RiskTier::Medium => {
+                                        format!("你已调用 web_search {} 次，达到此级别条款的上限。\n", search_limit)
+                                    }
+                                    RiskTier::High => {
+                                        format!("你已调用 web_search {} 次，达到硬性上限。\n", search_limit)
+                                    }
+                                };
+                                conversation.push(ChatMessage::System {
+                                    content: format!(
+                                        "🛑 {}禁止再调用 web_search。\n\
                                         基于已搜索到的信息 + 条款原文 + 已知法规常识，立即调用 output_finding 输出结论。\n\
-                                        不要再搜索了。现在调用 output_finding。"
-                                            .to_string(),
+                                        不要再搜索了。现在调用 output_finding。",
+                                        limit_msg
+                                    ),
                                 });
                                 continue;
                             }
@@ -1136,14 +1520,66 @@ impl ReActLoop {
     // ── 辅助方法 ────────────────────────────────────────────
 
     /// 格式化为发送给 Agent 的条款审查提示。
+    /// 从搜索答案中提取关键摘要（第一句实质性内容，最长 120 字）。
+    /// 去掉常见 LLM 引导语，在第一个句号/换行处截断。
+    fn extract_snippet(answer: &str) -> String {
+        let text = answer.trim();
+        if text.is_empty() {
+            return String::new();
+        }
+
+        // 去掉常见的 LLM 引导语
+        let mut cleaned = text;
+        let boilerplate = [
+            "根据搜索结果，",
+            "根据搜索结果：",
+            "根据您的要求，",
+            "根据您的要求：",
+            "根据查询结果，",
+            "根据查询结果：",
+            "搜索结果显示，",
+            "搜索结果显示：",
+            "根据相关法规，",
+            "好的，",
+            "根据提供的搜索结果，",
+        ];
+        for prefix in &boilerplate {
+            if let Some(s) = cleaned.strip_prefix(prefix) {
+                cleaned = s;
+                break;
+            }
+        }
+        cleaned = cleaned.trim();
+
+        // 如果去掉引导语后以 "以下是" 开头，再剥一层
+        if let Some(s) = cleaned.strip_prefix("以下是") {
+            cleaned = s.trim();
+        }
+
+        // 取第一句（到第一个句号、换行，最长 120 字）
+        const MAX_LEN: usize = 120;
+        let mut snippet = String::new();
+        for ch in cleaned.chars() {
+            if snippet.chars().count() >= MAX_LEN {
+                break;
+            }
+            snippet.push(ch);
+            if ch == '。' || ch == '\n' {
+                break;
+            }
+        }
+
+        snippet.trim().to_string()
+    }
+
     fn format_clause_prompt(&self, clause: &ReviewClause) -> String {
         let tier_hint = match clause.tier {
-            RiskTier::Low => "【L1 - 快速扫描】此条款为格式/信息类，风险极低。请在 2-6 轮内提取关键事实、与阈值对照后输出结论（no_risk=true 或若有格式缺失则标记）。",
-            RiskTier::Medium => "【L2 - 标准审查】请按标准流程审查：精读条款 → 搜索法规 → 搜索案例（如需要）→ 输出结论。",
-            RiskTier::High => "【L3 - 深度审查】此条款含高风险关键词（品牌/地域/排他性），请深度审查：web_search(法规→案例) → search_document(跨条款联动) → read_section(精读确认) → 输出结论。",
+            RiskTier::Low => "【L1 - 快速扫描】此条款为格式/信息类，风险极低。条款原文已在上方给出，直接分析即可——一般在 1-2 轮内输出结论（no_risk=true 或若有格式缺失则标记）。不要调用 read_section（原文已在上下文中），不要调用 web_search（没有可核查的阈值）。",
+            RiskTier::Medium => "【L2 - 标准审查】条款原文已在上方给出，请直接分析原文并搜索法规进行对照。需要关联条款时用 search_document → read_section。web_search 最多 2 次。",
+            RiskTier::High => "【L3 - 深度审查】此条款含高风险关键词（品牌/地域/排他性），请深度审查：分析原文 → web_search(法规→案例) → search_document(跨条款联动) → 需要时 read_section(精读确认关联条款) → 输出结论。web_search 最多 4 次。",
         };
 
-        format!(
+        let mut prompt = format!(
             "{}\n\n【条款信息】\nchunk_id: {}\n章节路径: {}\n页码: {}-{}\n\n【条款文本】\n{}",
             tier_hint,
             clause.chunk_id,
@@ -1151,7 +1587,74 @@ impl ReActLoop {
             clause.page_start + 1,
             clause.page_end + 1,
             clause.text
-        )
+        );
+
+        // ★ 注入预搜索结果摘要（V5：紧凑摘要 — 每条 1 句关键条款内容）
+        //   在 V2"法规索引"(仅URL) 和 V1"全文摘要"(300字) 之间取中间地带：
+        //   从搜索答案中提取第一句实质性内容（最长 120 字），Agent 看到法规核心
+        //   条款后可直接判断，无需为了"看法规写了什么"而 Turn 1 搜索。
+        if let Some(graph) = &self.graph {
+            let entries = graph.get_search_results_for_clause(&clause.chunk_id);
+            if !entries.is_empty() {
+                let mut seen_queries: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let mut summary_items: Vec<String> = Vec::new();
+                const MAX_ITEMS: usize = 8;
+
+                for entry in &entries {
+                    if summary_items.len() >= MAX_ITEMS {
+                        break;
+                    }
+                    // 按 (query, category) 去重
+                    let dedup_key = format!("{}|{}", entry.query.to_lowercase(), entry.category);
+                    if !seen_queries.insert(dedup_key) {
+                        continue;
+                    }
+
+                    let snippet = Self::extract_snippet(&entry.answer);
+                    if snippet.is_empty() {
+                        continue;
+                    }
+
+                    // 法规简称：优先用 source title（最规范），回退到 query 前 40 字
+                    let label = entry
+                        .sources
+                        .first()
+                        .filter(|s| !s.title.is_empty())
+                        .map(|s| s.title.chars().take(50).collect::<String>())
+                        .unwrap_or_else(|| entry.query.chars().take(40).collect::<String>());
+
+                    // 收集来源 URL（最多 2 个）
+                    let urls: Vec<&str> = entry
+                        .sources
+                        .iter()
+                        .filter(|s| !s.url.is_empty())
+                        .map(|s| s.url.as_str())
+                        .take(2)
+                        .collect();
+
+                    let url_str = if urls.is_empty() {
+                        String::new()
+                    } else if urls.len() == 1 {
+                        format!(" [来源]({})", urls[0])
+                    } else {
+                        format!(" [来源1]({}) [来源2]({})", urls[0], urls[1])
+                    };
+
+                    summary_items.push(format!("- {}：_{}_{}", label, snippet, url_str));
+                }
+
+                if !summary_items.is_empty() {
+                    prompt.push_str(
+                        "\n\n📋 法规摘要（已预载入搜索缓存，可直接引用）:\n",
+                    );
+                    prompt.push_str(&summary_items.join("\n"));
+                    prompt.push('\n');
+                }
+            }
+        }
+
+        prompt
     }
 
     /// Turn 2 动态升降级检测。
@@ -1201,6 +1704,62 @@ impl ReActLoop {
         }
     }
 
+    /// 从搜索结果中提取法规引用（用于判断搜索是否带来了新的法律信息）。
+    ///
+    /// 匹配模式包括：
+    /// - "第X条" / "第XX条" / "第XXX条"
+    /// - "〔20XX〕XX号" / "令第X号"
+    /// - "《...》第X条"
+    ///
+    /// 返回去重后的法规引用集合。
+    fn extract_law_refs(result: &serde_json::Value) -> std::collections::HashSet<String> {
+        let mut refs = std::collections::HashSet::new();
+        // 拼接 answer + sources 中的 title/snippet 作为提取源
+        let mut text = String::new();
+        if let Some(answer) = result.get("answer").and_then(|a| a.as_str()) {
+            text.push_str(answer);
+        }
+        if let Some(sources) = result.get("sources").and_then(|s| s.as_array()) {
+            for src in sources {
+                if let Some(title) = src.get("title").and_then(|t| t.as_str()) {
+                    text.push(' ');
+                    text.push_str(title);
+                }
+                if let Some(snippet) = src.get("snippet").and_then(|s| s.as_str()) {
+                    text.push(' ');
+                    text.push_str(snippet);
+                }
+            }
+        }
+        // 提取法规引用模式
+        use regex::Regex;
+        // 模式1: 第X条 (含中文数字)
+        if let Ok(re) = Regex::new(r"第[零一二三四五六七八九十百]+条") {
+            for m in re.find_iter(&text) {
+                refs.insert(m.as_str().to_string());
+            }
+        }
+        // 模式2: 《...》第X条
+        if let Ok(re) = Regex::new(r"《[^》]+》第[零一二三四五六七八九十百]+条") {
+            for m in re.find_iter(&text) {
+                refs.insert(m.as_str().to_string());
+            }
+        }
+        // 模式3: 令第X号
+        if let Ok(re) = Regex::new(r"\S+令第[零一二三四五六七八九十百]+号") {
+            for m in re.find_iter(&text) {
+                refs.insert(m.as_str().to_string());
+            }
+        }
+        // 模式4: 〔20XX〕XX号
+        if let Ok(re) = Regex::new(r"〔\d{4}〕\d+号") {
+            for m in re.find_iter(&text) {
+                refs.insert(m.as_str().to_string());
+            }
+        }
+        refs
+    }
+
     /// 判断是否为搜索类工具（兼容新旧工具名）。
     fn is_search_tool(&self, name: &str) -> bool {
         name == "web_search" || name == "search_knowledge"
@@ -1211,10 +1770,25 @@ impl ReActLoop {
     /// - DashScope/SearXNG (web_search): JSON 中包含 `sources` 数组
     /// - search_document: JSON 中包含 `hits` 数组
     /// - 旧格式: 结果本身是顶层数组
+    ///
+    /// ★ DashScope 特殊处理：模型可能返回详尽的 AI 回答但无显式来源 URL。
+    /// 此时 answer 本身即为有效搜索结果，不应视为"空搜索"。
     fn count_search_hits(result: &serde_json::Value) -> usize {
         // 1) DashScope / SearXNG 统一格式: { "answer": "...", "sources": [...] }
         if let Some(arr) = result.get("sources").and_then(|s| s.as_array()) {
-            return arr.len();
+            let source_count = arr.len();
+            if source_count > 0 {
+                return source_count;
+            }
+            // sources 为空，检查 answer 是否有实质内容
+            // DashScope 可能返回详细的 AI 回答但没有显式来源 URL——
+            // 此时 answer 本身就是有效搜索结果，不应触发空搜索拦截
+            if let Some(answer) = result.get("answer").and_then(|a| a.as_str()) {
+                if answer.chars().count() > 100 {
+                    return 1; // 有实质回答 → 视为 1 条有效结果
+                }
+            }
+            return 0;
         }
         // 2) search_document 格式: { "hits": [...] }
         if let Some(arr) = result.get("hits").and_then(|h| h.as_array()) {
@@ -1293,11 +1867,47 @@ impl ReActLoop {
 
         let cache_key = (query.to_string(), category.to_string());
 
-        // 检查缓存
+        // 检查缓存：精确匹配 → 模糊 bigram 匹配（仅匹配缓存 key）
+        //   ★ 经验：不匹配 answer 文本（缓存命中后 answer 注入对话历史，prompt 膨胀）。
+        //     不做截断提示（"需要完整内容请重新搜索"诱使 Agent 多搜）。
         {
             let cache = self.search_cache.lock().await;
+            // 1) 精确 (query, category) 匹配
             if let Some(cached) = cache.get(&cache_key) {
                 return cached.clone();
+            }
+            // 2) 模糊 bigram Jaccard（query vs cache key），阈值 ≥ 0.25
+            if !query.is_empty() && !cache.is_empty() {
+                let q_chars: Vec<char> =
+                    query.chars().filter(|c| !c.is_whitespace()).collect();
+                let q_bigrams: std::collections::HashSet<String> = q_chars
+                    .windows(2)
+                    .map(|w| w.iter().collect::<String>())
+                    .collect();
+                if !q_bigrams.is_empty() {
+                    let mut best_score: f64 = 0.0;
+                    let mut best_value: Option<&serde_json::Value> = None;
+                    for ((k, _cat), v) in cache.iter() {
+                        let k_chars: Vec<char> =
+                            k.chars().filter(|c| !c.is_whitespace()).collect();
+                        let k_bigrams: std::collections::HashSet<String> = k_chars
+                            .windows(2)
+                            .map(|w| w.iter().collect::<String>())
+                            .collect();
+                        let intersection = q_bigrams.intersection(&k_bigrams).count();
+                        let union = q_bigrams.union(&k_bigrams).count();
+                        if union > 0 {
+                            let score = intersection as f64 / union as f64;
+                            if score > best_score && score >= 0.25 {
+                                best_score = score;
+                                best_value = Some(v);
+                            }
+                        }
+                    }
+                    if let Some(cached) = best_value {
+                        return cached.clone();
+                    }
+                }
             }
         }
 
@@ -1322,6 +1932,7 @@ impl ReActLoop {
 
         result
     }
+
 
     /// 从 search_cache 中提取所有搜索来源 URL，去重后返回 Citation 列表。
     ///

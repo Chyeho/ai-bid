@@ -38,6 +38,7 @@ pub mod check_cross_reference;
 pub mod compare_with_template;
 pub mod extract_obligations;
 pub mod output_finding;
+pub mod output_verification_batch;
 pub mod read_section;
 pub mod search_contradiction;
 pub mod search_document;
@@ -114,6 +115,12 @@ impl ToolRegistry {
     /// 检查工具是否存在。
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
+    }
+
+    /// 只保留指定名称的工具，删除其余。
+    /// 用于 Scout 等精简工具集的 Agent（如只保留 read_section + output_finding）。
+    pub fn retain_only(&mut self, names: &[&str]) {
+        self.tools.retain(|name, _| names.contains(&name.as_str()));
     }
 }
 

@@ -61,7 +61,8 @@ export type SseEventType =
    | 'stats'
    | 'finding_added'
    | 'finding_updated'
-   | 'finding_removed';
+   | 'finding_removed'
+   | 'call_log';
 
 export const connectStream = async (
    taskId: string,
@@ -96,7 +97,7 @@ export const connectStream = async (
       const knownTypes = new Set([
          'issue', 'issues', 'progress', 'agent_progress',
          'trace', 'phase', 'stats', 'finding_added',
-         'finding_updated', 'finding_removed',
+         'finding_updated', 'finding_removed', 'call_log',
       ]);
 
       while (true) {

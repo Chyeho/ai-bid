@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::agents::bus::AgentBus;
@@ -122,7 +123,7 @@ impl AppState {
 
 // ─── 请求/响应 DTO ──────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ReviewRequest {
     #[serde(default)]
     pub chunk_ids: Vec<String>,
@@ -132,7 +133,7 @@ pub struct ReviewRequest {
     pub enabled_agents: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ChatRequest {
     pub user_input: String,
     #[serde(default)]
@@ -143,7 +144,7 @@ pub struct ChatRequest {
     pub max_turns: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatMessageDto {
     pub role: String,
     pub content: Option<String>,
@@ -151,14 +152,14 @@ pub struct ChatMessageDto {
     pub tool_call_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SearchRequest {
     pub queries: Vec<String>,
     #[serde(default)]
     pub top_k: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProcessResponse {
     pub document_id: String,
     pub filename: String,
@@ -171,7 +172,7 @@ pub struct ProcessResponse {
     pub vector_dimension: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentInfo {
     pub document_id: String,
     pub filename: String,
@@ -180,14 +181,14 @@ pub struct DocumentInfo {
     pub vector_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ReviewAccepted {
     pub status: String,
     pub document_id: String,
     pub message: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReviewResponse {
     pub document_id: String,
     pub findings: Vec<crate::agents::types::RiskFinding>,
@@ -196,7 +197,7 @@ pub struct ReviewResponse {
     pub graph_snapshot: Option<crate::agents::types::GraphSnapshot>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReviewResultResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -205,18 +206,18 @@ pub struct ReviewResultResponse {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SearchResponse {
     pub results: Vec<SearchResultGroup>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SearchResultGroup {
     pub query: String,
     pub hits: Vec<SearchHitDto>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SearchHitDto {
     pub chunk_id: String,
     pub title: String,
@@ -225,7 +226,7 @@ pub struct SearchHitDto {
     pub page_start: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
     pub detail: String,
@@ -234,11 +235,28 @@ pub struct ErrorResponse {
 // ─── Handlers ───────────────────────────────────────────────────────
 
 /// GET /health
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Service is healthy", body = serde_json::Value)
+    )
+)]
 pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
 
 /// POST /api/v1/documents
+#[utoipa::path(
+    post,
+    path = "/api/v1/documents",
+    request_body(content = Vec<u8>, content_type = "multipart/form-data", description = "Document file (PDF/DOCX/DOC)"),
+    responses(
+        (status = 200, description = "Document processed successfully", body = ProcessResponse),
+        (status = 400, description = "Empty file", body = ErrorResponse),
+        (status = 500, description = "Processing failure", body = ErrorResponse)
+    )
+)]
 pub async fn process_document(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -521,6 +539,17 @@ pub async fn process_document(
 }
 
 /// GET /api/v1/documents/:id
+#[utoipa::path(
+    get,
+    path = "/api/v1/documents/{id}",
+    params(
+        ("id" = String, Path, description = "Document UUID")
+    ),
+    responses(
+        (status = 200, description = "Document info", body = DocumentInfo),
+        (status = 404, description = "Document not found", body = ErrorResponse)
+    )
+)]
 pub async fn get_document(
     State(state): State<AppState>,
     Path(doc_id): Path<String>,
@@ -543,6 +572,19 @@ pub async fn get_document(
 /// 启动异步 Multi-Agent 审查管线，立即返回 202 Accepted。
 /// 审查在后台 Tokio task 中执行，通过 SSE (`GET /review/:doc_id/stream`)
 /// 实时推送进度事件，完成后通过 `GET /review/:doc_id/result` 获取结果。
+#[utoipa::path(
+    post,
+    path = "/api/v1/documents/{id}/review",
+    params(
+        ("id" = String, Path, description = "Document UUID")
+    ),
+    request_body = ReviewRequest,
+    responses(
+        (status = 202, description = "Review accepted", body = ReviewAccepted),
+        (status = 404, description = "Document not found", body = ErrorResponse),
+        (status = 409, description = "Review already in progress", body = ReviewAccepted)
+    )
+)]
 #[axum::debug_handler]
 pub async fn review_document(
     State(state): State<AppState>,
@@ -582,20 +624,17 @@ pub async fn review_document(
             .clone()
     };
 
-    // 准备 clause 列表
+    // 准备 clause 列表（全量审查，不限制数量）
     let chunking_config = ChunkingConfig::default();
-    let max_clauses = req.max_clauses.unwrap_or(200);
     let review_clauses: Vec<ReviewClause> = doc
         .chunks
         .iter()
-        .take(max_clauses)
         .map(|c| ReviewClause::from_chunk(c, chunking_config.embed_ctx_depth, chunking_config.embed_path_max_len))
         .collect();
 
     println!(
-        "[REQ] 审核条款数: {} (上限 {}), 启用 Agent: {:?}",
+        "[REQ] 审核条款数: {}, 启用 Agent: {:?}",
         review_clauses.len(),
-        max_clauses,
         req.enabled_agents
     );
 
@@ -661,6 +700,15 @@ async fn run_review_pipeline(
 ) {
     let start_time = std::time::Instant::now();
 
+    // ── 指标采集器 ──
+    let llm_model = std::env::var("DASHSCOPE_MODEL")
+        .unwrap_or_else(|_| std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen-plus".to_string()));
+    let metrics: Arc<tokio::sync::Mutex<crate::metrics::MetricsCollector>> =
+        Arc::new(tokio::sync::Mutex::new(crate::metrics::MetricsCollector::new(
+            crate::metrics::SCHEMA_VERSION,
+            &llm_model,
+        )));
+
     let bus = Arc::new(AgentBus::new(32));
     let graph = Arc::new(SessionGraph::new());
     let trace = Arc::new(TokioMutex::new(TraceLog::new()));
@@ -704,22 +752,33 @@ async fn run_review_pipeline(
     });
 
     let registry = AgentRegistry::builtin();
-    let coordinator = Coordinator::new(
-        coord_config,
-        registry,
-        llm_factory,
-        tools_factory,
-        bus,
-        graph,
-        trace,
-    )
-    .with_review_events(review_events.clone());
+    let coord_agent_count = coord_config.enabled_agents.len();
+    let coord_max_parallel = coord_config.max_parallel_clauses;
+    let coordinator = Arc::new(
+        Coordinator::new(
+            coord_config,
+            registry,
+            llm_factory,
+            tools_factory,
+            bus,
+            graph,
+            trace,
+        )
+        .with_review_events(review_events.clone())
+        .with_metrics(metrics.clone()),
+    );
 
     println!("[STAGE] Multi-Agent 审核中 (async)...");
     match coordinator.review(&review_clauses).await {
         Ok(mut output) => {
             let duration_secs = start_time.elapsed().as_secs_f64();
             println!("[OK] 审核完成: {} 条风险发现, 耗时 {:.1}s", output.findings.len(), duration_secs);
+
+            // ★ BlindSpot: 后台异步执行（不阻塞 HTTP 响应）
+            let coord_bg = coordinator.clone();
+            tokio::spawn(async move {
+                coord_bg.run_blind_spot().await;
+            });
 
             // 填充 location 字段 + block_ids（用于前端 bbox-based PDF 高亮）
             for finding in &mut output.findings {
@@ -802,6 +861,55 @@ async fn run_review_pipeline(
                 }
             }
 
+            // ── 指标：写盘 ──
+            {
+                let mut collector = metrics.lock().await;
+                collector.set_findings_detail(&output.findings);
+                collector.record_stage(
+                    crate::metrics::SemanticStage::AgentReview,
+                    (duration_secs * 1000.0) as u64,
+                    crate::metrics::StageDetail::AgentReview {
+                        clause_count: review_clauses.len(),
+                        coordinator_phases: None,
+                    },
+                );
+
+                let run_id = chrono::Local::now().format("%Y%m%dT%H%M%S").to_string();
+                let meta = crate::metrics::RunMeta {
+                    run_id: run_id.clone(),
+                    title: None,
+                    notes: None,
+                    experiment_group: None,
+                    timestamp: chrono::Local::now().to_rfc3339(),
+                    git_commit: "unknown".to_string(),
+                    git_branch: "unknown".to_string(),
+                    tags: vec!["http".to_string()],
+                    description: format!("HTTP review: {}", doc_id),
+                    document: crate::metrics::schema::DocumentInfo {
+                        name: doc_id.clone(),
+                        pages: 0,
+                        file_size_kb: 0,
+                    },
+                    config: crate::metrics::schema::RunConfig {
+                        coordinator_enabled: true,
+                        agent_count: coord_agent_count,
+                        embed_engine: "unknown".to_string(),
+                        llm_model,
+                        search_backend: search_backend.clone(),
+                        max_parallel_clauses: coord_max_parallel,
+                    },
+                };
+                let run_metrics = collector.finalize(meta);
+
+                let runs_dir = data_path_str("output/runs");
+                let _ = std::fs::create_dir_all(&runs_dir);
+                let run_path = format!("{}/{}.json", runs_dir, run_id);
+                if let Ok(json) = serde_json::to_string_pretty(&run_metrics) {
+                    let _ = std::fs::write(&run_path, json);
+                    println!("[METRICS] → {}", run_path);
+                }
+            }
+
             // 发送 Done 事件
             review_events.emit(&crate::agents::review_event::ReviewEvent::Done {
                 total_findings: output.findings.len(),
@@ -846,24 +954,16 @@ async fn run_review_pipeline(
 /// SSE 端点：实时推送审查进度事件。
 /// 客户端应**先连接此端点**，再调用 POST /review 触发审查，
 /// 以确保不丢失早期事件。
-///
-/// 事件格式（标准 SSE）：
-/// ```text
-/// event: phase
-/// data: {"phase":"execute","phase_index":2,...}
-///
-/// event: agent_progress
-/// data: {"agent_id":"...","clauses_done":23,...}
-///
-/// event: trace
-/// data: {"event_type":"agent_thought","summary":"...",...}
-///
-/// event: finding_added
-/// data: {"risk_id":"R_001","severity":"high",...}
-///
-/// event: done
-/// data: {"total_findings":8,"high_risk":3,...}
-/// ```
+#[utoipa::path(
+    get,
+    path = "/api/v1/review/{doc_id}/stream",
+    params(
+        ("doc_id" = String, Path, description = "Document UUID")
+    ),
+    responses(
+        (status = 200, description = "SSE stream of review events (text/event-stream)")
+    )
+)]
 pub async fn stream_review_events(
     State(state): State<AppState>,
     Path(doc_id): Path<String>,
@@ -941,11 +1041,18 @@ pub async fn stream_review_events(
 
 /// GET /api/v1/review/:doc_id/result
 ///
-/// 查询异步审查的最终结果。返回状态：
-/// - `"completed"` → 200 + result
-/// - `"pending"` → 200 + `{ status: "pending" }`（审查仍在进行）
-/// - `"failed"` → 200 + `{ status: "failed", error: "..." }`
-/// - `"not_found"` → 404（无审查记录）
+/// 查询异步审查的最终结果。
+#[utoipa::path(
+    get,
+    path = "/api/v1/review/{doc_id}/result",
+    params(
+        ("doc_id" = String, Path, description = "Document UUID")
+    ),
+    responses(
+        (status = 200, description = "Review result (status: completed/pending/failed)", body = ReviewResultResponse),
+        (status = 404, description = "No review record found", body = ErrorResponse)
+    )
+)]
 pub async fn get_review_result(
     State(state): State<AppState>,
     Path(doc_id): Path<String>,
@@ -1010,6 +1117,19 @@ pub async fn get_review_result(
 }
 
 /// POST /api/v1/documents/:id/chat
+#[utoipa::path(
+    post,
+    path = "/api/v1/documents/{id}/chat",
+    params(
+        ("id" = String, Path, description = "Document UUID")
+    ),
+    request_body = ChatRequest,
+    responses(
+        (status = 200, description = "Chat response", body = ChatResponse),
+        (status = 404, description = "Document not found", body = ErrorResponse),
+        (status = 500, description = "Chat execution failure", body = ErrorResponse)
+    )
+)]
 pub async fn chat_with_document(
     State(state): State<AppState>,
     Path(doc_id): Path<String>,
@@ -1081,9 +1201,18 @@ pub async fn chat_with_document(
 
 /// POST /api/v1/documents/:id/chat/stream
 ///
-/// SSE streaming endpoint for ChatAgent. Clients receive incremental
-/// `thinking` / `tool_call` / `answer` / `done` events as the agent
-/// processes the query.
+/// SSE streaming endpoint for ChatAgent.
+#[utoipa::path(
+    post,
+    path = "/api/v1/documents/{id}/chat/stream",
+    params(
+        ("id" = String, Path, description = "Document UUID")
+    ),
+    request_body = ChatRequest,
+    responses(
+        (status = 200, description = "SSE stream of chat events (text/event-stream)")
+    )
+)]
 pub async fn chat_with_document_stream(
     State(state): State<AppState>,
     Path(doc_id): Path<String>,
@@ -1204,6 +1333,19 @@ pub async fn chat_with_document_stream(
 }
 
 /// POST /api/v1/documents/:id/search
+#[utoipa::path(
+    post,
+    path = "/api/v1/documents/{id}/search",
+    params(
+        ("id" = String, Path, description = "Document UUID")
+    ),
+    request_body = SearchRequest,
+    responses(
+        (status = 200, description = "Search results", body = SearchResponse),
+        (status = 404, description = "Document not found", body = ErrorResponse),
+        (status = 500, description = "Search encoding failure", body = ErrorResponse)
+    )
+)]
 pub async fn search_document(
     State(state): State<AppState>,
     Path(doc_id): Path<String>,
@@ -1250,13 +1392,13 @@ pub async fn search_document(
 // ─── Block BBox 查询 ─────────────────────────────────────────────
 
 /// 请求参数：ids 为逗号分隔的 block_id 列表
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams, ToSchema)]
 pub struct BlockQuery {
     pub ids: String,
 }
 
 /// BBox 坐标 DTO
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BBoxDto {
     pub x0: f64,
     pub top: f64,
@@ -1265,7 +1407,7 @@ pub struct BBoxDto {
 }
 
 /// 单个 block 的 BBox 响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BlockBBoxResponse {
     pub block_id: String,
     /// 所在页码 (0-based)
@@ -1279,6 +1421,18 @@ pub struct BlockBBoxResponse {
 /// GET /api/v1/documents/:id/blocks?ids=b_5_2,b_5_3
 ///
 /// 返回指定 block_id 的 BBox 坐标，用于前端 bbox-based PDF 精确高亮。
+#[utoipa::path(
+    get,
+    path = "/api/v1/documents/{id}/blocks",
+    params(
+        ("id" = String, Path, description = "Document UUID"),
+        BlockQuery
+    ),
+    responses(
+        (status = 200, description = "Block bounding boxes", body = Vec<BlockBBoxResponse>),
+        (status = 404, description = "Document not found", body = ErrorResponse)
+    )
+)]
 pub async fn get_block_bboxes(
     State(state): State<AppState>,
     Path(doc_id): Path<String>,
@@ -1365,4 +1519,308 @@ fn not_found(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
             detail: msg.to_string(),
         }),
     )
+}
+
+// ─── Metrics Helpers ────────────────────────────────────────────────────
+
+/// 递归扫描 output/runs/ 下所有 .json 文件，返回 (相对文件夹路径, 文件路径)。
+fn list_run_files() -> Vec<(Option<String>, std::path::PathBuf)> {
+    let base = crate::paths::data_path_str("output/runs");
+    let mut files = Vec::new();
+    let _ = scan_dir(&base, None, &mut files);
+    files
+}
+
+fn scan_dir(
+    dir: &str,
+    experiment_group: Option<String>,
+    out: &mut Vec<(Option<String>, std::path::PathBuf)>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let group_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string();
+            let _ = scan_dir(
+                &path.to_string_lossy(),
+                Some(group_name),
+                out,
+            );
+        } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            out.push((experiment_group.clone(), path));
+        }
+    }
+    Ok(())
+}
+
+/// 根据 run_id 查找文件路径（递归搜索子目录）。
+fn find_run_path(run_id: &str) -> Option<std::path::PathBuf> {
+    for (_, path) in list_run_files() {
+        if path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            == Some(run_id)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// 列出所有实验组名称。
+fn list_experiment_groups() -> Vec<String> {
+    let base = crate::paths::data_path_str("output/runs");
+    let mut groups = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&base) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    groups.push(name.to_string());
+                }
+            }
+        }
+    }
+    groups.sort();
+    groups
+}
+
+// ─── Metrics API ────────────────────────────────────────────────────────
+
+/// 单次实验的摘要（从完整 RunMetrics JSON 中提取关键字段）。
+#[derive(Debug, Serialize)]
+pub struct MetricRunSummary {
+    run_id: String,
+    title: Option<String>,
+    notes: Option<String>,
+    experiment_group: Option<String>,
+    timestamp: String,
+    tags: Vec<String>,
+    description: String,
+    document_name: String,
+    total_secs: f64,
+    llm_calls: usize,
+    tokens_input: u64,
+    tokens_output: u64,
+    cost_cny: f64,
+    total_findings: usize,
+    high_findings: usize,
+    coordinator_enabled: bool,
+    llm_model: String,
+    embed_engine: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetricRunListResponse {
+    runs: Vec<MetricRunSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTagsRequest {
+    tags: Vec<String>,
+}
+
+/// GET /api/v1/metrics/runs — 列出所有实验的摘要。
+pub async fn list_metric_runs() -> (StatusCode, Json<serde_json::Value>) {
+    let mut summaries: Vec<MetricRunSummary> = Vec::new();
+
+    for (experiment_group, path) in list_run_files() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                let meta = &val["meta"];
+                    let latency = &val["latency"];
+                    let llm = &val["llm_efficiency"];
+                    let quality = &val["review_quality"];
+                    let _resources = &val["resources"];
+
+                    summaries.push(MetricRunSummary {
+                        run_id: meta["run_id"].as_str().unwrap_or("?").to_string(),
+                        title: meta["title"].as_str().map(|s| s.to_string()),
+                        notes: meta["notes"].as_str().map(|s| s.to_string()),
+                        timestamp: meta["timestamp"].as_str().unwrap_or("?").to_string(),
+                        tags: meta["tags"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                            .unwrap_or_default(),
+                        description: meta["description"].as_str().unwrap_or("").to_string(),
+                        document_name: meta["document"]["name"].as_str().unwrap_or("?").to_string(),
+                        total_secs: latency["total_wall_clock_secs"].as_f64().unwrap_or(0.0),
+                        llm_calls: llm["totals"]["llm_calls"].as_u64().unwrap_or(0) as usize,
+                        tokens_input: llm["totals"]["tokens_input"].as_u64().unwrap_or(0),
+                        tokens_output: llm["totals"]["tokens_output"].as_u64().unwrap_or(0),
+                        cost_cny: llm["totals"]["cost_cny"].as_f64().unwrap_or(0.0),
+                        total_findings: quality["findings"]["after_dedup"].as_u64().unwrap_or(0) as usize,
+                        high_findings: quality["findings"]["by_severity"]["high"].as_u64().unwrap_or(0) as usize,
+                        coordinator_enabled: meta["config"]["coordinator_enabled"].as_bool().unwrap_or(false),
+                        llm_model: meta["config"]["llm_model"].as_str().unwrap_or("?").to_string(),
+                        embed_engine: meta["config"]["embed_engine"].as_str().unwrap_or("?").to_string(),
+                        experiment_group: experiment_group.clone(),
+                    });
+                }
+            }
+        }
+
+    // 按时间倒序
+    summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "runs": summaries })),
+    )
+}
+
+/// GET /api/v1/metrics/runs/:run_id — 获取单次实验的完整指标。
+pub async fn get_metric_run(Path(run_id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
+    let path = match find_run_path(&run_id) {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(val) => (StatusCode::OK, Json(val)),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("JSON 解析失败: {}", e) })),
+            ),
+        },
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("实验 {} 不存在", run_id) })),
+        ),
+    }
+}
+
+/// PATCH /api/v1/metrics/runs/:run_id/tags — 更新实验标签。
+pub async fn update_metric_tags(
+    Path(run_id): Path<String>,
+    Json(body): Json<UpdateTagsRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let path = match find_run_path(&run_id) {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"读取失败"}))),
+    };
+    let mut val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("JSON 解析失败: {}", e) })),
+            )
+        }
+    };
+    val["meta"]["tags"] = serde_json::json!(body.tags);
+    if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&val).unwrap_or_default()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("写入失败: {}", e) })),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "run_id": run_id })),
+    )
+}
+
+/// PATCH /api/v1/metrics/runs/:run_id/title — 更新实验标题。
+pub async fn update_metric_title(
+    Path(run_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let path = format!(
+        "{}/{}.json",
+        crate::paths::data_path_str("output/runs"),
+        run_id
+    );
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+    };
+    let mut val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)}))),
+    };
+    val["meta"]["title"] = body.get("title").cloned().unwrap_or(serde_json::Value::Null);
+    if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&val).unwrap_or_default()) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)})));
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok":true})))
+}
+
+/// PATCH /api/v1/metrics/runs/:run_id/notes — 更新实验备注。
+pub async fn update_metric_notes(
+    Path(run_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let path = format!("{}/{}.json", crate::paths::data_path_str("output/runs"), run_id);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+    };
+    let mut val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)}))),
+    };
+    val["meta"]["notes"] = body.get("notes").cloned().unwrap_or(serde_json::Value::Null);
+    if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&val).unwrap_or_default()) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)})));
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok":true})))
+}
+
+/// PATCH /api/v1/metrics/runs/:run_id/experiment-group — 移动实验到指定实验组。
+pub async fn move_metric_experiment_group(
+    Path(run_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let old_path = match find_run_path(&run_id) {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+    };
+    let group = body.get("experiment_group").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let base = crate::paths::data_path_str("output/runs");
+    let new_dir = if let Some(ref g) = group {
+        if g.is_empty() { base.clone() } else { format!("{}/{}", base, g) }
+    } else {
+        base.clone()
+    };
+    let _ = std::fs::create_dir_all(&new_dir);
+    let fname = old_path.file_name().unwrap();
+    let new_path = std::path::Path::new(&new_dir).join(fname);
+    if let Err(e) = std::fs::rename(&old_path, &new_path) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)})));
+    }
+    // Update experiment_group field in JSON
+    if let Ok(content) = std::fs::read_to_string(&new_path) {
+        if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
+            val["meta"]["experiment_group"] = group.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null);
+            let _ = std::fs::write(&new_path, serde_json::to_string_pretty(&val).unwrap_or_default());
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok":true})))
+}
+
+/// GET /api/v1/metrics/experiment-groups — 列出所有实验组。
+pub async fn list_metric_experiment_groups() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::OK, Json(serde_json::json!({"experiment_groups": list_experiment_groups()})))
+}
+
+/// DELETE /api/v1/metrics/runs/:run_id — 删除实验记录。
+pub async fn delete_metric_run(
+    Path(run_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let path = match find_run_path(&run_id) {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok":true}))),
+        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":format!("{}",e)}))),
+    }
 }

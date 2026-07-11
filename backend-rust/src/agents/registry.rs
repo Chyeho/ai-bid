@@ -15,6 +15,7 @@
 
 use crate::agents::bus::AgentBus;
 use crate::agents::prompts;
+use crate::agents::scout::SCOUT_SYSTEM_PROMPT;
 use crate::agents::react_loop::{LlmClient, ReActLoop};
 use crate::agents::session_graph::SessionGraph;
 use crate::agents::tools::ToolRegistry;
@@ -110,6 +111,19 @@ impl AgentRegistry {
                     "read_section",
                     "output_finding",
                 ],
+            },
+        );
+
+        definitions.insert(
+            AgentId::Scout,
+            AgentDefinition {
+                id: AgentId::Scout,
+                display_name: "初筛Agent",
+                system_prompt: SCOUT_SYSTEM_PROMPT,
+                default_max_turns: 3,
+                complexity: AgentComplexity::Low,
+                section_keywords: &[], // 串行扫描全部 clauses，不参与关键词路由
+                tool_names: &["read_section", "output_finding"], // ★ 无 web_search
             },
         );
 
@@ -458,7 +472,7 @@ mod tests {
     fn test_total_agent_count() {
         let registry = AgentRegistry::builtin();
         let ids = registry.all_ids();
-        // 7 reviewers + BlindSpot + LegalVerify + Debate = 10
-        assert_eq!(ids.len(), 10, "内置 Agent 总数应为 10");
+        // 7 reviewers + Scout + BlindSpot + LegalVerify + Debate = 11
+        assert_eq!(ids.len(), 11, "内置 Agent 总数应为 11");
     }
 }

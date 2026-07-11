@@ -55,19 +55,28 @@ src/
 │   ├── llm_client.rs          # LLM 客户端
 │   └── desensitize_service.rs # 数据脱敏
 ├── agents/              # Multi-Agent 审核框架
-│   ├── coordinator.rs   # 协调器（7 步管线）
+│   ├── coordinator.rs   # 协调器（7 阶段管线）
 │   ├── react_loop.rs    # ReAct 循环
 │   ├── chat_agent.rs    # 交互式对话 Agent
 │   ├── session_graph.rs # 会话状态图（Blackboard）
-│   ├── registry.rs      # Agent 注册表
-│   ├── bus.rs           # Agent 消息总线
-│   ├── trace.rs         # 审查追溯日志
-│   ├── prompts.rs       # 系统提示词
-│   ├── types.rs         # 类型定义
-│   └── tools/           # Agent 工具集（12 个工具）
+│   ├── registry.rs      # Agent 注册表（10 个内置 Agent）
+│   ├── bus.rs           # Agent 消息总线（Broadcast）
+│   ├── trace.rs         # 审查追溯日志（JSONL）
+│   ├── review_event.rs  # SSE 实时事件推送
+│   ├── prompts.rs       # 11 个系统提示词
+│   ├── types.rs         # 核心类型定义
+│   ├── testing.rs       # 集成测试基础设施
+│   ├── fact_check.rs    #   FactCheck Agent 工厂
+│   ├── procedure.rs     #   Procedure Agent 工厂
+│   ├── semantic_risk.rs #   SemanticRisk Agent 工厂
+│   └── tools/           # Agent 工具集（11 个已实现 + 2 个 V2 规划）
+├── api/                 # HTTP API（Axum）
+│   ├── router.rs        # 8 个 REST 端点 + SSE 流
+│   └── ...
 └── bin/
     ├── test_agents.rs   # Agent 集成测试
-    └── test_llm.rs      # LLM 连接测试
+    ├── test_llm.rs      # LLM 连接测试
+    └── server.rs        # HTTP API 服务器入口 (:3001)
 ```
 
 ## 6 阶段管线

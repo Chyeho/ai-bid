@@ -915,6 +915,7 @@ mod tests {
                             thought: None,
                             content: Some("mock fallback".to_string()),
                             tool_calls: vec![],
+                            usage: None,
                         });
                     &DEFAULT
                 })
@@ -923,6 +924,7 @@ mod tests {
                 thought: None,
                 content: resp.content.clone(),
                 tool_calls: resp.tool_calls.clone(),
+                usage: None,
             })
         }
     }
@@ -964,6 +966,7 @@ mod tests {
                     "suggested_actions": ["查看 b_10_5 评分标准"]
                 }),
             }],
+            usage: None,
         }
     }
 
@@ -1162,6 +1165,7 @@ mod tests {
             thought: None,
             content: Some("根据我的分析，这条条款没有合规问题。".to_string()),
             tool_calls: vec![],
+            usage: None,
         }]));
         let agent = make_test_agent(mock);
 
@@ -1189,6 +1193,7 @@ mod tests {
                     name: "web_search".to_string(),
                     arguments: serde_json::json!({"question": "地域限制"}),
                 }],
+                usage: None,
             },
             LlmResponse {
                 thought: None,
@@ -1198,6 +1203,7 @@ mod tests {
                     name: "web_search".to_string(),
                     arguments: serde_json::json!({"question": "本地业绩"}),
                 }],
+                usage: None,
             },
             LlmResponse {
                 thought: None,
@@ -1207,6 +1213,7 @@ mod tests {
                     name: "web_search".to_string(),
                     arguments: serde_json::json!({"question": "更多"}),
                 }],
+                usage: None,
             },
         ]));
         // 工具集中注册一个简单工具供 execute_tool_calls 执行
@@ -1318,6 +1325,7 @@ mod tests {
                         name: "web_search".to_string(),
                         arguments: serde_json::json!({"question": "test"}),
                     }],
+                    usage: None,
                 })
             }
         }

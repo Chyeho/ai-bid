@@ -11,7 +11,13 @@ public enum SseEventTypeEnum {
     /** 管线阶段切换 */
     PHASE("phase"),
     /** 阶段性统计快照 */
-    STATS("stats");
+    STATS("stats"),
+    /** 稳定后的风险发现（L1 主视图实时增量） */
+    FINDING_ADDED("finding_added"),
+    /** Finding 字段变更（降级/辩论裁决） */
+    FINDING_UPDATED("finding_updated"),
+    /** Finding 被消除（去重合并） */
+    FINDING_REMOVED("finding_removed");
 
     private final String eventName;
 

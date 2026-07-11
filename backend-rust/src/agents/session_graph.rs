@@ -25,7 +25,7 @@
 use crate::agents::types::*;
 use std::collections::HashMap;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// 中期记忆：Session Knowledge Graph。
 ///
@@ -60,6 +60,12 @@ pub struct SessionGraph {
     /// 每次 `next_risk_id()` 调用原子递增，返回 `R_001`, `R_002`, ...。
     /// 同一 Session 内不重复，跨 Session 不保证（符合 Session 生命周期语义）。
     risk_id_counter: AtomicU64,
+    /// Scout 初筛阶段是否已完成（Phase 2 Agent 在开始审查前检查此标志）。
+    scout_complete: AtomicBool,
+    /// 预搜索结果缓存 (chunk_id → 条款相关的批量搜索结果)。
+    ///
+    /// Coordinator 批量搜索阶段写入，Execute Phase 读取并注入 Agent prompt。
+    search_results: RwLock<HashMap<String, Vec<SearchCacheEntry>>>,
 }
 
 impl SessionGraph {
@@ -79,6 +85,8 @@ impl SessionGraph {
             laws: RwLock::new(HashMap::new()),
             cases: RwLock::new(HashMap::new()),
             risk_id_counter: AtomicU64::new(0),
+            scout_complete: AtomicBool::new(false),
+            search_results: RwLock::new(HashMap::new()),
         }
     }
 
@@ -328,6 +336,79 @@ impl SessionGraph {
         self.derive_same_law_edges(&law_refs, chunk_id);
     }
 
+    /// 写入 Hypothesis（轻量版 add_risk_with_edges）。
+    ///
+    /// 与 add_risk_with_edges 的区别:
+    /// - 不创建 Law 节点（Hypothesis 的法规名未验证，可能是幻觉）
+    /// - 不触发 same_law 推导（避免未验证信息污染图拓扑）
+    /// - 只写入 Risk 节点 + has_risk 边 + cites 边（单向）
+    pub fn add_hypothesis(&self, risk: RiskNode, chunk_id: &str) {
+        let risk_id = risk.finding.risk_id.clone();
+        let law_refs = risk.finding.legal_basis.clone();
+
+        // 1. Risk 节点
+        if let Ok(mut risks) = self.risks.write() {
+            risks.insert(risk_id.clone(), risk);
+        }
+
+        // 2. has_risk 边
+        if let Ok(mut edges) = self.has_risk.write() {
+            edges.entry(chunk_id.to_string()).or_default().push(risk_id.clone());
+        }
+
+        // 3. cites 边（仅单向，不建 cited_by 反向索引，不触发 same_law）
+        if let Ok(mut cites) = self.cites.write() {
+            cites.entry(risk_id).or_default().extend(law_refs);
+        }
+    }
+
+    /// 查询所有 Hypothesis（BlindSpot 用）。
+    pub fn get_hypotheses(&self) -> Vec<RiskFinding> {
+        self.risks.read().ok()
+            .map(|m| m.values()
+                .filter(|r| r.finding.finding_role == FindingRole::Hypothesis)
+                .map(|r| r.finding.clone())
+                .collect())
+            .unwrap_or_default()
+    }
+
+    // ── 预搜索结果缓存 ──────────────────────────────────────
+
+    /// 批量写入条款的预搜索结果。
+    pub fn cache_search_results(&self, chunk_id: &str, entries: Vec<SearchCacheEntry>) {
+        if let Ok(mut cache) = self.search_results.write() {
+            cache.insert(chunk_id.to_string(), entries);
+        }
+    }
+
+    /// 查询条款的预搜索结果。
+    pub fn get_search_results_for_clause(&self, chunk_id: &str) -> Vec<SearchCacheEntry> {
+        self.search_results
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(chunk_id).cloned())
+            .unwrap_or_default()
+    }
+
+    /// 检查是否有预搜索结果。
+    pub fn has_search_results(&self, chunk_id: &str) -> bool {
+        self.search_results
+            .read()
+            .ok()
+            .map(|cache| cache.contains_key(chunk_id))
+            .unwrap_or(false)
+    }
+
+    /// Scout 阶段是否已完成。
+    pub fn is_scout_complete(&self) -> bool {
+        self.scout_complete.load(Ordering::Acquire)
+    }
+
+    /// 标记 Scout 阶段已完成。
+    pub fn mark_scout_complete(&self) {
+        self.scout_complete.store(true, Ordering::Release);
+    }
+
     // ── 查询 (Agent 每轮 ReAct 调用) ──────────────────────────
 
     /// 查询某个 Chunk 的完整上下文："谁审过这条？发现了什么风险？跟哪些条款有关联？"
@@ -517,6 +598,11 @@ mod tests {
                 truncated: false,
                 suggested_agent: None,
                 citations: Vec::new(),
+                finding_role: FindingRole::default(),
+                knowledge_source: String::new(),
+                verification_required: Vec::new(),
+                hypothesized_by: Vec::new(),
+                verified_by: Vec::new(),
                 page_number: None,
                 section_path: None,
                 context: None,

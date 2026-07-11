@@ -28,6 +28,7 @@ use tokio::sync::broadcast;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PipelinePhase {
+    Scout,
     Route,
     Execute,
     Merge,

@@ -199,6 +199,18 @@ async fn main() -> Result<()> {
         dotenv::from_path(data_env).ok();
     }
 
+    // ── 指标采集器 ─────────────────────────────────────────────
+    let llm_model = std::env::var("DASHSCOPE_MODEL")
+        .unwrap_or_else(|_| std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen-plus".to_string()));
+    let metrics = Arc::new(Mutex::new(
+        ai_bid::metrics::MetricsCollector::new(
+            ai_bid::metrics::SCHEMA_VERSION,
+            &llm_model,
+        ),
+    ));
+    let pipeline_start = std::time::Instant::now();
+    let mut phase_start = pipeline_start;
+
     // 解析命令行参数：flag 参数（如 --chat）与位置参数（文件路径）分离
     let args: Vec<String> = env::args().collect();
     let chat_mode = args.iter().any(|a| a == "--chat");
@@ -271,6 +283,21 @@ async fn main() -> Result<()> {
                 .with_context(|| "Python 兜底输出的 JSON 解析失败")?
         }
     };
+
+    // ── 指标：阶段 1 文档摄取 ──
+    {
+        let stage_duration = phase_start.elapsed().as_millis() as u64;
+        let mut collector = metrics.lock().await;
+        collector.record_stage(
+            ai_bid::metrics::SemanticStage::DocumentIngestion,
+            stage_duration,
+            ai_bid::metrics::StageDetail::DocumentIngestion {
+                pages: raw_doc.pages.len(),
+                engine: "pdfplumber".to_string(),
+            },
+        );
+        phase_start = std::time::Instant::now();
+    }
 
     // ─── 阶段 2: RawDocument → Sections ──────────────────────
 
@@ -425,6 +452,20 @@ async fn main() -> Result<()> {
     let injected_table_count = count_table_ids(&all_sections);
     println!("  已注入 {} 张表格到对应章节", injected_table_count);
 
+    // ── 指标：阶段 2 文档结构化 ──
+    {
+        let stage_duration = phase_start.elapsed().as_millis() as u64;
+        let mut collector = metrics.lock().await;
+        collector.record_stage(
+            ai_bid::metrics::SemanticStage::DocumentStructure,
+            stage_duration,
+            ai_bid::metrics::StageDetail::DocumentStructure {
+                section_count: all_sections.len(),
+            },
+        );
+        phase_start = std::time::Instant::now();
+    }
+
     // ─── 阶段 3: Sections → Chunks ────────────────────────────
 
     println!("正在进行条款级 Chunk 切分 (chunking)...");
@@ -457,6 +498,21 @@ async fn main() -> Result<()> {
         "  大小 — 总计 {} 字符, 平均 {:.1}, 最小 {}, 最大 {}",
         stats.total_chars, stats.avg_chunk_size, stats.min_chunk_size, stats.max_chunk_size
     );
+
+    // ── 指标：阶段 3 Chunking ──
+    {
+        let stage_duration = phase_start.elapsed().as_millis() as u64;
+        let mut collector = metrics.lock().await;
+        collector.record_stage(
+            ai_bid::metrics::SemanticStage::Chunking,
+            stage_duration,
+            ai_bid::metrics::StageDetail::Chunking {
+                chunk_count: stats.total_chunks,
+                total_chars: stats.total_chars,
+            },
+        );
+        phase_start = std::time::Instant::now();
+    }
 
     // ─── 阶段 4: Chunks → Embedding → DocumentVectorIndex ─────
     //
@@ -513,6 +569,23 @@ async fn main() -> Result<()> {
             .map(|v| v.len())
             .unwrap_or(0)
     );
+
+    // ── 指标：阶段 4 Embedding ──
+    let embed_dimension = doc_index.embeddings.first().map(|v| v.len()).unwrap_or(0);
+    {
+        let stage_duration = phase_start.elapsed().as_millis() as u64;
+        let mut collector = metrics.lock().await;
+        collector.set_embedding_stats(doc_index.len(), embed_dimension, &embed_engine);
+        collector.record_stage(
+            ai_bid::metrics::SemanticStage::Embedding,
+            stage_duration,
+            ai_bid::metrics::StageDetail::Embedding {
+                chunk_count: doc_index.len(),
+                dimension: embed_dimension,
+            },
+        );
+        phase_start = std::time::Instant::now();
+    }
 
     // ─── 阶段 5: 语义搜索验证（V5.6）──────────────────────────
 
@@ -682,12 +755,7 @@ async fn main() -> Result<()> {
     let agent_embed = Arc::new(embed_client);
     println!("  嵌入客户端已共享给 Agent");
 
-    // 4. 构建审查条款列表
-    let max_clauses: usize = env::var("AIBID_MAX_CLAUSES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
-
+    // 4. 构建审查条款列表（不再限制数量，全量审查）
     let max_parallel: usize = env::var("AIBID_MAX_PARALLEL_CLAUSES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -696,7 +764,6 @@ async fn main() -> Result<()> {
 
     let review_clauses: Vec<ReviewClause> = chunks
         .iter()
-        .take(max_clauses)
         .map(|c| {
             ReviewClause::from_chunk(
                 c,
@@ -705,6 +772,7 @@ async fn main() -> Result<()> {
             )
         })
         .collect();
+    println!("  待审查条款: {} 条", review_clauses.len());
 
     // 5. Phase 2 共享基础设施
     // AgentBus — Agent 间实时广播（capacity=32）
@@ -816,9 +884,36 @@ async fn main() -> Result<()> {
             bus,
             graph,
             trace,
-        );
+        )
+        .with_metrics(metrics.clone());
 
-        coordinator.review(&review_clauses).await?
+        // ── 指标：占位 AgentReview 阶段（让 Coordinator 子阶段能追加进去）──
+        {
+            let mut collector = metrics.lock().await;
+            collector.record_stage(
+                ai_bid::metrics::SemanticStage::AgentReview,
+                0, // 占位，后续 update_last_stage_duration 填充
+                ai_bid::metrics::StageDetail::AgentReview {
+                    clause_count: review_clauses.len(),
+                    coordinator_phases: Some(vec![]),
+                },
+            );
+        }
+        let review_phase_start = std::time::Instant::now();
+
+        let output = coordinator.review(&review_clauses).await?;
+
+        // ── 指标：回填 AgentReview 耗时 ──
+        {
+            let review_ms = review_phase_start.elapsed().as_millis() as u64;
+            let mut collector = metrics.lock().await;
+            collector.update_last_stage_duration(review_ms);
+        }
+
+        // BlindSpot: 后台异步执行（CLI 模式下 await 确保完成后再退出）
+        coordinator.run_blind_spot().await;
+
+        output
     } else {
         // ── 单 Agent 模式（向后兼容 MVP）─────────────────────────
 
@@ -916,6 +1011,84 @@ async fn main() -> Result<()> {
             println!("  │  法条: {}", f.legal_basis.join("; "));
             println!("  │  理由: {}", f.reason.chars().take(200).collect::<String>());
             println!("  └──────────────────────────────");
+        }
+    }
+
+    // ── 指标：写盘 ─────────────────────────────────────────
+    {
+        let _total_duration = pipeline_start.elapsed().as_millis() as u64;
+        let mut collector = metrics.lock().await;
+        collector.set_findings_detail(&output.findings);
+
+        // 构建元数据
+        let git_commit = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let git_branch = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let run_id = chrono::Local::now().format("%Y%m%dT%H%M%S").to_string();
+        let use_coordinator = env::var("AIBID_COORDINATOR").unwrap_or_default() == "1";
+        let search_backend = env::var("AIBID_SEARCH_BACKEND").unwrap_or_else(|_| "dashscope".to_string());
+
+        let meta = ai_bid::metrics::RunMeta {
+            run_id: run_id.clone(),
+            title: None,
+            notes: None,
+            experiment_group: std::env::var("AIBID_RUN_GROUP").ok(),
+            timestamp: chrono::Local::now().to_rfc3339(),
+            git_commit,
+            git_branch,
+            tags: vec!["auto".to_string()],
+            description: format!("CLI run: {}", stem),
+            document: ai_bid::metrics::schema::DocumentInfo {
+                name: format!("{}.pdf", stem),
+                pages: raw_doc.pages.len(),
+                file_size_kb: 0, // not tracked in CLI mode
+            },
+            config: ai_bid::metrics::schema::RunConfig {
+                coordinator_enabled: use_coordinator,
+                agent_count: if use_coordinator { 7 } else { 1 },
+                embed_engine: embed_engine.clone(),
+                llm_model,
+                search_backend,
+                max_parallel_clauses: max_parallel,
+            },
+        };
+
+        let run_metrics = collector.finalize(meta);
+
+        // 写盘
+        let runs_dir = if let Ok(f) = std::env::var("AIBID_RUN_FOLDER") {
+            let d = format!("{}/{}", data_path_str("output/runs"), f);
+            fs::create_dir_all(&d).ok();
+            d
+        } else {
+            data_path_str("output/runs")
+        };
+        fs::create_dir_all(&runs_dir).ok();
+        let run_path = format!("{}/{}.json", runs_dir, run_id);
+        if let Ok(json) = serde_json::to_string_pretty(&run_metrics) {
+            if fs::write(&run_path, &json).is_ok() {
+                eprintln!("\n📊 指标已写入: {}", run_path);
+                eprintln!(
+                    "   总耗时 {:.1}s | Token {} in + {} out | 成本 ¥{:.2}",
+                    run_metrics.latency.total_wall_clock_secs,
+                    run_metrics.llm_efficiency.totals.tokens_input,
+                    run_metrics.llm_efficiency.totals.tokens_output,
+                    run_metrics.llm_efficiency.totals.cost_cny,
+                );
+            }
         }
     }
 

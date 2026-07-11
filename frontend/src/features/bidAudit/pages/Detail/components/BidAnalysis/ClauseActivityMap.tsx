@@ -59,6 +59,7 @@ const EVENT_ICON: Record<string, React.ReactNode> = {
   output_finding: <WarningOutlined style={{ color: DARK_GREEN }} />,
   agent_bus_send: <SearchOutlined style={{ color: DARK_GREEN }} />,
   agent_bus_recv: <FileSearchOutlined style={{ color: DARK_GREEN }} />,
+  call_log: <InfoCircleOutlined style={{ color: '#722ed1' }} />,
 };
 
 const EVENT_LABEL: Record<string, string> = {
@@ -69,6 +70,7 @@ const EVENT_LABEL: Record<string, string> = {
   output_finding: '发现',
   agent_bus_send: '通知',
   agent_bus_recv: '收到',
+  call_log: '统计',
 };
 
 const SEVERITY_TAG_COLOR: Record<string, string> = {
@@ -432,6 +434,125 @@ function stripEmoji(s: string): string {
   return s.replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{200D}\u{FE0F}]/gu, '').replace(/\s+/g, ' ').trim();
 }
 
+/** 单个 trace 事件行 — 可点击展开详情 */
+const TraceEventRow: React.FC<{ ev: TraceEvent }> = ({ ev }) => {
+  const [expanded, setExpanded] = useState(false);
+  const p = ev.payload as Record<string, unknown> | undefined;
+  const hasDetail = !!p && (
+    ev.event_type === 'agent_thought' || ev.event_type === 'tool_call' ||
+    ev.event_type === 'tool_result' || ev.event_type === 'output_finding' ||
+    ev.event_type === 'call_log'
+  );
+
+  return (
+    <div>
+      <div
+        onClick={() => hasDetail && setExpanded(v => !v)}
+        style={{
+          padding: '1px 0', color: '#8c8c8c', display: 'flex', gap: 6, fontSize: 10,
+          cursor: hasDetail ? 'pointer' : 'default',
+        }}
+        title={hasDetail ? '点击展开详情' : undefined}
+      >
+        <span style={{ flexShrink: 0 }}>{EVENT_ICON[ev.event_type] || <BulbOutlined style={{ color: DARK_GREEN }} />}</span>
+        <span style={{ color: '#bfbfbf' }}>T{ev.turn}</span>
+        <span style={{ color: '#bfbfbf' }}>{EVENT_LABEL[ev.event_type] || ev.event_type}</span>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+          {stripEmoji(ev.summary)}
+        </span>
+        {hasDetail && (
+          <span style={{ color: '#bfbfbf', flexShrink: 0 }}>
+            <CaretRightOutlined style={{
+              fontSize: 8,
+              transform: expanded ? 'rotate(90deg)' : undefined,
+              transition: 'transform 0.2s',
+            }} />
+          </span>
+        )}
+      </div>
+      {expanded && hasDetail && p && (
+        <div style={{ padding: '4px 8px 6px 28px', fontSize: 10 }}>
+          {/* agent_thought: 完整推理 */}
+          {ev.event_type === 'agent_thought' && p.content && (
+            <div style={{
+              padding: '4px 8px', background: '#fffbe6', border: '1px solid #ffe58f',
+              borderRadius: 3, maxHeight: 180, overflowY: 'auto', whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word', color: '#595959', lineHeight: '16px',
+            }}>
+              {String(p.content)}
+            </div>
+          )}
+          {/* tool_call: 完整参数 */}
+          {ev.event_type === 'tool_call' && p.arguments && (
+            <div style={{
+              padding: '4px 8px', background: '#e6f4ff', border: '1px solid #91caff',
+              borderRadius: 3, maxHeight: 150, overflowY: 'auto',
+              fontFamily: 'monospace', color: '#595959', lineHeight: '16px',
+            }}>
+              {Object.entries(p.arguments as Record<string, unknown>)
+                .filter(([k]) => !k.startsWith('_'))
+                .map(([k, v]) => (
+                  <div key={k}><span style={{ color: '#1677ff' }}>{k}:</span> {typeof v === 'string' ? v : JSON.stringify(v)}</div>
+                ))}
+            </div>
+          )}
+          {/* tool_result: 内容预览 */}
+          {ev.event_type === 'tool_result' && (
+            <>
+              {p.text_preview && (
+                <div style={{
+                  padding: '4px 8px', background: '#f6ffed', border: '1px solid #b7eb8f',
+                  borderRadius: 3, maxHeight: 150, overflowY: 'auto', whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word', color: '#595959', lineHeight: '16px',
+                }}>
+                  {String(p.text_preview).slice(0, 800)}
+                </div>
+              )}
+              {Array.isArray(p.items) && (p.items as unknown[]).length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 }}>
+                  {(p.items as unknown[]).slice(0, 3).map((item: unknown, i: number) => {
+                    const h = item as Record<string, unknown>;
+                    return (
+                      <div key={i} style={{ padding: '2px 6px', background: '#fafafa', borderRadius: 3, color: '#8c8c8c' }}>
+                        {h.url ? (
+                          <a href={String(h.url)} target="_blank" rel="noopener noreferrer" style={{ fontSize: 10 }}>
+                            <LinkOutlined style={{ marginRight: 2 }} />{String(h.title || h.url)}
+                          </a>
+                        ) : (
+                          <span>{String(h.title || '')}</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+          {/* output_finding: reason */}
+          {ev.event_type === 'output_finding' && p.reason && (
+            <div style={{
+              padding: '4px 8px', background: '#fffbe6', border: '1px solid #ffe58f',
+              borderRadius: 3, maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word', color: '#595959', lineHeight: '16px',
+            }}>
+              {String(p.reason).slice(0, 1000)}
+            </div>
+          )}
+          {/* call_log: 统计 */}
+          {ev.event_type === 'call_log' && (
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', padding: '2px 8px', color: '#722ed1' }}>
+              <span>📥 {String(p.tokens_input ?? '-')} in</span>
+              <span>📤 {String(p.tokens_output ?? '-')} out</span>
+              <span>⏱ {String(p.duration_ms ?? '-')}ms</span>
+              {p.tools_called && <span>🔧 {String((p.tools_called as string[]).join(', ') || '(无)')}</span>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const TraceDetailLog: React.FC<{
   traceEvents: TraceEvent[];
   clauseMap: Map<string, ClauseState>;
@@ -480,7 +601,7 @@ const TraceDetailLog: React.FC<{
       </div>
       {open && (
         <div style={{
-          maxHeight: 200,
+          maxHeight: 350,
           overflowY: 'auto',
           background: '#fafafa',
           borderRadius: 6,
@@ -494,13 +615,8 @@ const TraceDetailLog: React.FC<{
                 <GlobalOutlined style={{ marginRight: 2 }} />
                 全局 ({grouped.global.length})
               </Text>
-              {grouped.global.slice(-20).map((ev, i) => (
-                <div key={i} style={{ padding: '1px 0', color: '#8c8c8c', display: 'flex', gap: 6 }}>
-                  <span style={{ flexShrink: 0 }}>{EVENT_ICON[ev.event_type] || <BulbOutlined style={{ color: DARK_GREEN }} />}</span>
-                  <span>[{AGENT_LABELS[ev.agent_name] || ev.agent_name}]</span>
-                  <span style={{ color: '#bfbfbf' }}>{EVENT_LABEL[ev.event_type] || ev.event_type}</span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stripEmoji(ev.summary)}</span>
-                </div>
+              {grouped.global.slice(-30).map((ev, i) => (
+                <TraceEventRow key={i} ev={ev} />
               ))}
             </div>
           )}
@@ -515,13 +631,8 @@ const TraceDetailLog: React.FC<{
                   {sectionLabel} ({events.length})
                 </summary>
                 <div style={{ paddingLeft: 12 }}>
-                  {events.slice(-10).map((ev, i) => (
-                    <div key={i} style={{ padding: '1px 0', color: '#8c8c8c', display: 'flex', gap: 6, fontSize: 10 }}>
-                      <span style={{ flexShrink: 0 }}>{EVENT_ICON[ev.event_type] || <BulbOutlined style={{ color: DARK_GREEN }} />}</span>
-                      <span style={{ color: '#bfbfbf' }}>T{ev.turn}</span>
-                      <span style={{ color: '#bfbfbf' }}>{EVENT_LABEL[ev.event_type] || ev.event_type}</span>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stripEmoji(ev.summary)}</span>
-                    </div>
+                  {events.slice(-15).map((ev, i) => (
+                    <TraceEventRow key={i} ev={ev} />
                   ))}
                 </div>
               </details>

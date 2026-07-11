@@ -22,6 +22,7 @@ target/
 .env
 
 # ── 运行时产物 ──
-output/
+output/你
+
 tmp/
 logs/

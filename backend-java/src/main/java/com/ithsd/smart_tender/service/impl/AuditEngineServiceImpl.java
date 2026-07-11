@@ -177,13 +177,23 @@ public class AuditEngineServiceImpl implements AuditEngineService {
                                 objectMapper.convertValue(data, com.ithsd.smart_tender.model.vo.PhaseVO.class);
                             emitSafe(taskId, SseEventTypeEnum.PHASE, vo);
                             String phase = data.has("phase") ? data.get("phase").asText() : "";
-                            updateStage(task, AuditStageEnum.REVIEWING,
-                                "execute".equals(phase) ? 35 : "merge".equals(phase) ? 45 : "legal_verify".equals(phase) ? 55 : 60);
+                            int progress = "execute".equals(phase) ? 35 : "merge".equals(phase) ? 45 : "legal_verify".equals(phase) ? 55 : 60;
+                            // 异步写 DB，防止僵尸连接阻塞 SSE 事件处理
+                            CompletableFuture.runAsync(() -> {
+                                try {
+                                    updateStage(task, AuditStageEnum.REVIEWING, progress);
+                                } catch (Exception e) {
+                                    log.warn("updateStage async failed: {}", e.getMessage());
+                                }
+                            });
                         }
                         case "stats" -> {
                             emitSafe(taskId, SseEventTypeEnum.STATS, data);
                         }
                         case "finding_added" -> {
+                            // 1. 透传原始数据给前端的 liveFindings（增量更新）
+                            emitSafe(taskId, SseEventTypeEnum.FINDING_ADDED, data);
+                            // 2. 同时映射为 ISSUE（兼容 AnalysisList 实时显示）
                             try {
                                 RustRiskFinding rf = objectMapper.convertValue(data, RustRiskFinding.class);
                                 if (!rf.shouldSkip()) {
@@ -192,6 +202,14 @@ public class AuditEngineServiceImpl implements AuditEngineService {
                             } catch (Exception ignored) {
                                 log.debug("SSE finding_added map failed: {}", ignored.getMessage());
                             }
+                        }
+                        case "finding_removed" -> {
+                            // 去重合并时移除 → 前端从 liveFindings 中删除
+                            emitSafe(taskId, SseEventTypeEnum.FINDING_REMOVED, data);
+                        }
+                        case "finding_updated" -> {
+                            // 字段变更（降级/辩论） → 前端就地更新 liveFindings
+                            emitSafe(taskId, SseEventTypeEnum.FINDING_UPDATED, data);
                         }
                         case "done" -> {
                             log.info("Rust SSE done received: docId={}", rustDocId);
