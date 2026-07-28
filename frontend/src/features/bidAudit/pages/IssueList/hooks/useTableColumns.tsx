@@ -22,16 +22,19 @@ export const useTableColumns = (
          dataIndex: 'severity',
          align: 'center',
          width: 90,
-         render: (severity: string) => {
+         render: (severity: string, record: AuditIssue) => {
             const config: Record<string, { color: string; text: string }> = {
-               critical: { color: theme.colorError, text: '严重' },
-               warning: { color: theme.colorWarning, text: '一般' },
-               info: { color: theme.colorPrimary, text: '提示' },
+               high: { color: theme.colorError, text: '高风险' },
+               medium: { color: theme.colorWarning, text: '中风险' },
+               low: { color: theme.colorWarning, text: '低风险' },
+               info: { color: theme.colorPrimary, text: '信息' },
             };
-            const current = config[severity] || {
+            const current = record.isCritical
+               ? { color: theme.colorError, text: '重大' }
+               : config[severity] || {
                color: 'default',
                text: '未知',
-            };
+               };
             return (
                <Tag
                   color={current.color}

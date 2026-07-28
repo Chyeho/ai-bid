@@ -102,6 +102,8 @@ pub enum ReviewEvent {
     FindingAdded {
         risk_id: String,
         severity: String,
+        is_critical: bool,
+        critical_reason: String,
         risk_type: String,
         agent: String,
         confidence: f64,
@@ -158,10 +160,7 @@ pub enum ReviewEvent {
 
     /// 审查执行失败
     #[serde(rename = "error")]
-    Error {
-        message: String,
-        session_id: String,
-    },
+    Error { message: String, session_id: String },
 }
 
 /// ReviewEventBus — 审查事件广播通道。
@@ -282,6 +281,8 @@ mod tests {
         bus.emit(&ReviewEvent::FindingAdded {
             risk_id: "R_001".to_string(),
             severity: "high".to_string(),
+            is_critical: true,
+            critical_reason: "唯一品牌且拒绝同等产品".to_string(),
             risk_type: "品牌指定".to_string(),
             agent: "财政合规Agent".to_string(),
             confidence: 0.91,

@@ -1,15 +1,15 @@
+use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::header;
 use axum::response::Html;
 use axum::routing::{delete, get, patch, post};
-use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
 
 use super::handlers::{self, AppState};
 use crate::agents::types::{
-    BlockRef, ChatResponse, Citation, CoordinatorOutput, GraphSnapshot, KnowledgeRef,
-    RiskFinding, RiskSeverity, RiskTier, RoutingSummary, SuggestedAgent, TextSelection,
+    BlockRef, ChatResponse, Citation, CoordinatorOutput, GraphSnapshot, KnowledgeRef, RiskFinding,
+    RiskSeverity, RiskTier, RoutingSummary, SuggestedAgent, TextSelection,
 };
 
 // ─── OpenAPI 文档 ──────────────────────────────────────────────────────
@@ -120,7 +120,11 @@ const SWAGGER_UI_HTML: &str = r##"<!DOCTYPE html>
 </html>"##;
 
 /// GET /api-docs/openapi.json — 返回 OpenAPI 3.0 JSON 规格。
-async fn openapi_json() -> (axum::http::StatusCode, [(header::HeaderName, &'static str); 1], String) {
+async fn openapi_json() -> (
+    axum::http::StatusCode,
+    [(header::HeaderName, &'static str); 1],
+    String,
+) {
     let spec = ApiDoc::openapi();
     let json = serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string());
     (
@@ -156,17 +160,35 @@ pub fn build(state: AppState) -> Router {
         .route("/documents/:id/search", post(handlers::search_document))
         .route("/documents/:id/blocks", get(handlers::get_block_bboxes))
         // SSE 实时推送 + 异步审查结果
-        .route("/review/:doc_id/stream", get(handlers::stream_review_events))
+        .route(
+            "/review/:doc_id/stream",
+            get(handlers::stream_review_events),
+        )
         .route("/review/:doc_id/result", get(handlers::get_review_result))
         // Metrics API
         .route("/metrics/runs", get(handlers::list_metric_runs))
         .route("/metrics/runs/:run_id", get(handlers::get_metric_run))
         .route("/metrics/runs/:run_id", delete(handlers::delete_metric_run))
-        .route("/metrics/runs/:run_id/tags", patch(handlers::update_metric_tags))
-        .route("/metrics/runs/:run_id/title", patch(handlers::update_metric_title))
-        .route("/metrics/runs/:run_id/notes", patch(handlers::update_metric_notes))
-        .route("/metrics/runs/:run_id/experiment-group", patch(handlers::move_metric_experiment_group))
-        .route("/metrics/experiment-groups", get(handlers::list_metric_experiment_groups));
+        .route(
+            "/metrics/runs/:run_id/tags",
+            patch(handlers::update_metric_tags),
+        )
+        .route(
+            "/metrics/runs/:run_id/title",
+            patch(handlers::update_metric_title),
+        )
+        .route(
+            "/metrics/runs/:run_id/notes",
+            patch(handlers::update_metric_notes),
+        )
+        .route(
+            "/metrics/runs/:run_id/experiment-group",
+            patch(handlers::move_metric_experiment_group),
+        )
+        .route(
+            "/metrics/experiment-groups",
+            get(handlers::list_metric_experiment_groups),
+        );
 
     Router::new()
         .route("/health", get(handlers::health))

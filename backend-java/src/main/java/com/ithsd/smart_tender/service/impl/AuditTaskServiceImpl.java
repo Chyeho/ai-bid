@@ -196,6 +196,8 @@ public class AuditTaskServiceImpl implements AuditTaskService {
                 f.setRiskId(i.getIssueNo());
                 f.setRiskType(i.getCategory());
                 f.setSeverity(i.getSeverity());
+                f.setCritical(Boolean.TRUE.equals(i.getIsCritical()));
+                f.setCriticalReason(i.getCriticalReason());
                 f.setReason(i.getDescription());
                 f.setSuggestion(i.getSuggestion());
                 f.setPageNumber(i.getPageNumber());
@@ -364,7 +366,28 @@ public class AuditTaskServiceImpl implements AuditTaskService {
         if (task == null) {
             throw new BizException(404, "任务不存在");
         }
+        // 验证资源归属：只有任务创建者或标书上传者才能访问
+        Long currentUserId = BaseContext.getCurrentId();
+        if (currentUserId != null && !isTaskOwner(task, currentUserId)) {
+            throw new BizException(403, "无权访问该任务");
+        }
         return task;
+    }
+
+    /**
+     * 判断当前用户是否为任务所有者（任务创建者 或 关联标书的上传者）。
+     */
+    private boolean isTaskOwner(AuditTask task, Long userId) {
+        if (userId.equals(task.getAuditUserId())) {
+            return true;
+        }
+        if (task.getBidId() != null) {
+            Tender tender = tenderMapper.selectById(task.getBidId());
+            if (tender != null && userId.equals(tender.getUploadUserId())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String buildTaskId() {
@@ -382,6 +405,8 @@ public class AuditTaskServiceImpl implements AuditTaskService {
         vo.setIssueNo("ISSUE-" + (f.getRiskId() != null ? f.getRiskId() : "?"));
         vo.setRiskId(f.getRiskId());
         vo.setSeverity(f.mappedSeverity());
+        vo.setIsCritical(f.isCritical());
+        vo.setCriticalReason(f.getCriticalReason());
         vo.setCategory(f.getRiskType());
         vo.setAgentName(f.getAgent());
         vo.setDescription(f.getReason() != null ? f.getReason() : f.getRiskType());
@@ -451,8 +476,11 @@ public class AuditTaskServiceImpl implements AuditTaskService {
      */
     private SummaryVO buildSummary(List<RustRiskFinding> findings) {
         SummaryVO s = new SummaryVO();
-        int high = 0, medium = 0, low = 0, info = 0;
+        int critical = 0, high = 0, medium = 0, low = 0, info = 0;
         for (RustRiskFinding f : findings) {
+            if (f.isCritical()) {
+                critical++;
+            }
             String sev = f.mappedSeverity();
             switch (sev) {
                 case "high" -> high++;
@@ -462,6 +490,7 @@ public class AuditTaskServiceImpl implements AuditTaskService {
             }
         }
         s.setTotalIssues(findings.size());
+        s.setCritical(critical);
         s.setHigh(high);
         s.setMedium(medium);
         s.setLow(low);

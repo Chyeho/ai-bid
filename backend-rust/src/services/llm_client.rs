@@ -1,4 +1,4 @@
-﻿//! LLM 客户端抽象 — 多协议支持（DashScope 原生 + OpenAI 兼容）。
+//! LLM 客户端抽象 — 多协议支持（DashScope 原生 + OpenAI 兼容）。
 //!
 //! ## 协议选择
 //!
@@ -16,7 +16,9 @@
 //! 当前固定从环境变量获取。未来产品侧支持扫码/列表选择模型后，
 //! 工厂函数将改为接受 `&ModelConfig` 参数。
 
-use crate::agents::react_loop::{ChatMessage, LlmClient, LlmResponse, TokenUsage, ToolCall, ToolChoice};
+use crate::agents::react_loop::{
+    ChatMessage, LlmClient, LlmResponse, TokenUsage, ToolCall, ToolChoice,
+};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
@@ -49,7 +51,11 @@ fn parse_usage(body: &Value) -> Option<TokenUsage> {
             .get("total_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or((input + output) as u64) as u32;
-        return Some(TokenUsage { input_tokens: input, output_tokens: output, total_tokens: total });
+        return Some(TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: total,
+        });
     }
     None
 }
@@ -62,8 +68,7 @@ fn parse_usage(body: &Value) -> Option<TokenUsage> {
 /// * `dashscope` — DashScope 原生 API（默认）
 /// * `openai_compatible` — OpenAI 兼容端点
 pub fn create_llm_client() -> Result<Box<dyn LlmClient>> {
-    let protocol =
-        std::env::var("AIBID_LLM_PROTOCOL").unwrap_or_else(|_| "dashscope".to_string());
+    let protocol = std::env::var("AIBID_LLM_PROTOCOL").unwrap_or_else(|_| "dashscope".to_string());
 
     match protocol.as_str() {
         "dashscope" => Ok(Box::new(DashScopeNativeClient::from_env()?)),
@@ -122,11 +127,8 @@ impl DashScopeNativeClient {
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("DASHSCOPE_API_KEY")
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .context(
-                "DashScope 原生 API 需要密钥。请设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY",
-            )?;
-        let model = std::env::var("DASHSCOPE_MODEL")
-            .unwrap_or_else(|_| "qwen-plus".to_string());
+            .context("DashScope 原生 API 需要密钥。请设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY")?;
+        let model = std::env::var("DASHSCOPE_MODEL").unwrap_or_else(|_| "qwen-plus".to_string());
         Ok(Self::new(&api_key, &model))
     }
 
@@ -141,7 +143,10 @@ impl DashScopeNativeClient {
             ChatMessage::User { content } => {
                 serde_json::json!({"role": "user", "content": content})
             }
-            ChatMessage::Assistant { content, tool_calls } => {
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+            } => {
                 let mut obj = serde_json::json!({"role": "assistant"});
                 if let Some(c) = content {
                     obj["content"] = Value::String(c.clone());
@@ -214,17 +219,17 @@ impl DashScopeNativeClient {
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|tc| {
+                    .map(|tc| {
                         let func = &tc["function"];
                         let args: Value = func["arguments"]
                             .as_str()
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or(Value::Null);
-                        Some(ToolCall {
+                        ToolCall {
                             id: tc["id"].as_str().unwrap_or("unknown").to_string(),
                             name: func["name"].as_str().unwrap_or("").to_string(),
                             arguments: args,
-                        })
+                        }
                     })
                     .collect()
             })
@@ -259,10 +264,7 @@ impl LlmClient for DashScopeNativeClient {
         tool_choice: &ToolChoice,
     ) -> Result<LlmResponse> {
         // 转换消息
-        let msg_array: Vec<Value> = messages
-            .iter()
-            .map(Self::message_to_json)
-            .collect();
+        let msg_array: Vec<Value> = messages.iter().map(Self::message_to_json).collect();
 
         // 转换工具定义
         let tool_array: Vec<Value> = tools
@@ -320,10 +322,7 @@ impl LlmClient for DashScopeNativeClient {
             ));
         }
 
-        let body: Value = response
-            .json()
-            .await
-            .context("解析 DashScope 响应失败")?;
+        let body: Value = response.json().await.context("解析 DashScope 响应失败")?;
         Self::parse_response(&body)
     }
 }
@@ -364,12 +363,10 @@ impl OpenAICompatibleClient {
 
     /// 使用环境变量创建（业务模型）。
     pub fn from_env() -> Result<Self> {
-        let api_key =
-            std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY 环境变量未设置")?;
+        let api_key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY 环境变量未设置")?;
         let api_base = std::env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-        let model =
-            std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
+        let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
         Ok(Self::new(&api_base, &api_key, &model))
     }
 
@@ -381,7 +378,10 @@ impl OpenAICompatibleClient {
             ChatMessage::User { content } => {
                 serde_json::json!({"role": "user", "content": content})
             }
-            ChatMessage::Assistant { content, tool_calls } => {
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+            } => {
                 let mut obj = serde_json::json!({"role": "assistant"});
                 if let Some(c) = content {
                     obj["content"] = Value::String(c.clone());
@@ -443,17 +443,17 @@ impl OpenAICompatibleClient {
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|tc| {
+                    .map(|tc| {
                         let func = &tc["function"];
                         let args: Value = func["arguments"]
                             .as_str()
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or(Value::Null);
-                        Some(ToolCall {
+                        ToolCall {
                             id: tc["id"].as_str().unwrap_or("unknown").to_string(),
                             name: func["name"].as_str().unwrap_or("").to_string(),
                             arguments: args,
-                        })
+                        }
                     })
                     .collect()
             })
@@ -487,10 +487,7 @@ impl LlmClient for OpenAICompatibleClient {
         tools: &[Value],
         tool_choice: &ToolChoice,
     ) -> Result<LlmResponse> {
-        let msg_array: Vec<Value> = messages
-            .iter()
-            .map(Self::message_to_json)
-            .collect();
+        let msg_array: Vec<Value> = messages.iter().map(Self::message_to_json).collect();
 
         let tool_array: Vec<Value> = tools
             .iter()

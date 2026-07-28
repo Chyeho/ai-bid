@@ -229,26 +229,14 @@ mod tests {
         let bus = AgentBus::new(32);
 
         // 先发一条消息
-        bus.broadcast(
-            AgentId::FactCheck,
-            RiskSeverity::High,
-            "旧消息",
-            &[],
-            "old",
-        );
+        bus.broadcast(AgentId::FactCheck, RiskSeverity::High, "旧消息", &[], "old");
 
         // 之后订阅的 Receiver 不应收到之前已广播的消息
         let mut late_rx = bus.subscribe();
         // tokio::broadcast 不保证能收到订阅前的消息，但应能收到订阅后的
         // 这个测试主要验证 subscribe() 不 panic
         // 旧消息可能丢失（broadcast 的语义），新消息应能收到
-        bus.broadcast(
-            AgentId::FactCheck,
-            RiskSeverity::High,
-            "新消息",
-            &[],
-            "new",
-        );
+        bus.broadcast(AgentId::FactCheck, RiskSeverity::High, "新消息", &[], "new");
         let msg = late_rx.try_recv().expect("应收到订阅后的消息");
         assert_eq!(msg.summary, "新消息");
     }

@@ -1,6 +1,7 @@
 package com.ithsd.smart_tender.model.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.AllArgsConstructor;
@@ -25,6 +26,12 @@ public class AuditIssue implements Serializable {
     private String issueNo;
 
     private String severity;
+
+    @TableField("is_critical")
+    private Boolean isCritical;
+
+    @TableField("critical_reason")
+    private String criticalReason;
 
     private String category;
 

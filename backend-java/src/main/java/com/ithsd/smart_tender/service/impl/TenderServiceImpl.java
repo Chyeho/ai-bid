@@ -71,7 +71,7 @@ public class TenderServiceImpl implements TenderService {
         // 统计时不能根据 status 过滤，否则只能统计到单一状态的数量
 
         // 加上当前用户的限制
-        // wrapper.eq("upload_user_id", BaseContext.getCurrentId()); 
+        wrapper.eq("upload_user_id", BaseContext.getCurrentId());
 
         wrapper.groupBy("parse_status");
 
@@ -273,6 +273,11 @@ public class TenderServiceImpl implements TenderService {
     public TenderVO getById(Long id) {
         Tender tender = tenderMapper.selectById(id);
         if (tender == null) return null;
+        // 验证资源归属：只有标书上传者才能查看详情
+        Long currentUserId = BaseContext.getCurrentId();
+        if (currentUserId != null && !currentUserId.equals(tender.getUploadUserId())) {
+            throw new BizException(403, "无权访问该标书");
+        }
         TenderVO vo = new TenderVO();
         BeanUtils.copyProperties(tender, vo);
         vo.setParseStatus(resolveParseStatusFromLatestTask(tender.getId()));
@@ -285,6 +290,17 @@ public class TenderServiceImpl implements TenderService {
 
     @Override
     public List<TenderVO> getVersionsByProjectId(Long projectId) {
+        // 验证项目归属：只有项目所有者才能查看版本列表
+        Long currentUserId = BaseContext.getCurrentId();
+        if (currentUserId != null) {
+            Project project = projectMapper.selectById(projectId);
+            if (project == null) {
+                throw new BizException(404, "项目不存在");
+            }
+            if (!currentUserId.equals(project.getUserId())) {
+                throw new BizException(403, "无权访问该项目");
+            }
+        }
         LambdaQueryWrapper<Tender> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(Tender::getProjectId, projectId)
                 .orderByDesc(Tender::getVersion); // 按版本号倒序排列
@@ -428,15 +444,21 @@ public class TenderServiceImpl implements TenderService {
     @Override
     public void delete(Long id) {
         Tender tender = tenderMapper.selectById(id);
-        if (tender != null) {
-            // 如果存在，删除文件
-            Path stored = storagePathService.resolveStoredPath(tender.getFilePath());
-            File file = stored.toFile();
-            if (file.exists()) {
-                file.delete();
-            }
-            tenderMapper.deleteById(id);
+        if (tender == null) {
+            return; // 资源不存在，静默返回，避免信息泄露
         }
+        // 验证资源归属：只有标书上传者才能删除
+        Long currentUserId = BaseContext.getCurrentId();
+        if (currentUserId != null && !currentUserId.equals(tender.getUploadUserId())) {
+            throw new BizException(403, "无权删除该标书");
+        }
+        // 如果存在，删除文件
+        Path stored = storagePathService.resolveStoredPath(tender.getFilePath());
+        File file = stored.toFile();
+        if (file.exists()) {
+            file.delete();
+        }
+        tenderMapper.deleteById(id);
     }
 
     @Override

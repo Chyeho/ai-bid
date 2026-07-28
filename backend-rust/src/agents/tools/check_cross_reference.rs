@@ -78,11 +78,11 @@ pub struct CheckCrossReferenceTool {
 }
 
 impl CheckCrossReferenceTool {
-    pub fn new(
-        chunks: Arc<HashMap<String, Chunk>>,
-        chunk_order: Arc<Vec<String>>,
-    ) -> Self {
-        Self { chunks, chunk_order }
+    pub fn new(chunks: Arc<HashMap<String, Chunk>>, chunk_order: Arc<Vec<String>>) -> Self {
+        Self {
+            chunks,
+            chunk_order,
+        }
     }
 
     /// 从引用表达式中提取搜索关键词。
@@ -96,7 +96,12 @@ impl CheckCrossReferenceTool {
         let ref_type = if let Some(h) = hint {
             h.to_string()
         } else if expr.contains("附件") || expr.contains("附录") {
-            if expr.contains("附件") { "attachment" } else { "appendix" }.to_string()
+            if expr.contains("附件") {
+                "attachment"
+            } else {
+                "appendix"
+            }
+            .to_string()
         } else if expr.contains("章") || expr.contains("节") || expr.contains("条") {
             "section".to_string()
         } else if expr.contains("表") || expr.contains("图") {
@@ -114,8 +119,16 @@ impl CheckCrossReferenceTool {
         if !has_num.is_empty() {
             // 中文数字转阿拉伯数字
             let cn_nums = [
-                ("一", "1"), ("二", "2"), ("三", "3"), ("四", "4"), ("五", "5"),
-                ("六", "6"), ("七", "7"), ("八", "8"), ("九", "9"), ("十", "10"),
+                ("一", "1"),
+                ("二", "2"),
+                ("三", "3"),
+                ("四", "4"),
+                ("五", "5"),
+                ("六", "6"),
+                ("七", "7"),
+                ("八", "8"),
+                ("九", "9"),
+                ("十", "10"),
             ];
             let mut variant = expr.to_string();
             for (cn, ar) in &cn_nums {
@@ -130,7 +143,12 @@ impl CheckCrossReferenceTool {
     }
 
     /// 在所有 chunk 中搜索引用目标。
-    fn search_targets(&self, _expr: &str, ref_type: &str, keywords: &[String]) -> Vec<CandidateRef> {
+    fn search_targets(
+        &self,
+        _expr: &str,
+        ref_type: &str,
+        keywords: &[String],
+    ) -> Vec<CandidateRef> {
         let mut candidates = Vec::new();
 
         // 扩展搜索词：除了原有关键词，还尝试提取数字子模式（如"附件三"、"第三章"等）
@@ -205,9 +223,7 @@ impl CheckCrossReferenceTool {
         }
 
         // 按匹配分数排序（CandidateRef 没有 score 字段，用 match_reason 的长度作为启发式）
-        candidates.sort_by(|a, b| {
-            b.match_reason.len().cmp(&a.match_reason.len())
-        });
+        candidates.sort_by(|a, b| b.match_reason.len().cmp(&a.match_reason.len()));
 
         candidates
     }
@@ -258,42 +274,61 @@ impl AgentTool for CheckCrossReferenceTool {
         let parsed: CheckCrossReferenceArgs = serde_json::from_value(args)?;
 
         // 1. 解析引用表达式
-        let (ref_type, keywords) =
-            Self::parse_reference(&parsed.reference_expression, parsed.reference_type.as_deref());
+        let (ref_type, keywords) = Self::parse_reference(
+            &parsed.reference_expression,
+            parsed.reference_type.as_deref(),
+        );
 
         // 2. 搜索候选目标
-        let candidates = self.search_targets(
-            &parsed.reference_expression,
-            &ref_type,
-            &keywords,
-        );
+        let candidates = self.search_targets(&parsed.reference_expression, &ref_type, &keywords);
 
         // 3. 判定状态
         let (status, target_chunk, target_section, mismatch_detail) = if candidates.is_empty() {
-            (RefStatus::Dangling, None, None, Some(format!(
-                "未找到引用目标 '{}'。文档中不存在匹配的{}。",
-                parsed.reference_expression, ref_type_name(&ref_type)
-            )))
+            (
+                RefStatus::Dangling,
+                None,
+                None,
+                Some(format!(
+                    "未找到引用目标 '{}'。文档中不存在匹配的{}。",
+                    parsed.reference_expression,
+                    ref_type_name(&ref_type)
+                )),
+            )
         } else if candidates.len() == 1 {
             // 唯一候选 → valid，但还需检查 source_chunk 是否存在
             if !self.chunks.contains_key(&parsed.source_chunk) {
-                (RefStatus::Dangling, None, None, Some(format!(
-                    "源 chunk '{}' 不存在", parsed.source_chunk
-                )))
+                (
+                    RefStatus::Dangling,
+                    None,
+                    None,
+                    Some(format!("源 chunk '{}' 不存在", parsed.source_chunk)),
+                )
             } else {
                 let c = &candidates[0];
-                (RefStatus::Valid, Some(c.chunk_id.clone()), Some(c.section_path.clone()), None)
+                (
+                    RefStatus::Valid,
+                    Some(c.chunk_id.clone()),
+                    Some(c.section_path.clone()),
+                    None,
+                )
             }
         } else {
             // 多个候选 → ambiguous，返回所有候选让 LLM 判断
-            let summary = candidates.iter()
+            let summary = candidates
+                .iter()
                 .map(|c| format!("{}({})", c.chunk_id, c.section_path.join(" > ")))
                 .collect::<Vec<_>>()
                 .join(", ");
-            (RefStatus::Ambiguous, None, None, Some(format!(
-                "找到 {} 个可能的目标: {}。请用 read_section 确认。",
-                candidates.len(), summary
-            )))
+            (
+                RefStatus::Ambiguous,
+                None,
+                None,
+                Some(format!(
+                    "找到 {} 个可能的目标: {}。请用 read_section 确认。",
+                    candidates.len(),
+                    summary
+                )),
+            )
         };
 
         let result = CrossReferenceResult {
@@ -344,15 +379,45 @@ mod tests {
     fn make_tool() -> CheckCrossReferenceTool {
         let mut chunks_map = HashMap::new();
         let chunk_order = vec![
-            "ch_001".to_string(), "ch_002".to_string(), "ch_003".to_string(),
-            "ch_010".to_string(), "ch_020".to_string(),
+            "ch_001".to_string(),
+            "ch_002".to_string(),
+            "ch_003".to_string(),
+            "ch_010".to_string(),
+            "ch_020".to_string(),
         ];
 
-        chunks_map.insert("ch_001".to_string(), make_chunk("ch_001", &["第一章", "总则"], "第一条 本招标文件适用于..."));
-        chunks_map.insert("ch_002".to_string(), make_chunk("ch_002", &["第二章", "投标人须知"], "详见附件三 资格证明文件"));
-        chunks_map.insert("ch_003".to_string(), make_chunk("ch_003", &["第三章", "评标办法"], "按第三章第二节执行"));
-        chunks_map.insert("ch_010".to_string(), make_chunk("ch_010", &["附件三", "资格证明"], "附件三：资格证明文件清单..."));
-        chunks_map.insert("ch_020".to_string(), make_chunk("ch_020", &["第三章", "第二节", "评分标准"], "第二节 评分标准细则..."));
+        chunks_map.insert(
+            "ch_001".to_string(),
+            make_chunk("ch_001", &["第一章", "总则"], "第一条 本招标文件适用于..."),
+        );
+        chunks_map.insert(
+            "ch_002".to_string(),
+            make_chunk(
+                "ch_002",
+                &["第二章", "投标人须知"],
+                "详见附件三 资格证明文件",
+            ),
+        );
+        chunks_map.insert(
+            "ch_003".to_string(),
+            make_chunk("ch_003", &["第三章", "评标办法"], "按第三章第二节执行"),
+        );
+        chunks_map.insert(
+            "ch_010".to_string(),
+            make_chunk(
+                "ch_010",
+                &["附件三", "资格证明"],
+                "附件三：资格证明文件清单...",
+            ),
+        );
+        chunks_map.insert(
+            "ch_020".to_string(),
+            make_chunk(
+                "ch_020",
+                &["第三章", "第二节", "评分标准"],
+                "第二节 评分标准细则...",
+            ),
+        );
 
         CheckCrossReferenceTool {
             chunks: Arc::new(chunks_map),
@@ -387,7 +452,8 @@ mod tests {
     #[test]
     fn test_search_targets_section_found() {
         let tool = make_tool();
-        let (ref_type, keywords) = CheckCrossReferenceTool::parse_reference("第三章第二节", Some("section"));
+        let (ref_type, keywords) =
+            CheckCrossReferenceTool::parse_reference("第三章第二节", Some("section"));
         let candidates = tool.search_targets("第三章第二节", &ref_type, &keywords);
         assert!(!candidates.is_empty());
         assert!(candidates.iter().any(|c| c.chunk_id == "ch_020"));
@@ -396,7 +462,8 @@ mod tests {
     #[test]
     fn test_search_targets_dangling() {
         let tool = make_tool();
-        let candidates = tool.search_targets("附件五 供应商声明", "attachment", &["附件五".to_string()]);
+        let candidates =
+            tool.search_targets("附件五 供应商声明", "attachment", &["附件五".to_string()]);
         assert!(candidates.is_empty());
     }
 }

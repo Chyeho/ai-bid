@@ -787,7 +787,7 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
                                  issue.severity === 'low' ? 'warning' : 'processing'
                               }
                            >
-                              {SEVERITY_MAP[issue.severity]}
+                              {issue.isCritical ? '重大问题' : SEVERITY_MAP[issue.severity]}
                            </Tag>
                         </Space>
                      </div>

@@ -20,12 +20,10 @@ use crate::agents::types::AgentId;
 pub use crate::agents::prompts::PROCEDURE_SYSTEM_PROMPT;
 
 /// 创建 ProcedureAgent 的 ReActLoop 实例。
-pub fn create_procedure_agent(
-    llm: Box<dyn LlmClient>,
-    tools: ToolRegistry,
-) -> ReActLoop {
+pub fn create_procedure_agent(llm: Box<dyn LlmClient>, tools: ToolRegistry) -> ReActLoop {
     let registry = AgentRegistry::builtin();
-    let def = registry.get(AgentId::Procedure)
+    let def = registry
+        .get(AgentId::Procedure)
         .expect("ProcedureAgent 定义必须存在于 AgentRegistry");
     let config = def.to_agent_config();
     ReActLoop::new(config, llm, tools)

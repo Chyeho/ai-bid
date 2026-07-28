@@ -152,10 +152,13 @@ impl SessionGraph {
     /// 添加 linked_to 边（条款间关联）。
     pub fn add_linked_to(&self, from: &str, to: &str, reason: &str) {
         if let Ok(mut edges) = self.linked_to.write() {
-            edges.entry(from.to_string()).or_default().push(LinkedChunk {
-                chunk_id: to.to_string(),
-                reason: reason.to_string(),
-            });
+            edges
+                .entry(from.to_string())
+                .or_default()
+                .push(LinkedChunk {
+                    chunk_id: to.to_string(),
+                    reason: reason.to_string(),
+                });
         }
     }
 
@@ -353,7 +356,10 @@ impl SessionGraph {
 
         // 2. has_risk 边
         if let Ok(mut edges) = self.has_risk.write() {
-            edges.entry(chunk_id.to_string()).or_default().push(risk_id.clone());
+            edges
+                .entry(chunk_id.to_string())
+                .or_default()
+                .push(risk_id.clone());
         }
 
         // 3. cites 边（仅单向，不建 cited_by 反向索引，不触发 same_law）
@@ -364,11 +370,15 @@ impl SessionGraph {
 
     /// 查询所有 Hypothesis（BlindSpot 用）。
     pub fn get_hypotheses(&self) -> Vec<RiskFinding> {
-        self.risks.read().ok()
-            .map(|m| m.values()
-                .filter(|r| r.finding.finding_role == FindingRole::Hypothesis)
-                .map(|r| r.finding.clone())
-                .collect())
+        self.risks
+            .read()
+            .ok()
+            .map(|m| {
+                m.values()
+                    .filter(|r| r.finding.finding_role == FindingRole::Hypothesis)
+                    .map(|r| r.finding.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -448,9 +458,11 @@ impl SessionGraph {
         // 通过 cited_by 反向索引查找引用相同法条的其他 chunk
         let same_law_chunks: Vec<String> = {
             let mut result = Vec::new();
-            if let (Ok(cited_by), Ok(_has_risk), Ok(risks_map)) =
-                (self.cited_by.read(), self.has_risk.read(), self.risks.read())
-            {
+            if let (Ok(cited_by), Ok(_has_risk), Ok(risks_map)) = (
+                self.cited_by.read(),
+                self.has_risk.read(),
+                self.risks.read(),
+            ) {
                 // 获取当前条款的所有风险的法条引用
                 let mut all_law_refs: Vec<String> = Vec::new();
                 for rid in &risk_ids {
@@ -506,16 +518,17 @@ impl SessionGraph {
     /// 查询引用同一法条的所有 chunk_id（通过 cited_by 反向索引 O(1) 查询）。
     pub fn query_same_law_chunks(&self, law_ref: &str) -> Vec<String> {
         let mut result = Vec::new();
-        if let (Ok(cited_by), Ok(_has_risk), Ok(risks_map)) =
-            (self.cited_by.read(), self.has_risk.read(), self.risks.read())
+        if let (Ok(cited_by), Ok(_has_risk), Ok(risks_map)) = (
+            self.cited_by.read(),
+            self.has_risk.read(),
+            self.risks.read(),
+        ) && let Some(risk_ids) = cited_by.get(law_ref)
         {
-            if let Some(risk_ids) = cited_by.get(law_ref) {
-                for rid in risk_ids {
-                    if let Some(rn) = risks_map.get(rid) {
-                        for cid in &rn.finding.clause_ids {
-                            if !result.contains(cid) {
-                                result.push(cid.clone());
-                            }
+            for rid in risk_ids {
+                if let Some(rn) = risks_map.get(rid) {
+                    for cid in &rn.finding.clause_ids {
+                        if !result.contains(cid) {
+                            result.push(cid.clone());
                         }
                     }
                 }
@@ -529,18 +542,73 @@ impl SessionGraph {
     /// 在所有 Agent 完成后串行调用，此时图已静止。
     pub fn snapshot(&self) -> GraphSnapshot {
         GraphSnapshot {
-            chunks: self.chunks.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            risks: self.risks.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            has_risk: self.has_risk.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            reviewed_by: self.reviewed_by.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            linked_to: self.linked_to.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            cites: self.cites.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            cited_by: self.cited_by.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            agents: self.agents.read().ok().map(|g| g.clone()).unwrap_or_default(),
+            chunks: self
+                .chunks
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            risks: self
+                .risks
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            has_risk: self
+                .has_risk
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            reviewed_by: self
+                .reviewed_by
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            linked_to: self
+                .linked_to
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            cites: self
+                .cites
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            cited_by: self
+                .cited_by
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            agents: self
+                .agents
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
             laws: self.laws.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            cases: self.cases.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            contradicts: self.contradicts.read().ok().map(|g| g.clone()).unwrap_or_default(),
-            same_law: self.same_law.read().ok().map(|g| g.clone()).unwrap_or_default(),
+            cases: self
+                .cases
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            contradicts: self
+                .contradicts
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            same_law: self
+                .same_law
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -585,7 +653,10 @@ mod tests {
                 agent: "TestAgent".to_string(),
                 no_risk: false,
                 severity: RiskSeverity::High,
+                is_critical: false,
+                critical_reason: String::new(),
                 risk_type: "测试风险".to_string(),
+                category_code: "TEST_RISK".to_string(),
                 source_quote: "测试原文".to_string(),
                 legal_basis: vec!["《测试法》第1条".to_string()],
                 case_refs: Vec::new(),
@@ -775,10 +846,16 @@ mod tests {
         assert_eq!(snap.risks.len(), 1);
         // 新增字段均应存在（至少一个为空或 1）
         assert!(!snap.agents.is_empty(), "snapshot 应包含 agents");
-        assert!(!snap.laws.is_empty(), "snapshot 应包含 laws（legal_basis 自动写入）");
+        assert!(
+            !snap.laws.is_empty(),
+            "snapshot 应包含 laws（legal_basis 自动写入）"
+        );
         assert!(snap.cases.is_empty(), "snapshot cases 应为空（未写入）");
         assert!(!snap.contradicts.is_empty(), "snapshot 应包含 contradicts");
-        assert!(snap.same_law.is_empty(), "snapshot 应包含 same_law 字段（可能为空）");
+        assert!(
+            snap.same_law.is_empty(),
+            "snapshot 应包含 same_law 字段（可能为空）"
+        );
     }
 
     // ── ClauseContext 包含 contradictions ─────────────────────

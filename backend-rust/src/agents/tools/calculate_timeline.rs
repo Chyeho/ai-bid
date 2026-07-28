@@ -16,7 +16,7 @@
 //! | 中标后签合同 | ≤ 30 日历日 | 《政府采购法》第46条 |
 //! | 质疑答复期 | ≤ 7 工作日 | 《政府采购法》第53条 |
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -143,13 +143,10 @@ impl CalculateTimelineTool {
     }
 
     /// 计算两个日期之间的日历日差。
-    fn calendar_days_between(
-        from: (i32, u32, u32),
-        to: (i32, u32, u32),
-    ) -> i64 {
+    fn calendar_days_between(from: (i32, u32, u32), to: (i32, u32, u32)) -> i64 {
         let from_jd = date_to_julian(from);
         let to_jd = date_to_julian(to);
-        (to_jd - from_jd) as i64
+        to_jd - from_jd
     }
 
     /// 检测日期逻辑矛盾。
@@ -160,10 +157,8 @@ impl CalculateTimelineTool {
         let mut contradictions = Vec::new();
 
         // 按时间排序事件
-        let mut sorted: Vec<(&String, (i32, u32, u32))> = events
-            .iter()
-            .map(|(k, v)| (k, *v))
-            .collect();
+        let mut sorted: Vec<(&String, (i32, u32, u32))> =
+            events.iter().map(|(k, v)| (k, *v)).collect();
         sorted.sort_by(|a, b| {
             let a_jd = date_to_julian(a.1);
             let b_jd = date_to_julian(b.1);
@@ -172,66 +167,63 @@ impl CalculateTimelineTool {
 
         // 检查典型矛盾模式
         for ev in event_list {
-            if let Some(et) = &ev.event_type {
-                if let Some(&date) = events.get(&ev.label) {
-                    // 开标日期应在投标截止之后
-                    if et == "bid_opening" {
-                        for other_ev in event_list {
-                            if other_ev.event_type.as_deref() == Some("deadline") {
-                                if let Some(&deadline_date) = events.get(&other_ev.label) {
-                                    if date_to_julian(date) <= date_to_julian(deadline_date) {
-                                        contradictions.push(TimelineContradiction {
-                                            description: "开标日期应在投标截止之后".to_string(),
-                                            event_a: ev.label.clone(),
-                                            event_b: other_ev.label.clone(),
-                                            detail: format!(
-                                                "开标日期({}) ≤ 投标截止({})，时序矛盾",
-                                                ev.date_str, other_ev.date_str
-                                            ),
-                                        });
-                                    }
-                                }
-                            }
+            if let Some(et) = &ev.event_type
+                && let Some(&date) = events.get(&ev.label)
+            {
+                // 开标日期应在投标截止之后
+                if et == "bid_opening" {
+                    for other_ev in event_list {
+                        if other_ev.event_type.as_deref() == Some("deadline")
+                            && let Some(&deadline_date) = events.get(&other_ev.label)
+                            && date_to_julian(date) <= date_to_julian(deadline_date)
+                        {
+                            contradictions.push(TimelineContradiction {
+                                description: "开标日期应在投标截止之后".to_string(),
+                                event_a: ev.label.clone(),
+                                event_b: other_ev.label.clone(),
+                                detail: format!(
+                                    "开标日期({}) ≤ 投标截止({})，时序矛盾",
+                                    ev.date_str, other_ev.date_str
+                                ),
+                            });
                         }
                     }
-                    // 公告发布日期应在投标截止之前
-                    if et == "announcement" {
-                        for other_ev in event_list {
-                            if other_ev.event_type.as_deref() == Some("deadline") {
-                                if let Some(&deadline_date) = events.get(&other_ev.label) {
-                                    if date_to_julian(date) >= date_to_julian(deadline_date) {
-                                        contradictions.push(TimelineContradiction {
-                                            description: "公告发布日期应在投标截止之前".to_string(),
-                                            event_a: ev.label.clone(),
-                                            event_b: other_ev.label.clone(),
-                                            detail: format!(
-                                                "公告日期({}) ≥ 投标截止({})，时序矛盾",
-                                                ev.date_str, other_ev.date_str
-                                            ),
-                                        });
-                                    }
-                                }
-                            }
+                }
+                // 公告发布日期应在投标截止之前
+                if et == "announcement" {
+                    for other_ev in event_list {
+                        if other_ev.event_type.as_deref() == Some("deadline")
+                            && let Some(&deadline_date) = events.get(&other_ev.label)
+                            && date_to_julian(date) >= date_to_julian(deadline_date)
+                        {
+                            contradictions.push(TimelineContradiction {
+                                description: "公告发布日期应在投标截止之前".to_string(),
+                                event_a: ev.label.clone(),
+                                event_b: other_ev.label.clone(),
+                                detail: format!(
+                                    "公告日期({}) ≥ 投标截止({})，时序矛盾",
+                                    ev.date_str, other_ev.date_str
+                                ),
+                            });
                         }
                     }
-                    // 中标日期应在开标之后
-                    if et == "award" {
-                        for other_ev in event_list {
-                            if other_ev.event_type.as_deref() == Some("bid_opening") {
-                                if let Some(&opening_date) = events.get(&other_ev.label) {
-                                    if date_to_julian(date) < date_to_julian(opening_date) {
-                                        contradictions.push(TimelineContradiction {
-                                            description: "中标日期应在开标之后".to_string(),
-                                            event_a: ev.label.clone(),
-                                            event_b: other_ev.label.clone(),
-                                            detail: format!(
-                                                "中标日期({}) < 开标日期({})，时序矛盾",
-                                                ev.date_str, other_ev.date_str
-                                            ),
-                                        });
-                                    }
-                                }
-                            }
+                }
+                // 中标日期应在开标之后
+                if et == "award" {
+                    for other_ev in event_list {
+                        if other_ev.event_type.as_deref() == Some("bid_opening")
+                            && let Some(&opening_date) = events.get(&other_ev.label)
+                            && date_to_julian(date) < date_to_julian(opening_date)
+                        {
+                            contradictions.push(TimelineContradiction {
+                                description: "中标日期应在开标之后".to_string(),
+                                event_a: ev.label.clone(),
+                                event_b: other_ev.label.clone(),
+                                detail: format!(
+                                    "中标日期({}) < 开标日期({})，时序矛盾",
+                                    ev.date_str, other_ev.date_str
+                                ),
+                            });
                         }
                     }
                 }
@@ -263,16 +255,18 @@ impl CalculateTimelineTool {
         {
             for ann in announcements {
                 for dl in deadlines {
-                    let already_has = constraints.iter().any(|c| {
-                        c.from == ann.label && c.to == dl.label
-                    });
+                    let already_has = constraints
+                        .iter()
+                        .any(|c| c.from == ann.label && c.to == dl.label);
                     if !already_has {
                         constraints.push(TimelineConstraint {
                             from: ann.label.clone(),
                             to: dl.label.clone(),
                             min_days: Some(20),
                             max_days: None,
-                            legal_basis: Some("《政府采购法》第35条：公开招标公告期不少于20日".into()),
+                            legal_basis: Some(
+                                "《政府采购法》第35条：公开招标公告期不少于20日".into(),
+                            ),
                         });
                     }
                 }
@@ -440,41 +434,49 @@ impl AgentTool for CalculateTimelineTool {
                     };
 
                     let detail = match status {
-                        TimelineStatus::Pass => {
-                            match (c.min_days, c.max_days) {
-                                (Some(min), Some(max)) => format!(
-                                    "实际 {} 天，满足 {} ≤ {} ≤ {} 的要求",
-                                    actual_days, min, actual_days, max
-                                ),
-                                (Some(min), None) => format!(
-                                    "实际 {} 天 ≥ 法定最低 {} 天，合规。多出 {} 天",
-                                    actual_days, min, actual_days - min
-                                ),
-                                (None, Some(max)) => format!(
-                                    "实际 {} 天 ≤ 法定最高 {} 天，合规。剩余 {} 天",
-                                    actual_days, max, max - actual_days
-                                ),
-                                (None, None) => format!("实际 {} 天", actual_days),
-                            }
+                        TimelineStatus::Pass => match (c.min_days, c.max_days) {
+                            (Some(min), Some(max)) => format!(
+                                "实际 {} 天，满足 {} ≤ {} ≤ {} 的要求",
+                                actual_days, min, actual_days, max
+                            ),
+                            (Some(min), None) => format!(
+                                "实际 {} 天 ≥ 法定最低 {} 天，合规。多出 {} 天",
+                                actual_days,
+                                min,
+                                actual_days - min
+                            ),
+                            (None, Some(max)) => format!(
+                                "实际 {} 天 ≤ 法定最高 {} 天，合规。剩余 {} 天",
+                                actual_days,
+                                max,
+                                max - actual_days
+                            ),
+                            (None, None) => format!("实际 {} 天", actual_days),
+                        },
+                        TimelineStatus::Fail => match (c.min_days, c.max_days) {
+                            (Some(min), Some(_)) => format!(
+                                "实际 {} 天，不足法定最低 {} 天，差 {} 天",
+                                actual_days,
+                                min,
+                                min - actual_days
+                            ),
+                            (Some(min), None) => format!(
+                                "实际 {} 天 < 法定最低 {} 天，差 {} 天",
+                                actual_days,
+                                min,
+                                min - actual_days
+                            ),
+                            (None, Some(max)) => format!(
+                                "实际 {} 天 > 法定最高 {} 天，超出 {} 天",
+                                actual_days,
+                                max,
+                                actual_days - max
+                            ),
+                            (None, None) => format!("实际 {} 天", actual_days),
+                        },
+                        TimelineStatus::Uncertain => {
+                            format!("实际 {} 天，无明确法定约束", actual_days)
                         }
-                        TimelineStatus::Fail => {
-                            match (c.min_days, c.max_days) {
-                                (Some(min), Some(_)) => format!(
-                                    "实际 {} 天，不足法定最低 {} 天，差 {} 天",
-                                    actual_days, min, min - actual_days
-                                ),
-                                (Some(min), None) => format!(
-                                    "实际 {} 天 < 法定最低 {} 天，差 {} 天",
-                                    actual_days, min, min - actual_days
-                                ),
-                                (None, Some(max)) => format!(
-                                    "实际 {} 天 > 法定最高 {} 天，超出 {} 天",
-                                    actual_days, max, actual_days - max
-                                ),
-                                (None, None) => format!("实际 {} 天", actual_days),
-                            }
-                        }
-                        TimelineStatus::Uncertain => format!("实际 {} 天，无明确法定约束", actual_days),
                     };
 
                     checks.push(TimelineCheck {
@@ -513,13 +515,16 @@ impl AgentTool for CalculateTimelineTool {
         let contradictions = Self::detect_contradictions(&events_map, &parsed.dates);
 
         // 5. 生成摘要
-        let fail_count = checks.iter().filter(|c| matches!(c.status, TimelineStatus::Fail)).count();
-        let pass_count = checks.iter().filter(|c| matches!(c.status, TimelineStatus::Pass)).count();
+        let fail_count = checks
+            .iter()
+            .filter(|c| matches!(c.status, TimelineStatus::Fail))
+            .count();
+        let pass_count = checks
+            .iter()
+            .filter(|c| matches!(c.status, TimelineStatus::Pass))
+            .count();
         let summary = if contradictions.is_empty() && fail_count == 0 {
-            format!(
-                "✅ 时间线合规：{} 项校验全部通过，无逻辑矛盾。",
-                pass_count
-            )
+            format!("✅ 时间线合规：{} 项校验全部通过，无逻辑矛盾。", pass_count)
         } else {
             let mut parts = Vec::new();
             if fail_count > 0 {
@@ -580,19 +585,13 @@ mod tests {
 
     #[test]
     fn test_calendar_days_between() {
-        let days = CalculateTimelineTool::calendar_days_between(
-            (2025, 6, 1),
-            (2025, 6, 22),
-        );
+        let days = CalculateTimelineTool::calendar_days_between((2025, 6, 1), (2025, 6, 22));
         assert_eq!(days, 21);
     }
 
     #[test]
     fn test_calendar_days_across_months() {
-        let days = CalculateTimelineTool::calendar_days_between(
-            (2025, 5, 15),
-            (2025, 6, 15),
-        );
+        let days = CalculateTimelineTool::calendar_days_between((2025, 5, 15), (2025, 6, 15));
         assert_eq!(days, 31);
     }
 
@@ -689,6 +688,10 @@ mod tests {
         ];
         let inferred = CalculateTimelineTool::infer_constraints(&events, &[]);
         assert!(!inferred.is_empty());
-        assert!(inferred.iter().any(|c| c.from == "公告发布" && c.to == "投标截止" && c.min_days == Some(20)));
+        assert!(
+            inferred
+                .iter()
+                .any(|c| c.from == "公告发布" && c.to == "投标截止" && c.min_days == Some(20))
+        );
     }
 }

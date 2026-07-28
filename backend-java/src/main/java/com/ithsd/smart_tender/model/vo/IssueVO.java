@@ -9,6 +9,8 @@ public class IssueVO {
     private String issueNo;
     private String riskId;
     private String severity;
+    private Boolean isCritical;
+    private String criticalReason;
     private String category;
     private String agentName;
     private String description;
@@ -47,6 +49,10 @@ public class IssueVO {
     public void setRiskId(String riskId) { this.riskId = riskId; }
     public String getSeverity() { return severity; }
     public void setSeverity(String severity) { this.severity = severity; }
+    public Boolean getIsCritical() { return isCritical; }
+    public void setIsCritical(Boolean isCritical) { this.isCritical = isCritical; }
+    public String getCriticalReason() { return criticalReason; }
+    public void setCriticalReason(String criticalReason) { this.criticalReason = criticalReason; }
     public String getCategory() { return category; }
     public void setCategory(String category) { this.category = category; }
     public String getAgentName() { return agentName; }

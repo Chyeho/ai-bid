@@ -161,15 +161,21 @@ public class ReportServiceImpl implements ReportService {
         
         // 从 issues 列表计算统计（不再依赖 AuditTask 中的废弃字段）
         long issueCount = issues.size();
-        long criticalCount = issues.stream().filter(i -> "high".equals(i.getSeverity())).count();
-        long warningCount = issues.stream().filter(i -> "medium".equals(i.getSeverity())).count();
-        long infoCount = issues.stream().filter(i -> "low".equals(i.getSeverity()) || "info".equals(i.getSeverity())).count();
+        long criticalCount = issues.stream().filter(i -> Boolean.TRUE.equals(i.getIsCritical())).count();
+        long highCount = issues.stream()
+                .filter(i -> !Boolean.TRUE.equals(i.getIsCritical()) && "high".equals(i.getSeverity()))
+                .count();
+        long warningCount = issues.stream()
+                .filter(i -> "medium".equals(i.getSeverity()) || "low".equals(i.getSeverity()))
+                .count();
+        long infoCount = issues.stream().filter(i -> "info".equals(i.getSeverity())).count();
 
         md.append("## 三、问题汇总统计\n\n");
         md.append("| 统计项 | 数量 |\n");
         md.append("| --- | --- |\n");
         md.append("| 问题总数 | ").append(issueCount).append(" |\n");
-        md.append("| 严重问题数量 | ").append(criticalCount).append(" |\n");
+        md.append("| 重大/红线问题数量 | ").append(criticalCount).append(" |\n");
+        md.append("| 其他高风险问题数量 | ").append(highCount).append(" |\n");
         md.append("| 一般问题数量 | ").append(warningCount).append(" |\n");
         md.append("| 提示信息数量 | ").append(infoCount).append(" |\n");
         
@@ -189,10 +195,17 @@ public class ReportServiceImpl implements ReportService {
         } else {
             Map<String, List<AuditIssue>> groupedIssues = issues.stream()
                     .collect(Collectors.groupingBy(
-                            issue -> issue.getSeverity() != null ? issue.getSeverity() : "info"
+                            issue -> {
+                                if (Boolean.TRUE.equals(issue.getIsCritical())) return "critical";
+                                String severity = issue.getSeverity();
+                                if ("high".equals(severity)) return "high";
+                                if ("medium".equals(severity) || "low".equals(severity)) return "warning";
+                                return "info";
+                            }
                     ));
             
-            appendIssuesBySeverity(md, groupedIssues, "critical", "严重问题");
+            appendIssuesBySeverity(md, groupedIssues, "critical", "重大/红线问题");
+            appendIssuesBySeverity(md, groupedIssues, "high", "其他高风险问题");
             appendIssuesBySeverity(md, groupedIssues, "warning", "一般问题");
             appendIssuesBySeverity(md, groupedIssues, "info", "提示信息");
         }
@@ -220,6 +233,12 @@ public class ReportServiceImpl implements ReportService {
         for (AuditIssue issue : severityIssues) {
             md.append("#### ").append(index).append(". ").append(getCategoryText(issue.getCategory())).append("\n\n");
             md.append("- **问题描述：** ").append(issue.getDescription() != null ? issue.getDescription() : "").append("\n");
+
+            if (Boolean.TRUE.equals(issue.getIsCritical())
+                    && issue.getCriticalReason() != null
+                    && !issue.getCriticalReason().isEmpty()) {
+                md.append("- **重大问题依据：** ").append(issue.getCriticalReason()).append("\n");
+            }
             
             if (issue.getPageNumber() != null) {
                 md.append("- **所在位置：** 第").append(issue.getPageNumber()).append("页");
@@ -265,11 +284,16 @@ public class ReportServiceImpl implements ReportService {
             return "审核尚未完成";
         }
 
-        long criticalCount = issues.stream().filter(i -> "high".equals(i.getSeverity())).count();
-        long warningCount = issues.stream().filter(i -> "medium".equals(i.getSeverity())).count();
+        long criticalCount = issues.stream().filter(i -> Boolean.TRUE.equals(i.getIsCritical())).count();
+        long highCount = issues.stream().filter(i -> "high".equals(i.getSeverity())).count();
+        long warningCount = issues.stream()
+                .filter(i -> "medium".equals(i.getSeverity()) || "low".equals(i.getSeverity()))
+                .count();
 
         if (criticalCount > 0) {
-            return "标书存在严重问题，建议不通过或要求供应商修改后重新提交。";
+            return "标书存在重大/红线问题，建议不通过或整改后重新审核。";
+        } else if (highCount > 0) {
+            return "标书存在高风险问题，建议优先修改并由专业人员复核。";
         } else if (warningCount > 0) {
             return "标书存在一般性问题，建议供应商进行修改完善。";
         } else {

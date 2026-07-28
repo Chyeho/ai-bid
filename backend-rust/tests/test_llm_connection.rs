@@ -13,12 +13,16 @@ use ai_bid::services::llm_client::create_llm_client;
 async fn test_llm_factory() {
     dotenv::dotenv().ok();
 
-    let protocol = std::env::var("AIBID_LLM_PROTOCOL")
-        .unwrap_or_else(|_| "dashscope".to_string());
+    let protocol = std::env::var("AIBID_LLM_PROTOCOL").unwrap_or_else(|_| "dashscope".to_string());
     println!("协议: {}", protocol);
 
     let result = create_llm_client();
-    assert!(result.is_ok(), "LLM 客户端创建失败 (protocol={}): {:?}", protocol, result.err());
+    assert!(
+        result.is_ok(),
+        "LLM 客户端创建失败 (protocol={}): {:?}",
+        protocol,
+        result.err()
+    );
     println!("✅ LLM 客户端创建成功");
 }
 
@@ -38,12 +42,18 @@ async fn test_dashscope_search_info() {
     let model = std::env::var("DASHSCOPE_MODEL").unwrap_or_else(|_| "qwen-plus".to_string());
 
     let key_preview = if api_key.len() > 12 {
-        format!("{}...{}", &api_key[..8], &api_key[api_key.len().saturating_sub(4)..])
+        format!(
+            "{}...{}",
+            &api_key[..8],
+            &api_key[api_key.len().saturating_sub(4)..]
+        )
     } else {
         "***".to_string()
     };
     println!("=== DashScope 原生联网搜索测试 ===");
-    println!("端点: https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation");
+    println!(
+        "端点: https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    );
     println!("模型: {}", model);
     println!("Key:  {}", key_preview);
     println!();
@@ -87,7 +97,11 @@ async fn test_dashscope_search_info() {
         .await
         .expect("HTTP request failed");
 
-    assert!(response.status().is_success(), "API returned error: {}", response.status());
+    assert!(
+        response.status().is_success(),
+        "API returned error: {}",
+        response.status()
+    );
 
     // 读取完整 SSE 文本
     let sse_text = response.text().await.expect("读取 SSE 流失败");
@@ -108,13 +122,14 @@ async fn test_dashscope_search_info() {
             }
             if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
                 // 第一个 chunk 检查 search_info
-                if search_info_found.is_none() {
-                    if let Some(si) = chunk["output"]["search_info"].as_object() {
-                        search_info_found = Some(serde_json::json!(si));
-                    }
+                if search_info_found.is_none()
+                    && let Some(si) = chunk["output"]["search_info"].as_object()
+                {
+                    search_info_found = Some(serde_json::json!(si));
                 }
                 // 收集正文
-                if let Some(content) = chunk["output"]["choices"][0]["message"]["content"].as_str() {
+                if let Some(content) = chunk["output"]["choices"][0]["message"]["content"].as_str()
+                {
                     full_content.push_str(content);
                 }
             }
@@ -125,7 +140,8 @@ async fn test_dashscope_search_info() {
     if let Some(ref si) = search_info_found {
         println!("✅ 找到 search_info！");
         println!();
-        let results = si["search_results"].as_array()
+        let results = si["search_results"]
+            .as_array()
             .map(|a| a.len())
             .unwrap_or(0);
         println!("搜索到 {} 条结果：", results);
@@ -160,7 +176,10 @@ async fn test_dashscope_search_info() {
     println!("{}", preview);
     println!();
 
-    assert!(search_info_found.is_some(), "DashScope 原生 API 应返回 search_info");
+    assert!(
+        search_info_found.is_some(),
+        "DashScope 原生 API 应返回 search_info"
+    );
 }
 
 #[tokio::test]
@@ -173,7 +192,11 @@ async fn test_llm_connection() {
     let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen-max".to_string());
 
     let key_preview = if api_key.len() > 12 {
-        format!("{}...{}", &api_key[..8], &api_key[api_key.len().saturating_sub(4)..])
+        format!(
+            "{}...{}",
+            &api_key[..8],
+            &api_key[api_key.len().saturating_sub(4)..]
+        )
     } else {
         "***".to_string()
     };

@@ -27,12 +27,10 @@ pub use crate::agents::prompts::FACT_CHECK_SYSTEM_PROMPT;
 ///
 /// Phase 2: 委托给 AgentRegistry::instantiate()（Builder 模式）。
 /// 向后兼容原有的直接调用方式。
-pub fn create_fact_check_agent(
-    llm: Box<dyn LlmClient>,
-    tools: ToolRegistry,
-) -> ReActLoop {
+pub fn create_fact_check_agent(llm: Box<dyn LlmClient>, tools: ToolRegistry) -> ReActLoop {
     let registry = AgentRegistry::builtin();
-    let def = registry.get(AgentId::FactCheck)
+    let def = registry
+        .get(AgentId::FactCheck)
         .expect("FactCheckAgent 定义必须存在于 AgentRegistry");
     let config = def.to_agent_config();
     ReActLoop::new(config, llm, tools)

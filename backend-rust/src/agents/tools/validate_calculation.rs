@@ -12,7 +12,7 @@
 //! ③ 付款比例是否合规（预付款 + 进度款 + 尾款 = 合同金额）
 //! ④ 评分加权是否满 100%
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -75,7 +75,10 @@ impl ValidateCalculationTool {
     ///
     /// 支持的运算符：+ - * / ( )
     /// 变量名由 `values` 中的 key 匹配，支持中文字段名。
-    fn evaluate(formula: &str, values: &HashMap<String, f64>) -> Result<(f64, String, Vec<String>)> {
+    fn evaluate(
+        formula: &str,
+        values: &HashMap<String, f64>,
+    ) -> Result<(f64, String, Vec<String>)> {
         let mut steps: Vec<String> = Vec::new();
         let mut resolved = formula.to_string();
 
@@ -109,17 +112,23 @@ impl ValidateCalculationTool {
 
         // 区间: "10 ≤ x ≤ 100" 或 "10 <= x <= 100"
         let range_patterns = [
-            (r"(\d+\.?\d*)\s*[≤<=]+\s*[xX]\s*[≤<=]+\s*(\d+\.?\d*)", "区间"),
-            (r"(\d+\.?\d*)\s*[≥>=]+\s*[xX]\s*[≥>=]+\s*(\d+\.?\d*)", "区间"),
+            (
+                r"(\d+\.?\d*)\s*[≤<=]+\s*[xX]\s*[≤<=]+\s*(\d+\.?\d*)",
+                "区间",
+            ),
+            (
+                r"(\d+\.?\d*)\s*[≥>=]+\s*[xX]\s*[≥>=]+\s*(\d+\.?\d*)",
+                "区间",
+            ),
         ];
 
         for (pattern, _) in &range_patterns {
-            if let Some(caps) = regex_lite_capture(pattern, t) {
-                if caps.len() >= 3 {
-                    let lo: f64 = caps[1].parse()?;
-                    let hi: f64 = caps[2].parse()?;
-                    return Ok((lo, hi, format!("应在 [{}, {}] 区间内", lo, hi)));
-                }
+            if let Some(caps) = regex_lite_capture(pattern, t)
+                && caps.len() >= 3
+            {
+                let lo: f64 = caps[1].parse()?;
+                let hi: f64 = caps[2].parse()?;
+                return Ok((lo, hi, format!("应在 [{}, {}] 区间内", lo, hi)));
             }
         }
 
@@ -162,7 +171,8 @@ impl ValidateCalculationTool {
         let t = threshold.to_lowercase();
         if t.contains("10") && (t.contains("保证金") || t.contains("履约")) {
             Some("《政府采购法实施条例》第48条：履约保证金不得超过合同金额的10%".into())
-        } else if t.contains("20") && (t.contains("日") || t.contains("公告") || t.contains("等标")) {
+        } else if t.contains("20") && (t.contains("日") || t.contains("公告") || t.contains("等标"))
+        {
             Some("《政府采购法》第35条：公开招标公告期不少于20日".into())
         } else if t.contains("100") && (t.contains("评分") || t.contains("权重")) {
             Some("评分权重总和须等于100%".into())
@@ -184,21 +194,18 @@ fn regex_lite_capture(pattern: &str, text: &str) -> Option<Vec<String>> {
             .map(|c| if c.is_whitespace() { ' ' } else { c })
             .collect();
         let parts: Vec<&str> = cleaned.split_whitespace().collect();
-        if parts.len() >= 5 {
-            if let (Ok(lo), Ok(hi)) = (parts[0].parse::<f64>(), parts[4].parse::<f64>()) {
-                return Some(vec![
-                    String::new(),
-                    lo.to_string(),
-                    hi.to_string(),
-                ]);
-            }
+        if parts.len() >= 5
+            && let (Ok(lo), Ok(hi)) = (parts[0].parse::<f64>(), parts[4].parse::<f64>())
+        {
+            return Some(vec![String::new(), lo.to_string(), hi.to_string()]);
         }
         // 也尝试 "10≤x≤100" 无空格格式
         for sep in &["≤x≤", "≤X≤", "<=x<=", "<=X<="] {
             if let Some(pos) = text.find(sep) {
                 let left = &text[..pos];
                 let right = &text[pos + sep.len()..];
-                if let (Ok(lo), Ok(hi)) = (left.trim().parse::<f64>(), right.trim().parse::<f64>()) {
+                if let (Ok(lo), Ok(hi)) = (left.trim().parse::<f64>(), right.trim().parse::<f64>())
+                {
                     return Some(vec![String::new(), lo.to_string(), hi.to_string()]);
                 }
             }
@@ -385,8 +392,7 @@ impl AgentTool for ValidateCalculationTool {
         }
 
         // 1. 计算
-        let (computed, resolved_formula, steps) =
-            Self::evaluate(&parsed.formula, &parsed.values)?;
+        let (computed, resolved_formula, steps) = Self::evaluate(&parsed.formula, &parsed.values)?;
 
         // 2. 阈值判定（如有）
         let (threshold_desc, verdict, legal_ref) =
@@ -401,7 +407,11 @@ impl AgentTool for ValidateCalculationTool {
                             let legal = Self::threshold_legal_basis(threshold);
                             (Some(desc), v, legal)
                         }
-                        Err(_) => (Some(format!("无法解析: {}", threshold)), Verdict::Uncertain, None),
+                        Err(_) => (
+                            Some(format!("无法解析: {}", threshold)),
+                            Verdict::Uncertain,
+                            None,
+                        ),
                     }
                 }
             } else {
@@ -485,12 +495,18 @@ mod tests {
 
     #[test]
     fn test_judge_compliant() {
-        assert!(matches!(ValidateCalculationTool::judge(8.0, f64::NEG_INFINITY, 10.0), Verdict::Compliant));
+        assert!(matches!(
+            ValidateCalculationTool::judge(8.0, f64::NEG_INFINITY, 10.0),
+            Verdict::Compliant
+        ));
     }
 
     #[test]
     fn test_judge_violation() {
-        assert!(matches!(ValidateCalculationTool::judge(12.0, f64::NEG_INFINITY, 10.0), Verdict::Violation));
+        assert!(matches!(
+            ValidateCalculationTool::judge(12.0, f64::NEG_INFINITY, 10.0),
+            Verdict::Violation
+        ));
     }
 
     #[test]
@@ -502,7 +518,10 @@ mod tests {
             ValidateCalculationTool::evaluate("(履约保证金 / 合同金额) * 100", &vals).unwrap();
         // 16% > 10% → violation
         let (lo, hi, _) = ValidateCalculationTool::parse_threshold("≤ 10").unwrap();
-        assert!(matches!(ValidateCalculationTool::judge(computed, lo, hi), Verdict::Violation));
+        assert!(matches!(
+            ValidateCalculationTool::judge(computed, lo, hi),
+            Verdict::Violation
+        ));
     }
 
     #[test]

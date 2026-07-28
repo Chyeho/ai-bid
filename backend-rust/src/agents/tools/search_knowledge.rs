@@ -13,12 +13,12 @@
 //!
 //! 原有 `KnowledgeSearch` trait 保留，用于 Tavily / Mock 等替代后端。
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use super::AgentTool;
 
@@ -55,7 +55,10 @@ impl KnowledgeSearch for MockKnowledgeSearch {
     async fn search(&self, query: &str, category: &str) -> Result<Vec<KnowledgeResult>> {
         Ok(vec![KnowledgeResult {
             title: format!("Mock 搜索结果 — {}: {}", category, query),
-            snippet: format!("Mock 搜索引擎返回。实际部署时调用 SearXNG 搜索 '{}'。", query),
+            snippet: format!(
+                "Mock 搜索引擎返回。实际部署时调用 SearXNG 搜索 '{}'。",
+                query
+            ),
             url: "https://example.com/mock-result".to_string(),
             content: None,
             score: 0.8,
@@ -118,7 +121,12 @@ impl KnowledgeSearch for TavilyKnowledgeSearch {
                 arr.iter()
                     .map(|r| KnowledgeResult {
                         title: r["title"].as_str().unwrap_or("").to_string(),
-                        snippet: r["content"].as_str().unwrap_or("").chars().take(500).collect(),
+                        snippet: r["content"]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(500)
+                            .collect(),
                         url: r["url"].as_str().unwrap_or("").to_string(),
                         content: r["raw_content"].as_str().map(|s| s.to_string()),
                         score: r["score"].as_f64().unwrap_or(0.0) as f32,
@@ -271,7 +279,7 @@ fn is_relevant_result(url: &str, snippet: &str) -> bool {
         return false;
     }
 
-    let has_chinese = snippet.contains(|c: char| c >= '\u{4e00}' && c <= '\u{9fff}');
+    let has_chinese = snippet.contains(|c: char| ('\u{4e00}'..='\u{9fff}').contains(&c));
     let has_gov_keyword = snippet.contains("procurement")
         || snippet.contains("government")
         || url.contains("gov.cn")
@@ -384,10 +392,7 @@ impl SearchBuffer {
 
                 // ★ 空结果退避重试（冷却 2s 后重试一次）
                 if results.is_empty() {
-                    eprintln!(
-                        "  [SearchBuffer] 空结果，2s 后退避重试: {}",
-                        task.key
-                    );
+                    eprintln!("  [SearchBuffer] 空结果，2s 后退避重试: {}", task.key);
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     results = client.search(&task.query, &task.category).await;
                     if results.is_empty() {
@@ -431,10 +436,7 @@ impl SearchBuffer {
             if let Some(tx) = pending.get(&key) {
                 let mut rx = tx.subscribe();
                 drop(pending);
-                eprintln!(
-                    "  [SearchBuffer] 去重命中: key={} (等待已有搜索完成)",
-                    key
-                );
+                eprintln!("  [SearchBuffer] 去重命中: key={} (等待已有搜索完成)", key);
                 return rx.recv().await.unwrap_or_default();
             }
         }
@@ -693,7 +695,9 @@ impl SearchKnowledgeTool {
             .as_ref()
             .ok_or_else(|| anyhow!("DashScope 搜索后端未配置"))?;
 
-        let mut result = backend.search(&parsed.question, &parsed.search_context).await?;
+        let mut result = backend
+            .search(&parsed.question, &parsed.search_context)
+            .await?;
 
         // ★ 客户端去重检测：对比上次搜索的 source URLs
         // 如果 >70% 重叠 → 在 answer 前插入止损警告，让 Agent 立即停止搜索
@@ -702,7 +706,10 @@ impl SearchKnowledgeTool {
             let current_urls: Vec<String> = result.sources.iter().map(|s| s.url.clone()).collect();
 
             if !last_urls.is_empty() && !current_urls.is_empty() {
-                let overlap = current_urls.iter().filter(|u| last_urls.contains(u)).count();
+                let overlap = current_urls
+                    .iter()
+                    .filter(|u| last_urls.contains(u))
+                    .count();
                 let overlap_ratio = overlap as f64 / current_urls.len() as f64;
                 if overlap_ratio > 0.7 {
                     result.answer = format!(
@@ -794,7 +801,9 @@ impl DashScopeSearchBackend {
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("DASHSCOPE_API_KEY")
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .context("DashScope 搜索后端需要 API 密钥。请设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY")?;
+            .context(
+                "DashScope 搜索后端需要 API 密钥。请设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY",
+            )?;
         let model = std::env::var("DASHSCOPE_SEARCH_MODEL")
             .or_else(|_| std::env::var("DASHSCOPE_MODEL"))
             .unwrap_or_else(|_| "qwen-plus".to_string());
@@ -811,20 +820,28 @@ impl DashScopeSearchBackend {
     pub async fn search(&self, question: &str, search_context: &str) -> Result<WebSearchResult> {
         // 构造搜索提示：将 search_context 融入 system prompt
         let context_hint = match search_context {
-            "法规" => "你需要找到具体的政府采购法律法规原文或官方释义。\n\
+            "法规" => {
+                "你需要找到具体的政府采购法律法规原文或官方释义。\n\
                         搜索策略：① 用文件全称+文号精确搜索（如\"财库〔2020〕46号 全文\"）；\
                         ② 在 gov.cn / mof.gov.cn 站内搜索；③ 优先返回法规原文链接，而非新闻或公告。\
                         常见法规索引：政府采购法、政府采购法实施条例、财库〔2020〕46号、\
-                        财库〔2014〕214号、第87号令、财库〔2019〕38号。",
-            "案例" => "你需要找到财政部政府采购投诉处理决定或行政处罚案例原文。\n\
+                        财库〔2014〕214号、第87号令、财库〔2019〕38号。"
+            }
+            "案例" => {
+                "你需要找到财政部政府采购投诉处理决定或行政处罚案例原文。\n\
                        搜索策略：① 搜索\"财政部政府采购信息公告 第X号\"；\
-                       ② 搜索\"投诉处理决定书 政府采购\"；③ 优先 gov.cn 域名下的处理决定原文。",
-            "负面清单" => "你需要找到政府采购负面行为清单原文。\n\
+                       ② 搜索\"投诉处理决定书 政府采购\"；③ 优先 gov.cn 域名下的处理决定原文。"
+            }
+            "负面清单" => {
+                "你需要找到政府采购负面行为清单原文。\n\
                          搜索策略：① 搜索\"政府采购负面清单 XX省\"或\"政府采购禁止行为清单\"；\
-                         ② 优先找省级财政厅发布的清单文件（PDF/网页）。",
-            "标准范本" => "你需要找到财政部政府采购标准招标文件范本。\n\
+                         ② 优先找省级财政厅发布的清单文件（PDF/网页）。"
+            }
+            "标准范本" => {
+                "你需要找到财政部政府采购标准招标文件范本。\n\
                          搜索策略：① 搜索\"政府采购招标文件标准文本 财政部\"；\
-                         ② 搜索\"政府采购竞争性磋商文件范本\"。",
+                         ② 搜索\"政府采购竞争性磋商文件范本\"。"
+            }
             "历史审查记录" => "你需要查找类似条款的历史审查记录或合规分析。",
             _ => "",
         };
@@ -879,7 +896,11 @@ impl DashScopeSearchBackend {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("DashScope 搜索 API 返回错误 {}: {}", status, error_text));
+            return Err(anyhow!(
+                "DashScope 搜索 API 返回错误 {}: {}",
+                status,
+                error_text
+            ));
         }
 
         // 读取完整 SSE 流
@@ -900,10 +921,10 @@ impl DashScopeSearchBackend {
                     continue;
                 }
                 if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                    if search_info.is_none() {
-                        if let Some(si) = chunk["output"]["search_info"].as_object() {
-                            search_info = Some(serde_json::json!(si));
-                        }
+                    if search_info.is_none()
+                        && let Some(si) = chunk["output"]["search_info"].as_object()
+                    {
+                        search_info = Some(serde_json::json!(si));
                     }
                     if let Some(content) =
                         chunk["output"]["choices"][0]["message"]["content"].as_str()
@@ -931,10 +952,7 @@ impl DashScopeSearchBackend {
 
         // 如果没有 answer（模型只搜不说），基于来源构造摘要
         if answer.trim().is_empty() && !sources.is_empty() {
-            answer = format!(
-                "搜索到 {} 条相关结果，详见来源链接。",
-                sources.len()
-            );
+            answer = format!("搜索到 {} 条相关结果，详见来源链接。", sources.len());
         }
 
         eprintln!(

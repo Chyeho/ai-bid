@@ -1,4 +1,4 @@
-﻿//! ChatAgent — 交互式对话审查 Agent。
+//! ChatAgent — 交互式对话审查 Agent。
 //!
 //! 与批量审查 Agent 互补：批量审查=全覆盖一次性（像跑测试套件），
 //! 对话审查=按需深挖随时（像 Debug 时问 AI）。
@@ -11,11 +11,10 @@
 
 use crate::agents::prompts::CHAT_AGENT_SYSTEM_PROMPT;
 use crate::agents::react_loop::{
-    execute_tool_calls, ChatMessage, LlmClient, LlmResponse, ToolChoice,
+    ChatMessage, LlmClient, LlmResponse, ToolChoice, execute_tool_calls,
 };
 use crate::agents::tools::ToolRegistry;
 use crate::agents::types::*;
-use tokio::sync::mpsc::UnboundedSender;
 use crate::domain::chunk::Chunk;
 use crate::domain::vector_index::DocumentVectorIndex;
 use crate::services::embedding_service::EmbeddingClient;
@@ -24,6 +23,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// ChatAgent — 交互式对话审查 Agent。
 pub struct ChatAgent {
@@ -213,15 +213,11 @@ impl ChatAgent {
             ctx.push_str("如需更多结果，用 search_document 搜索。）\n");
         }
 
-        ctx.push_str(
-            "\n⚠️ 重要：以上只是自动检索的初始结果，未必覆盖了用户问题的全部答案。\n",
-        );
+        ctx.push_str("\n⚠️ 重要：以上只是自动检索的初始结果，未必覆盖了用户问题的全部答案。\n");
         ctx.push_str(
             "如果信息不完整——比如只有笼统条款而没有具体程序/标准——你必须调用 search_document 或 read_section 主动深挖。\n",
         );
-        ctx.push_str(
-            "禁止凭训练数据记忆编造标书内容。找不到信息就在 answer_user 中坦诚告知。\n",
-        );
+        ctx.push_str("禁止凭训练数据记忆编造标书内容。找不到信息就在 answer_user 中坦诚告知。\n");
 
         ctx
     }
@@ -342,68 +338,67 @@ impl ChatAgent {
     /// [`ChatStreamEvent`] 事件，供 SSE handler 使用。
     ///
     /// * `tx` — 事件发送端（调用方持有 rx 端读取 SSE）
-/// 根据工具名称和参数生成人类可读的推理步骤描述。
-///
-/// 当 LLM（如 qwen-plus）不输出 `content` 只输出 `tool_calls` 时，
-/// 从工具调用的实际参数中提取关键信息作为推理步骤展示。
-fn tool_reasoning_hint(name: &str, args: &serde_json::Value) -> String {
-    match name {
-        "web_search" => {
-            let q = args["query"].as_str().unwrap_or("");
-            let cat = args["category"].as_str().unwrap_or("");
-            if !q.is_empty() {
-                let mut hint = format!("搜索法规: {}", Self::truncate_for_hint(q, 80));
-                if !cat.is_empty() {
-                    hint.push_str(&format!("（分类: {}）", cat));
+    ///   根据工具名称和参数生成人类可读的推理步骤描述。
+    ///
+    /// 当 LLM（如 qwen-plus）不输出 `content` 只输出 `tool_calls` 时，
+    /// 从工具调用的实际参数中提取关键信息作为推理步骤展示。
+    fn tool_reasoning_hint(name: &str, args: &serde_json::Value) -> String {
+        match name {
+            "web_search" => {
+                let q = args["query"].as_str().unwrap_or("");
+                let cat = args["category"].as_str().unwrap_or("");
+                if !q.is_empty() {
+                    let mut hint = format!("搜索法规: {}", Self::truncate_for_hint(q, 80));
+                    if !cat.is_empty() {
+                        hint.push_str(&format!("（分类: {}）", cat));
+                    }
+                    hint
+                } else {
+                    "搜索相关法规依据".to_string()
                 }
-                hint
-            } else {
-                "搜索相关法规依据".to_string()
             }
-        }
-        "search_document" => {
-            let q = args["query"].as_str().unwrap_or("");
-            if !q.is_empty() {
-                format!("搜索标书原文: {}", Self::truncate_for_hint(q, 80))
-            } else {
-                "搜索标书原文".to_string()
+            "search_document" => {
+                let q = args["query"].as_str().unwrap_or("");
+                if !q.is_empty() {
+                    format!("搜索标书原文: {}", Self::truncate_for_hint(q, 80))
+                } else {
+                    "搜索标书原文".to_string()
+                }
             }
-        }
-        "read_section" => {
-            let block_id = args["block_id"].as_str().unwrap_or("");
-            if !block_id.is_empty() {
-                format!("精读条款 {}", block_id)
-            } else {
-                "精读条款原文".to_string()
+            "read_section" => {
+                let block_id = args["block_id"].as_str().unwrap_or("");
+                if !block_id.is_empty() {
+                    format!("精读条款 {}", block_id)
+                } else {
+                    "精读条款原文".to_string()
+                }
             }
-        }
-        "search_knowledge" => {
-            let q = args["query"].as_str().unwrap_or("");
-            if !q.is_empty() {
-                format!("检索知识库: {}", Self::truncate_for_hint(q, 80))
-            } else {
-                "检索知识库".to_string()
+            "search_knowledge" => {
+                let q = args["query"].as_str().unwrap_or("");
+                if !q.is_empty() {
+                    format!("检索知识库: {}", Self::truncate_for_hint(q, 80))
+                } else {
+                    "检索知识库".to_string()
+                }
             }
+            "answer_user" => {
+                // answer_user 是终端工具，其参数在 parse_answer_user 中解析
+                "整理分析结果，生成最终回答".to_string()
+            }
+            _ => format!("执行: {}", name),
         }
-        "answer_user" => {
-            // answer_user 是终端工具，其参数在 parse_answer_user 中解析
-            "整理分析结果，生成最终回答".to_string()
-        }
-        _ => format!("执行: {}", name),
     }
-}
 
-/// 截断文本用于推理提示，超长加 "..."
-fn truncate_for_hint(text: &str, max_len: usize) -> String {
-    let cleaned = text.replace('\n', " ").replace('\r', "");
-    if cleaned.chars().count() > max_len {
-        let truncated: String = cleaned.chars().take(max_len).collect();
-        format!("{}...", truncated)
-    } else {
-        cleaned
+    /// 截断文本用于推理提示，超长加 "..."
+    fn truncate_for_hint(text: &str, max_len: usize) -> String {
+        let cleaned = text.replace('\n', " ").replace('\r', "");
+        if cleaned.chars().count() > max_len {
+            let truncated: String = cleaned.chars().take(max_len).collect();
+            format!("{}...", truncated)
+        } else {
+            cleaned
+        }
     }
-}
-
 
     pub async fn chat_stream(
         &self,
@@ -544,8 +539,7 @@ fn truncate_for_hint(text: &str, max_len: usize) -> String {
     /// - `\u{20E3}` — 按键封装组合符（keycap 序列）
     /// - `\u{2600}-\u{27BF}` — 杂项符号 + 丁贝符（⚠✅❌✨等）
     fn filter_emojis(text: &str) -> String {
-        let re = Regex::new(r"[\p{Emoji_Presentation}\u{FE0F}\u{20E3}\u{2600}-\u{27BF}]")
-            .unwrap();
+        let re = Regex::new(r"[\p{Emoji_Presentation}\u{FE0F}\u{20E3}\u{2600}-\u{27BF}]").unwrap();
         re.replace_all(text, "").to_string()
     }
 
@@ -555,35 +549,33 @@ fn truncate_for_hint(text: &str, max_len: usize) -> String {
 
         // ── P3: 验证引用 block_id 存在性 + quote 文本匹配 ──
         let mut validation_warnings: Vec<String> = Vec::new();
-        if let Some(chunks) = &self.chunks {
-            if let Some(refs) = args["references"].as_array() {
-                for v in refs {
-                    if let Some(bid) = v["block_id"].as_str() {
-                        match chunks.get(bid) {
-                            None => {
-                                validation_warnings.push(format!(
-                                    "⚠️ 引用的 block_id '{}' 在文档中不存在，可能是 LLM 编造的",
-                                    bid
-                                ));
-                            }
-                            Some(chunk) => {
-                                if let Some(quote) = v["quote"].as_str() {
-                                    if !quote.is_empty() && !chunk.text.contains(quote) {
-                                        // 尝试模糊匹配（忽略空白差异）
-                                        let normalized_quote: String =
-                                            quote.split_whitespace().collect::<Vec<_>>().join("");
-                                        let normalized_text: String = chunk
-                                            .text
-                                            .split_whitespace()
-                                            .collect::<Vec<_>>()
-                                            .join("");
-                                        if !normalized_text.contains(&normalized_quote) {
-                                            validation_warnings.push(format!(
-                                                "⚠️ 对 [{}] 的引用文字在原文中未找到精确匹配，请人工核实",
-                                                bid
-                                            ));
-                                        }
-                                    }
+        if let Some(chunks) = &self.chunks
+            && let Some(refs) = args["references"].as_array()
+        {
+            for v in refs {
+                if let Some(bid) = v["block_id"].as_str() {
+                    match chunks.get(bid) {
+                        None => {
+                            validation_warnings.push(format!(
+                                "⚠️ 引用的 block_id '{}' 在文档中不存在，可能是 LLM 编造的",
+                                bid
+                            ));
+                        }
+                        Some(chunk) => {
+                            if let Some(quote) = v["quote"].as_str()
+                                && !quote.is_empty()
+                                && !chunk.text.contains(quote)
+                            {
+                                // 尝试模糊匹配（忽略空白差异）
+                                let normalized_quote: String =
+                                    quote.split_whitespace().collect::<Vec<_>>().join("");
+                                let normalized_text: String =
+                                    chunk.text.split_whitespace().collect::<Vec<_>>().join("");
+                                if !normalized_text.contains(&normalized_quote) {
+                                    validation_warnings.push(format!(
+                                        "⚠️ 对 [{}] 的引用文字在原文中未找到精确匹配，请人工核实",
+                                        bid
+                                    ));
                                 }
                             }
                         }
@@ -626,15 +618,15 @@ fn truncate_for_hint(text: &str, max_len: usize) -> String {
         // 来源②: 结构化 references 参数
         if let Some(arr) = args["references"].as_array() {
             for v in arr {
-                if let Some(bid) = v["block_id"].as_str() {
-                    if seen_ids.insert(bid.to_string()) {
-                        references.push(BlockRef {
-                            block_id: bid.to_string(),
-                            quote: v["quote"].as_str().unwrap_or("").to_string(),
-                            snippet: String::new(),
-                            page: 0,
-                        });
-                    }
+                if let Some(bid) = v["block_id"].as_str()
+                    && seen_ids.insert(bid.to_string())
+                {
+                    references.push(BlockRef {
+                        block_id: bid.to_string(),
+                        quote: v["quote"].as_str().unwrap_or("").to_string(),
+                        snippet: String::new(),
+                        page: 0,
+                    });
                 }
             }
         }
@@ -708,9 +700,7 @@ fn truncate_for_hint(text: &str, max_len: usize) -> String {
             match self.chat(None, &line, Some(history.clone())).await {
                 Ok(response) => {
                     println!("{}", response.answer);
-                    history.push(ChatMessage::User {
-                        content: line,
-                    });
+                    history.push(ChatMessage::User { content: line });
                     history.push(ChatMessage::Assistant {
                         content: Some(response.answer),
                         tool_calls: None,
@@ -770,7 +760,7 @@ fn diversify_hits(
         if !groups.contains_key(&key) {
             group_order.push(key.clone());
         }
-        groups.entry(key).or_insert_with(Vec::new).push(i);
+        groups.entry(key).or_default().push(i);
     }
 
     // 每组取最高分
@@ -872,11 +862,7 @@ mod tests {
         }
 
         /// 创建在第 N 次调用时返回错误的 Mock。
-        fn with_error(
-            responses: Vec<LlmResponse>,
-            error_index: usize,
-            error_msg: &str,
-        ) -> Self {
+        fn with_error(responses: Vec<LlmResponse>, error_index: usize, error_msg: &str) -> Self {
             let mut error_at = std::collections::HashMap::new();
             error_at.insert(error_index, error_msg.to_string());
             Self {
@@ -933,10 +919,12 @@ mod tests {
 
     /// 创建用于测试的最小 ChatAgent（无配置文件，Mock LLM，空工具集，无 RAG/验证）。
     fn make_test_agent(llm: Arc<dyn LlmClient>) -> ChatAgent {
-        let mut config = ChatAgentConfig::default();
-        config.max_turns = 3; // 测试用短轮次
-        config.preferences_path = "/nonexistent/test-preferences.md".to_string();
-        config.project_config_path = "/nonexistent/test-config.md".to_string();
+        let config = ChatAgentConfig {
+            max_turns: 3, // 测试用短轮次
+            preferences_path: "/nonexistent/test-preferences.md".to_string(),
+            project_config_path: "/nonexistent/test-config.md".to_string(),
+            ..Default::default()
+        };
         ChatAgent {
             config,
             project_config_content: String::new(),
@@ -1140,9 +1128,10 @@ mod tests {
     #[tokio::test]
     async fn test_chat_answer_user_termination() {
         // LLM 第一轮就调用 answer_user
-        let mock = Arc::new(MockLlmClient::new(vec![
-            make_answer_user_response("这条条款有地域歧视风险。", 0.9)
-        ]));
+        let mock = Arc::new(MockLlmClient::new(vec![make_answer_user_response(
+            "这条条款有地域歧视风险。",
+            0.9,
+        )]));
         let agent = make_test_agent(mock);
 
         let resp = agent
@@ -1227,7 +1216,11 @@ mod tests {
 
         // max_turns 耗尽 → 截断消息
         assert!(resp.answer.contains("分析上限"));
-        assert!(resp.suggested_actions.iter().any(|a| a.contains("拆分为更小的子问题")));
+        assert!(
+            resp.suggested_actions
+                .iter()
+                .any(|a| a.contains("拆分为更小的子问题"))
+        );
     }
 
     #[tokio::test]
@@ -1252,9 +1245,10 @@ mod tests {
     #[tokio::test]
     async fn test_chat_with_history() {
         // 验证历史消息被传递
-        let mock = Arc::new(MockLlmClient::new(vec![
-            make_answer_user_response("好的，我来回答你的追问。", 0.8)
-        ]));
+        let mock = Arc::new(MockLlmClient::new(vec![make_answer_user_response(
+            "好的，我来回答你的追问。",
+            0.8,
+        )]));
         let agent = make_test_agent(mock);
 
         let history = vec![
@@ -1278,9 +1272,10 @@ mod tests {
     #[tokio::test]
     async fn test_chat_with_selection() {
         // 用户划词 + 提问
-        let mock = Arc::new(MockLlmClient::new(vec![
-            make_answer_user_response("选中的条款存在合规风险。", 0.95)
-        ]));
+        let mock = Arc::new(MockLlmClient::new(vec![make_answer_user_response(
+            "选中的条款存在合规风险。",
+            0.95,
+        )]));
         let agent = make_test_agent(mock);
 
         let selection = TextSelection {
@@ -1342,11 +1337,17 @@ mod tests {
         let choices = mock.tool_choices.lock().unwrap();
         assert_eq!(choices.len(), 2, "应调用 2 轮");
         // 第 1 轮: Required（P1 首轮工具强制）
-        assert!(matches!(choices[0], ToolChoice::Required),
-            "第1轮应强制工具调用(Required)，实际为: {:?}", choices[0]);
+        assert!(
+            matches!(choices[0], ToolChoice::Required),
+            "第1轮应强制工具调用(Required)，实际为: {:?}",
+            choices[0]
+        );
         // 第 2 轮 (最后一轮): Specific { "answer_user" }
-        assert!(matches!(&choices[1], ToolChoice::Specific { name } if name == "answer_user"),
-            "最后一轮应强制 answer_user，实际为: {:?}", choices[1]);
+        assert!(
+            matches!(&choices[1], ToolChoice::Specific { name } if name == "answer_user"),
+            "最后一轮应强制 answer_user，实际为: {:?}",
+            choices[1]
+        );
     }
 
     // ── diversify_hits 单元测试 ─────────────────────────────────
@@ -1398,11 +1399,27 @@ mod tests {
         let ids: Vec<&str> = result.iter().map(|h| h.chunk_id.as_str()).collect();
         assert_eq!(result.len(), 5, "应填满 5 条，实际: {:?}", ids);
         // 各组最高分必须在
-        assert!(ids.contains(&"ch_027"), "ch_027 (资格组最高分) 应入选: {:?}", ids);
-        assert!(ids.contains(&"ch_138"), "ch_138 (合同组最高分) 应入选: {:?}", ids);
-        assert!(ids.contains(&"ch_200"), "ch_200 (技术组最高分) 应入选: {:?}", ids);
+        assert!(
+            ids.contains(&"ch_027"),
+            "ch_027 (资格组最高分) 应入选: {:?}",
+            ids
+        );
+        assert!(
+            ids.contains(&"ch_138"),
+            "ch_138 (合同组最高分) 应入选: {:?}",
+            ids
+        );
+        assert!(
+            ids.contains(&"ch_200"),
+            "ch_200 (技术组最高分) 应入选: {:?}",
+            ids
+        );
         // ch_029 (0.65) 是最低分，应该被挤掉
-        assert!(!ids.contains(&"ch_029"), "ch_029 (最低分 0.65) 应被挤出: {:?}", ids);
+        assert!(
+            !ids.contains(&"ch_029"),
+            "ch_029 (最低分 0.65) 应被挤出: {:?}",
+            ids
+        );
         // 排序验证：前 3 条应按分降序（各组优胜者按分排序）
         assert_eq!(result[0].chunk_id, "ch_027", "最高分应排第一");
     }

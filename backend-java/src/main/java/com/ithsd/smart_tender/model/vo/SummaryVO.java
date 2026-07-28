@@ -5,6 +5,7 @@ package com.ithsd.smart_tender.model.vo;
  */
 public class SummaryVO {
     private Integer totalIssues;
+    private Integer critical;
     private Integer high;
     private Integer medium;
     private Integer low;
@@ -12,6 +13,8 @@ public class SummaryVO {
 
     public Integer getTotalIssues() { return totalIssues; }
     public void setTotalIssues(Integer totalIssues) { this.totalIssues = totalIssues; }
+    public Integer getCritical() { return critical; }
+    public void setCritical(Integer critical) { this.critical = critical; }
     public Integer getHigh() { return high; }
     public void setHigh(Integer high) { this.high = high; }
     public Integer getMedium() { return medium; }

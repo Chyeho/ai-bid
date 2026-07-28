@@ -46,15 +46,13 @@ fn find_soffice() -> Result<PathBuf> {
 
     // 3. PATH 中的 soffice (Linux/macOS)
     let which_cmd = if cfg!(windows) { "where" } else { "which" };
-    if let Ok(output) = Command::new(which_cmd).arg("soffice").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .to_string();
-            let p = Path::new(&path);
-            if p.exists() {
-                return Ok(p.to_path_buf());
-            }
+    if let Ok(output) = Command::new(which_cmd).arg("soffice").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let p = Path::new(&path);
+        if p.exists() {
+            return Ok(p.to_path_buf());
         }
     }
 
@@ -85,11 +83,7 @@ pub fn convert_docx_to_pdf(input_path: &str, output_dir: &str) -> Result<PathBuf
     let input = Path::new(input_path);
 
     // 验证输入文件存在
-    anyhow::ensure!(
-        input.exists(),
-        "输入文件不存在: {}",
-        input.display()
-    );
+    anyhow::ensure!(input.exists(), "输入文件不存在: {}", input.display());
 
     // 检查扩展名
     let ext = input
@@ -104,11 +98,14 @@ pub fn convert_docx_to_pdf(input_path: &str, output_dir: &str) -> Result<PathBuf
     );
 
     let soffice = find_soffice()?;
-    let output_dir_abs = Path::new(output_dir).canonicalize().with_context(|| {
-        format!("输出目录不存在或无法访问: {}", output_dir)
-    })?;
+    let output_dir_abs = Path::new(output_dir)
+        .canonicalize()
+        .with_context(|| format!("输出目录不存在或无法访问: {}", output_dir))?;
 
-    println!("  [转换] {} → PDF (LibreOffice)", input.file_name().unwrap().to_string_lossy());
+    println!(
+        "  [转换] {} → PDF (LibreOffice)",
+        input.file_name().unwrap().to_string_lossy()
+    );
 
     let output = Command::new(&soffice)
         .arg("--headless")

@@ -15,7 +15,7 @@
 //! 模板存储在内存 TemplateStore 中，支持运行时注册。
 //! 初始内置：资格条件标准模板、合同必须条款模板、评审标准模板。
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -116,7 +116,8 @@ impl TemplateStore {
 
     /// 注册一个模板。
     pub fn register(&mut self, template: StandardTemplate) {
-        self.templates.insert(template.template_type.clone(), template);
+        self.templates
+            .insert(template.template_type.clone(), template);
     }
 
     /// 获取模板。
@@ -308,18 +309,18 @@ pub trait ClauseTextProvider: Send + Sync {
 }
 
 impl CompareWithTemplateTool {
-    pub fn new(
-        templates: Arc<TemplateStore>,
-        text_provider: Arc<dyn ClauseTextProvider>,
-    ) -> Self {
-        Self { templates, text_provider }
+    pub fn new(templates: Arc<TemplateStore>, text_provider: Arc<dyn ClauseTextProvider>) -> Self {
+        Self {
+            templates,
+            text_provider,
+        }
     }
 
     /// 检查文本中是否存在某条目（模糊匹配）。
     fn contains_item(text: &str, item: &str) -> bool {
         // 提取 item 中的核心关键词匹配
         let keywords: Vec<&str> = item
-            .split(|c: char| c == '、' || c == '，' || c == ',' || c == '（' || c == '(')
+            .split(['、', '，', ',', '（', '('])
             .next()
             .map(|s| s.trim())
             .unwrap_or(item)
@@ -416,21 +417,18 @@ impl AgentTool for CompareWithTemplateTool {
             .ok_or_else(|| anyhow!("chunk_id 不存在: {}", parsed.clause_chunk))?;
 
         // 2. 获取模板
-        let template = self
-            .templates
-            .get(&parsed.template_type)
-            .ok_or_else(|| {
-                anyhow!(
-                    "未知模板类型: {}。可用模板: {}",
-                    parsed.template_type,
-                    self.templates
-                        .templates
-                        .keys()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
+        let template = self.templates.get(&parsed.template_type).ok_or_else(|| {
+            anyhow!(
+                "未知模板类型: {}。可用模板: {}",
+                parsed.template_type,
+                self.templates
+                    .templates
+                    .keys()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
 
         // 3. 检查必须项（missing）
         let mut missing = Vec::new();
@@ -599,6 +597,10 @@ mod tests {
         let missing: Vec<serde_json::Value> =
             serde_json::from_value(result["missing"].clone()).unwrap();
         // 应该缺失 5 项（只有第1项满足）
-        assert!(missing.len() >= 2, "应至少缺失 2 项必须条款，实际: {}", missing.len());
+        assert!(
+            missing.len() >= 2,
+            "应至少缺失 2 项必须条款，实际: {}",
+            missing.len()
+        );
     }
 }

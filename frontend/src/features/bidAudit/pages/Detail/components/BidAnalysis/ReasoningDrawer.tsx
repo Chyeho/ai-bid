@@ -101,7 +101,7 @@ const ReasoningDrawer: React.FC<Props> = ({ issue, open, onClose, onLocatePage }
             boxShadow: '0 1px 3px rgba(0,0,0,0.12)',
           }}
         >
-          {SEVERITY_MAP[issue.severity]}
+          {issue.isCritical ? '重大问题' : SEVERITY_MAP[issue.severity]}
         </div>
       </div>
 
@@ -113,6 +113,15 @@ const ReasoningDrawer: React.FC<Props> = ({ issue, open, onClose, onLocatePage }
           type="warning"
           showIcon
           message="审查未完成 — Agent 轮次耗尽，置信度低，建议人工复核"
+          style={{ marginBottom: 20 }}
+        />
+      )}
+      {issue.isCritical && (
+        <Alert
+          type="error"
+          showIcon
+          message="重大/红线问题"
+          description={issue.criticalReason || '该问题需优先人工复核和处置。'}
           style={{ marginBottom: 20 }}
         />
       )}

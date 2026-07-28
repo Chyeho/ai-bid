@@ -30,7 +30,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -39,7 +38,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -90,7 +88,6 @@ public class AuditEngineServiceImpl implements AuditEngineService {
 
     @Override
     @Async("auditTaskExecutor")
-    @Transactional
     public void start(String taskId) {
         log.info("audit async task started: taskId={}, thread={}", taskId, Thread.currentThread().getName());
         if (!RUNNING_TASKS.add(taskId)) {
@@ -102,6 +99,41 @@ public class AuditEngineServiceImpl implements AuditEngineService {
         } finally {
             RUNNING_TASKS.remove(taskId);
         }
+    }
+
+    @Override
+    public boolean recover(String taskId) {
+        AuditTask task = loadTask(taskId);
+        if (task == null) {
+            return false;
+        }
+        if (AuditTaskStatusEnum.COMPLETED.getCode().equals(task.getTaskStatus())) {
+            return true;
+        }
+
+        String rustDocId = rustDocumentService.getCachedDocumentId(task.getBidId());
+        if (!StringUtils.hasText(rustDocId)) {
+            log.warn("recover: no cached Rust document id, taskId={}", taskId);
+            return false;
+        }
+
+        RustReviewResultResponse result;
+        try {
+            result = rustApiClient.getReviewResult(rustDocId);
+        } catch (Exception e) {
+            log.warn("recover: Rust result unavailable, taskId={}, {}", taskId, e.getMessage());
+            return false;
+        }
+        if (result != null && result.isCompleted() && result.getResult() != null) {
+            log.info("recover: completed Rust result found, taskId={}, docId={}",
+                    taskId, rustDocId);
+            completeTaskFromReview(task, result.getResult());
+            return true;
+        }
+        if (result != null && result.isFailed()) {
+            failTask(task, "Rust 审核失败: " + result.getError());
+        }
+        return false;
     }
 
     // ── 主流程 ──────────────────────────────────────────────────────
@@ -159,13 +191,13 @@ public class AuditEngineServiceImpl implements AuditEngineService {
                         case "agent_progress" -> {
                             com.ithsd.smart_tender.model.vo.AgentProgressVO vo =
                                 objectMapper.convertValue(data, com.ithsd.smart_tender.model.vo.AgentProgressVO.class);
-                            emitSafe(taskId, SseEventTypeEnum.AGENT_PROGRESS, vo);
+                            emitTransient(taskId, SseEventTypeEnum.AGENT_PROGRESS, vo);
                         }
                         case "trace" -> {
                             com.ithsd.smart_tender.model.vo.TraceEventVO vo =
                                 objectMapper.convertValue(data, com.ithsd.smart_tender.model.vo.TraceEventVO.class);
-                            emitSafe(taskId, SseEventTypeEnum.TRACE, vo);
-                            // 持久化到 trace_sessions / trace_events
+                            // TraceService 已持久化完整轨迹；不再重复写 audit_task_event。
+                            emitTransient(taskId, SseEventTypeEnum.TRACE, vo);
                             try {
                                 traceService.ingestTraceEvent(taskId, rustDocId, vo);
                             } catch (Exception e) {
@@ -178,12 +210,13 @@ public class AuditEngineServiceImpl implements AuditEngineService {
                             emitSafe(taskId, SseEventTypeEnum.PHASE, vo);
                             String phase = data.has("phase") ? data.get("phase").asText() : "";
                             int progress = "execute".equals(phase) ? 35 : "merge".equals(phase) ? 45 : "legal_verify".equals(phase) ? 55 : 60;
-                            // 异步写 DB，防止僵尸连接阻塞 SSE 事件处理
+                            // 使用无乐观锁的单调推进 SQL。不要在多个异步回调中共享并修改 task.version。
                             CompletableFuture.runAsync(() -> {
                                 try {
-                                    updateStage(task, AuditStageEnum.REVIEWING, progress);
+                                    auditTaskMapper.advanceReviewProgress(
+                                            taskId, progress, LocalDateTime.now());
                                 } catch (Exception e) {
-                                    log.warn("updateStage async failed: {}", e.getMessage());
+                                    log.warn("advanceReviewProgress async failed: {}", e.getMessage());
                                 }
                             });
                         }
@@ -192,12 +225,12 @@ public class AuditEngineServiceImpl implements AuditEngineService {
                         }
                         case "finding_added" -> {
                             // 1. 透传原始数据给前端的 liveFindings（增量更新）
-                            emitSafe(taskId, SseEventTypeEnum.FINDING_ADDED, data);
+                            emitTransient(taskId, SseEventTypeEnum.FINDING_ADDED, data);
                             // 2. 同时映射为 ISSUE（兼容 AnalysisList 实时显示）
                             try {
                                 RustRiskFinding rf = objectMapper.convertValue(data, RustRiskFinding.class);
                                 if (!rf.shouldSkip()) {
-                                    emitSafe(taskId, SseEventTypeEnum.ISSUE, toIssueVO(rf));
+                                    emitTransient(taskId, SseEventTypeEnum.ISSUE, toIssueVO(rf));
                                 }
                             } catch (Exception ignored) {
                                 log.debug("SSE finding_added map failed: {}", ignored.getMessage());
@@ -205,11 +238,11 @@ public class AuditEngineServiceImpl implements AuditEngineService {
                         }
                         case "finding_removed" -> {
                             // 去重合并时移除 → 前端从 liveFindings 中删除
-                            emitSafe(taskId, SseEventTypeEnum.FINDING_REMOVED, data);
+                            emitTransient(taskId, SseEventTypeEnum.FINDING_REMOVED, data);
                         }
                         case "finding_updated" -> {
                             // 字段变更（降级/辩论） → 前端就地更新 liveFindings
-                            emitSafe(taskId, SseEventTypeEnum.FINDING_UPDATED, data);
+                            emitTransient(taskId, SseEventTypeEnum.FINDING_UPDATED, data);
                         }
                         case "done" -> {
                             log.info("Rust SSE done received: docId={}", rustDocId);
@@ -223,8 +256,19 @@ public class AuditEngineServiceImpl implements AuditEngineService {
                         }
                         case "error" -> {
                             String msg = data.has("message") ? data.get("message").asText() : "审核引擎未知错误";
-                            log.error("Rust SSE error received: docId={}, msg={}", rustDocId, msg);
-                            reviewErrorSignal.complete(msg);
+                            // 兼容旧 Rust：事件通道落后只代表实时进度丢帧，最终结果仍可通过
+                            // GET /result 获取，不能把它升级成审核失败。
+                            if (msg.contains("SSE lagged") || msg.contains("events were dropped")) {
+                                log.warn("Rust SSE progress events dropped; continuing with result polling: docId={}", rustDocId);
+                            } else {
+                                log.error("Rust SSE error received: docId={}, msg={}", rustDocId, msg);
+                                reviewErrorSignal.complete(msg);
+                            }
+                        }
+                        case "stream_lagged" -> {
+                            long dropped = data.has("dropped") ? data.get("dropped").asLong() : -1L;
+                            log.warn("Rust SSE consumer lagged; {} progress events dropped, review continues: docId={}",
+                                    dropped, rustDocId);
                         }
                         default -> {
                             log.debug("Rust SSE unknown event: {}", eventType);
@@ -269,62 +313,13 @@ public class AuditEngineServiceImpl implements AuditEngineService {
             RustReviewResponse reviewResp = awaitReviewResult(rustDocId, reviewDoneSignal, reviewErrorSignal);
             if (reviewResp == null) {
                 log.error("❌ [审核 Stage 2/4] Rust 审核结果获取失败: taskId={}, rustDocId={}", taskId, rustDocId);
+                failTask(task, "Rust 审核结果获取失败，请重试或执行任务恢复");
                 return;
             }
             log.info("═══ [审核 Stage 2/4] Rust 审核引擎返回: findings={} ═══",
                 reviewResp.getFindings() != null ? reviewResp.getFindings().size() : 0);
 
-            // Stage 3: findings → SSE 实时推送到前端 + 持久化到 DB
-            log.info("═══ [审核 Stage 3/4] 实时推送 findings → SSE + 入库 ═══");
-            updateStage(task, AuditStageEnum.REVIEWING, 70);
-            List<RustRiskFinding> activeFindings = new ArrayList<>();
-            if (reviewResp.getFindings() != null) {
-                // 先删除旧数据（幂等）
-                auditIssueMapper.delete(new LambdaQueryWrapper<AuditIssue>()
-                        .eq(AuditIssue::getAuditId, task.getId()));
-                int seq = 0;
-                for (RustRiskFinding finding : reviewResp.getFindings()) {
-                    if (finding.shouldSkip()) continue;
-                    activeFindings.add(finding);
-                    emitSafe(task.getTaskId(), SseEventTypeEnum.ISSUE, toIssueVO(finding));
-                    // 持久化到 audit_issue 表
-                    try {
-                        AuditIssue issue = AuditIssue.builder()
-                                .auditId(task.getId())
-                                .issueNo("ISSUE-" + (finding.getRiskId() != null ? finding.getRiskId() : String.valueOf(++seq)))
-                                .severity(finding.mappedSeverity())
-                                .category(finding.getRiskType())
-                                .description(finding.getReason() != null ? finding.getReason() : finding.getRiskType())
-                                .suggestion(finding.getSuggestion())
-                                .pageNumber(finding.getPageNumber())
-                                .sectionName(finding.getSectionPath() != null
-                                        ? String.join(" > ", finding.getSectionPath()) : null)
-                                .context(finding.getContext() != null ? finding.getContext() : finding.getSourceQuote())
-                                .reference(finding.getLegalBasis() != null && !finding.getLegalBasis().isEmpty()
-                                        ? String.join("; ", finding.getLegalBasis()) : null)
-                                .createTime(LocalDateTime.now())
-                                .build();
-                        auditIssueMapper.insert(issue);
-                    } catch (Exception e) {
-                        log.warn("Failed to persist finding {}: {}", finding.getRiskId(), e.getMessage());
-                    }
-                }
-            }
-
-            // Stage 4: 完成
-            task.setTaskStatus(AuditTaskStatusEnum.COMPLETED.getCode());
-            task.setStage(AuditStageEnum.SUMMARY.name());
-            task.setProgress(100);
-            task.setEndTime(LocalDateTime.now());
-            task.setUpdatedAt(LocalDateTime.now());
-            auditTaskMapper.updateById(task);
-            emitSafe(taskId, SseEventTypeEnum.COMPLETE, toCompleteVO(task, activeFindings, reviewResp));
-            log.info("═══ [审核 Stage 4/4] ✅ 审核完成: taskId={}, findings={} (high={}, medium={}, low={}, info={}) ═══",
-                    taskId, activeFindings.size(),
-                    activeFindings.stream().filter(i -> "high".equals(i.mappedSeverity())).count(),
-                    activeFindings.stream().filter(i -> "medium".equals(i.mappedSeverity())).count(),
-                    activeFindings.stream().filter(i -> "low".equals(i.mappedSeverity())).count(),
-                    activeFindings.stream().filter(i -> "info".equals(i.mappedSeverity())).count());
+            completeTaskFromReview(task, reviewResp);
 
         } catch (Exception ex) {
             log.error("❌ [审核] 未预期的异常导致审核失败: taskId={} — {}", taskId, ex.getMessage(), ex);
@@ -334,6 +329,81 @@ public class AuditEngineServiceImpl implements AuditEngineService {
         }
     }
 
+    /**
+     * 将 Rust 最终结果幂等写入 Java 数据库。正常审核与孤儿任务恢复共用，
+     * 避免两条路径出现状态或字段映射差异。
+     */
+    private synchronized void completeTaskFromReview(
+            AuditTask originalTask,
+            RustReviewResponse reviewResp) {
+        AuditTask task = loadTask(originalTask.getTaskId());
+        if (task == null) {
+            throw new IllegalStateException("审核任务不存在: " + originalTask.getTaskId());
+        }
+        if (AuditTaskStatusEnum.COMPLETED.getCode().equals(task.getTaskStatus())) {
+            log.info("completeTaskFromReview skipped: task already completed, taskId={}", task.getTaskId());
+            return;
+        }
+
+        log.info("═══ [审核 Stage 3/4] findings → SSE + DB: taskId={} ═══", task.getTaskId());
+        auditTaskMapper.advanceReviewProgress(task.getTaskId(), 70, LocalDateTime.now());
+
+        List<RustRiskFinding> activeFindings = new ArrayList<>();
+        // 先删除旧数据，确保恢复操作可安全重试。
+        auditIssueMapper.delete(new LambdaQueryWrapper<AuditIssue>()
+                .eq(AuditIssue::getAuditId, task.getId()));
+
+        if (reviewResp.getFindings() != null) {
+            int seq = 0;
+            for (RustRiskFinding finding : reviewResp.getFindings()) {
+                if (finding.shouldSkip()) continue;
+                activeFindings.add(finding);
+                try {
+                    AuditIssue issue = AuditIssue.builder()
+                            .auditId(task.getId())
+                            .issueNo("ISSUE-" + (finding.getRiskId() != null
+                                    ? finding.getRiskId() : String.valueOf(++seq)))
+                            .severity(finding.mappedSeverity())
+                            .isCritical(finding.isCritical())
+                            .criticalReason(finding.getCriticalReason())
+                            .category(finding.getRiskType())
+                            .description(finding.getReason() != null
+                                    ? finding.getReason() : finding.getRiskType())
+                            .suggestion(finding.getSuggestion())
+                            .pageNumber(finding.getPageNumber())
+                            .sectionName(finding.getSectionPath() != null
+                                    ? String.join(" > ", finding.getSectionPath()) : null)
+                            .context(finding.getContext() != null
+                                    ? finding.getContext() : finding.getSourceQuote())
+                            .reference(finding.getLegalBasis() != null
+                                    && !finding.getLegalBasis().isEmpty()
+                                    ? String.join("; ", finding.getLegalBasis()) : null)
+                            .createTime(LocalDateTime.now())
+                            .build();
+                    auditIssueMapper.insert(issue);
+                } catch (Exception e) {
+                    log.warn("Failed to persist finding {}: {}", finding.getRiskId(), e.getMessage());
+                }
+            }
+        }
+
+        LocalDateTime completedAt = LocalDateTime.now();
+        auditTaskMapper.markCompleted(task.getTaskId(), completedAt);
+        task.setTaskStatus(AuditTaskStatusEnum.COMPLETED.getCode());
+        task.setStage(AuditStageEnum.SUMMARY.name());
+        task.setProgress(100);
+        task.setEndTime(completedAt);
+        task.setUpdatedAt(completedAt);
+        emitSafe(task.getTaskId(), SseEventTypeEnum.COMPLETE,
+                toCompleteVO(task, activeFindings, reviewResp));
+        log.info("═══ [审核 Stage 4/4] ✅ 审核完成: taskId={}, findings={} (high={}, medium={}, low={}, info={}) ═══",
+                task.getTaskId(), activeFindings.size(),
+                activeFindings.stream().filter(i -> "high".equals(i.mappedSeverity())).count(),
+                activeFindings.stream().filter(i -> "medium".equals(i.mappedSeverity())).count(),
+                activeFindings.stream().filter(i -> "low".equals(i.mappedSeverity())).count(),
+                activeFindings.stream().filter(i -> "info".equals(i.mappedSeverity())).count());
+    }
+
     // ── 映射：RustRiskFinding → IssueVO（SSE 推送用） ────────────────
 
     private IssueVO toIssueVO(RustRiskFinding f) {
@@ -341,6 +411,8 @@ public class AuditEngineServiceImpl implements AuditEngineService {
         vo.setIssueNo("ISSUE-" + (f.getRiskId() != null ? f.getRiskId() : "?"));
         vo.setRiskId(f.getRiskId());
         vo.setSeverity(f.mappedSeverity());
+        vo.setIsCritical(f.isCritical());
+        vo.setCriticalReason(f.getCriticalReason());
         vo.setCategory(f.getRiskType());
         vo.setAgentName(f.getAgent());
         vo.setDescription(f.getReason() != null ? f.getReason() : f.getRiskType());
@@ -412,11 +484,13 @@ public class AuditEngineServiceImpl implements AuditEngineService {
     }
 
     private void failTask(AuditTask task, String errorMsg) {
+        LocalDateTime failedAt = LocalDateTime.now();
+        String safeError = crop(errorMsg);
+        auditTaskMapper.markFailed(task.getTaskId(), safeError, failedAt);
         task.setTaskStatus(AuditTaskStatusEnum.FAILED.getCode());
-        task.setErrorMsg(crop(errorMsg));
-        task.setEndTime(LocalDateTime.now());
-        task.setUpdatedAt(LocalDateTime.now());
-        auditTaskMapper.updateById(task);
+        task.setErrorMsg(safeError);
+        task.setEndTime(failedAt);
+        task.setUpdatedAt(failedAt);
         emitSafe(task.getTaskId(), SseEventTypeEnum.COMPLETE, toCompleteVO(task, List.of(), null));
     }
 
@@ -426,6 +500,19 @@ public class AuditEngineServiceImpl implements AuditEngineService {
             sseHub.emit(taskId, eventType, payload, eventId);
         } catch (Exception ex) {
             log.warn("emit sse failed: taskId={}, event={}", taskId, eventType.getEventName(), ex);
+        }
+    }
+
+    /**
+     * 高频实时事件不写 audit_task_event。Trace 已有专用表，finding 最终会写
+     * audit_issue；重复持久化会放大数据库压力并拖慢 Rust SSE 消费。
+     */
+    private void emitTransient(String taskId, SseEventTypeEnum eventType, Object payload) {
+        try {
+            sseHub.emit(taskId, eventType, payload);
+        } catch (Exception ex) {
+            log.warn("emit transient sse failed: taskId={}, event={}",
+                    taskId, eventType.getEventName(), ex);
         }
     }
 
@@ -448,74 +535,54 @@ public class AuditEngineServiceImpl implements AuditEngineService {
             String rustDocId,
             CompletableFuture<Void> reviewDoneSignal,
             CompletableFuture<String> reviewErrorSignal) {
+        long timeoutMs = java.util.concurrent.TimeUnit.MINUTES.toMillis(
+                rustApiProperties.getReviewTimeoutMinutes());
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        boolean doneLogged = false;
 
-        Supplier<RustReviewResultResponse> fetchResult = () -> {
+        // Rust 的 GET /result 是最终事实来源；SSE 只负责低延迟通知和界面进度。
+        // 即使进度事件丢帧或连接中断，也持续轮询最终结果，避免制造孤儿任务。
+        while (System.currentTimeMillis() < deadline) {
+            if (reviewDoneSignal.isDone() && !doneLogged) {
+                log.info("Rust review SSE done received; confirming via result endpoint: docId={}", rustDocId);
+                doneLogged = true;
+            }
+
             try {
-                return rustApiClient.getReviewResult(rustDocId);
-            } catch (Exception e) {
-                log.warn("Rust getReviewResult failed: docId={}, {}", rustDocId, e.getMessage());
-                return null;
-            }
-        };
-
-        try {
-            CompletableFuture.anyOf(reviewDoneSignal, reviewErrorSignal)
-                .get(rustApiProperties.getReviewTimeoutMinutes(), java.util.concurrent.TimeUnit.MINUTES);
-
-            if (reviewErrorSignal.isDone()) {
-                String errMsg;
-                try {
-                    errMsg = reviewErrorSignal.get();
-                } catch (Exception e) {
-                    errMsg = "审核引擎错误（无法获取详情）";
+                RustReviewResultResponse result = rustApiClient.getReviewResult(rustDocId);
+                if (result != null && result.isCompleted()) {
+                    return result.getResult();
                 }
-                log.error("Rust review engine error via SSE: docId={}, {}", rustDocId, errMsg);
-                RustReviewResultResponse r = fetchResult.get();
-                if (r != null && r.isFailed()) {
-                    log.error("Rust review failed confirmed: docId={}, error={}", rustDocId, r.getError());
-                }
-                return null;
-            }
-
-            log.info("Rust review SSE done triggered, fetching result: docId={}", rustDocId);
-            RustReviewResultResponse r = fetchResult.get();
-            if (r != null && r.isCompleted()) {
-                return r.getResult();
-            }
-            try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-            r = fetchResult.get();
-            if (r != null && r.isCompleted()) {
-                return r.getResult();
-            }
-            log.error("Rust review result not ready after done event: docId={}", rustDocId);
-            return null;
-
-        } catch (java.util.concurrent.TimeoutException e) {
-            log.warn("Rust review SSE signal timeout after {}min, falling back to polling: docId={}",
-                rustApiProperties.getReviewTimeoutMinutes(), rustDocId);
-
-            int maxPolls = 3;
-            long pollIntervalMs = 5000;
-            for (int i = 0; i < maxPolls; i++) {
-                RustReviewResultResponse r = fetchResult.get();
-                if (r != null && r.isCompleted()) {
-                    log.info("Rust review result obtained via polling (attempt {}): docId={}", i + 1, rustDocId);
-                    return r.getResult();
-                }
-                if (r != null && r.isFailed()) {
-                    log.error("Rust review failed (polling): docId={}, error={}", rustDocId, r.getError());
+                if (result != null && result.isFailed()) {
+                    log.error("Rust review failed: docId={}, error={}", rustDocId, result.getError());
                     return null;
                 }
-                if (i < maxPolls - 1) {
-                    try { Thread.sleep(pollIntervalMs); } catch (InterruptedException ignored) {}
-                }
+            } catch (Exception e) {
+                log.warn("Rust result poll failed, will retry: docId={}, {}", rustDocId, e.getMessage());
             }
-            log.error("Rust review result not ready after {} polling attempts: docId={}", maxPolls, rustDocId);
-            return null;
-        } catch (Exception e) {
-            log.error("Rust review await interrupted: docId={}, {}", rustDocId, e.getMessage());
-            return null;
+
+            if (reviewErrorSignal.isDone()) {
+                try {
+                    log.error("Rust review engine error via SSE: docId={}, {}",
+                            rustDocId, reviewErrorSignal.get());
+                } catch (Exception ignored) {
+                    log.error("Rust review engine error via SSE: docId={}", rustDocId);
+                }
+                return null;
+            }
+
+            try {
+                Thread.sleep(reviewDoneSignal.isDone() ? 500L : 3000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Rust review wait interrupted: docId={}", rustDocId);
+                return null;
+            }
         }
+
+        log.error("Rust review timed out after {}min: docId={}",
+                rustApiProperties.getReviewTimeoutMinutes(), rustDocId);
+        return null;
     }
 
     // ── VO 构建 ─────────────────────────────────────────────────────
@@ -561,8 +628,11 @@ public class AuditEngineServiceImpl implements AuditEngineService {
 
     private SummaryVO buildSummary(List<RustRiskFinding> findings) {
         SummaryVO s = new SummaryVO();
-        int high = 0, medium = 0, low = 0, info = 0;
+        int critical = 0, high = 0, medium = 0, low = 0, info = 0;
         for (RustRiskFinding f : findings) {
+            if (f.isCritical()) {
+                critical++;
+            }
             String sev = f.mappedSeverity();
             switch (sev) {
                 case "high" -> high++;
@@ -572,6 +642,7 @@ public class AuditEngineServiceImpl implements AuditEngineService {
             }
         }
         s.setTotalIssues(findings.size());
+        s.setCritical(critical);
         s.setHigh(high);
         s.setMedium(medium);
         s.setLow(low);

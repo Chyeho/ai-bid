@@ -28,6 +28,7 @@ use crate::agents::bus::AgentBus;
 use crate::agents::react_loop::{LlmClient, ReActLoop};
 use crate::agents::registry::AgentRegistry;
 use crate::agents::review_event::{FindingLifecycle, ReviewEvent, ReviewEventBus};
+use crate::agents::risk_taxonomy;
 use crate::agents::session_graph::SessionGraph;
 use crate::agents::tools::ToolRegistry;
 use crate::agents::trace::TraceLog;
@@ -69,11 +70,7 @@ fn law_ref_to_search_query(law_ref: &str) -> String {
     // 如果已经是纯法条名，直接使用
     let trimmed = text.trim();
     // 去掉书名号做关键词
-    let keywords: String = trimmed
-        .replace('《', "")
-        .replace('》', " ")
-        .replace('（', " ")
-        .replace('）', " ");
+    let keywords: String = trimmed.replace('《', "").replace(['》', '（', '）'], " ");
 
     if keywords.len() > 3 {
         format!("{} 原文", keywords.trim())
@@ -102,9 +99,27 @@ fn risk_type_to_search_template(risk_type: &str) -> Option<String> {
 /// 从条款文本提取关键搜索词（用于没有 Hypothesis 的条款）。
 fn extract_clause_keywords(text: &str) -> String {
     let keywords = [
-        "★", "▲", "品牌", "型号", "专利", "原厂", "本地", "地域", "排他", "唯一",
-        "微信", "小程序", "App", "内部规范", "标准", "认证", "资质",
-        "否决", "废标", "无效标", "一票否决",
+        "★",
+        "▲",
+        "品牌",
+        "型号",
+        "专利",
+        "原厂",
+        "本地",
+        "地域",
+        "排他",
+        "唯一",
+        "微信",
+        "小程序",
+        "App",
+        "内部规范",
+        "标准",
+        "认证",
+        "资质",
+        "否决",
+        "废标",
+        "无效标",
+        "一票否决",
     ];
     let matched: Vec<&str> = keywords
         .iter()
@@ -193,7 +208,10 @@ impl Coordinator {
 
         // 启动时加载已有动态 Agent
         if let Err(e) = coordinator.load_dynamic_agents() {
-            eprintln!("  [DYNAMIC] 加载动态 Agent 失败: {}（继续使用内置 Agent）", e);
+            eprintln!(
+                "  [DYNAMIC] 加载动态 Agent 失败: {}（继续使用内置 Agent）",
+                e
+            );
         }
 
         coordinator
@@ -208,10 +226,7 @@ impl Coordinator {
     }
 
     /// 设置指标采集器（用于记录全链路性能数据）。
-    pub fn with_metrics(
-        mut self,
-        collector: Arc<Mutex<crate::metrics::MetricsCollector>>,
-    ) -> Self {
+    pub fn with_metrics(mut self, collector: Arc<Mutex<crate::metrics::MetricsCollector>>) -> Self {
         self.metrics = Some(collector);
         self
     }
@@ -227,10 +242,9 @@ impl Coordinator {
     ///   盲点扫描和经验沉淀（生成 DynamicAgentDefinition，写入 dynamic_agents.json）。
     pub async fn review(&self, clauses: &[ReviewClause]) -> Result<CoordinatorOutput> {
         let total_clauses = clauses.len();
-        let review_start = std::time::Instant::now();
+        let _review_start = std::time::Instant::now();
 
         // ── 指标：记录 Coordinator 阶段耗时 ──
-        let mut phase_start = review_start;
         eprintln!(
             "\n╔══════════════════════════════════════════════════════════════╗\n\
                ║  Coordinator: Multi-Agent 审查管线启动                        ║\n\
@@ -267,12 +281,13 @@ impl Coordinator {
             let mut collector = m.lock().await;
             collector.record_sub_phase("Scout", 0);
         }
-        phase_start = std::time::Instant::now();
+        let mut phase_start = std::time::Instant::now();
 
         // [1] ROUTE: clauses → HashMap<AgentId, Vec<ReviewClause>>
         emit(&ReviewEvent::Phase {
             phase: crate::agents::review_event::PipelinePhase::Route,
-            phase_index: 1, total_phases: 7,
+            phase_index: 1,
+            total_phases: 7,
             message: "关键词路由中...".to_string(),
         });
         let routing = self.route_clauses(clauses);
@@ -294,7 +309,8 @@ impl Coordinator {
         // [2.5] BATCH_SEARCH: 根据 Scout 假设批量预搜索法规/案例
         emit(&ReviewEvent::Phase {
             phase: crate::agents::review_event::PipelinePhase::Execute, // 复用 Execute phase 类型
-            phase_index: 2, total_phases: 7,
+            phase_index: 2,
+            total_phases: 7,
             message: "批量预搜索法规中...".to_string(),
         });
         self.batch_search_phase(clauses).await;
@@ -311,13 +327,16 @@ impl Coordinator {
         let agent_count = routing.len();
         emit(&ReviewEvent::Phase {
             phase: crate::agents::review_event::PipelinePhase::Execute,
-            phase_index: 2, total_phases: 7,
+            phase_index: 2,
+            total_phases: 7,
             message: format!("{} 个 Agent 并行审查中...", agent_count),
         });
         // 发送所有 Agent 的初始进度（pending/running）
         for (agent_id, clauses) in &routing {
             let agent_id_str = agent_id.to_string();
-            let label = self.registry.get(agent_id.clone())
+            let label = self
+                .registry
+                .get(agent_id.clone())
                 .map(|d| d.display_name.to_string())
                 .unwrap_or_else(|| agent_id_str.clone());
             emit(&ReviewEvent::AgentProgress {
@@ -337,7 +356,7 @@ impl Coordinator {
             let mut collector = m.lock().await;
             collector.record_sub_phase("Execute", exec_duration);
             // 按 Agent 记录 finding 统计
-            for (agent_id, _clauses) in &routing {
+            for agent_id in routing.keys() {
                 let agent_name = agent_id.to_string();
                 let agent_findings: Vec<&crate::agents::types::RiskFinding> = all_findings
                     .iter()
@@ -355,20 +374,38 @@ impl Coordinator {
 
         // 发射 execute 阶段统计
         let raw_total = all_findings.len();
-        let raw_high = all_findings.iter().filter(|f| f.severity == RiskSeverity::High).count();
-        let raw_medium = all_findings.iter().filter(|f| f.severity == RiskSeverity::Medium).count();
-        let raw_low = all_findings.iter().filter(|f| f.severity == RiskSeverity::Low).count();
-        let raw_info = all_findings.iter().filter(|f| f.severity == RiskSeverity::Info).count();
+        let raw_high = all_findings
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::High)
+            .count();
+        let raw_medium = all_findings
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Medium)
+            .count();
+        let raw_low = all_findings
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Low)
+            .count();
+        let raw_info = all_findings
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Info)
+            .count();
         emit(&ReviewEvent::Stats {
             phase: crate::agents::review_event::PipelinePhase::Execute,
-            total_raw: raw_total, total_merged: raw_total, total_verified: 0,
-            high: raw_high, medium: raw_medium, low: raw_low, info: raw_info,
+            total_raw: raw_total,
+            total_merged: raw_total,
+            total_verified: 0,
+            high: raw_high,
+            medium: raw_medium,
+            low: raw_low,
+            info: raw_info,
         });
 
         // [4] MERGE: 合并 + 去重
         emit(&ReviewEvent::Phase {
             phase: crate::agents::review_event::PipelinePhase::Merge,
-            phase_index: 3, total_phases: 7,
+            phase_index: 3,
+            total_phases: 7,
             message: format!("去重合并中 ({} 条原始发现)...", all_findings.len()),
         });
         let merge_result = self.merge_findings_v3(all_findings, &emit);
@@ -385,21 +422,39 @@ impl Coordinator {
         }
         phase_start = std::time::Instant::now();
 
-        let merge_high = merged.iter().filter(|f| f.severity == RiskSeverity::High && !f.no_risk).count();
-        let merge_medium = merged.iter().filter(|f| f.severity == RiskSeverity::Medium && !f.no_risk).count();
-        let merge_low = merged.iter().filter(|f| f.severity == RiskSeverity::Low && !f.no_risk).count();
-        let merge_info = merged.iter().filter(|f| f.severity == RiskSeverity::Info && !f.no_risk).count();
+        let merge_high = merged
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::High && !f.no_risk)
+            .count();
+        let merge_medium = merged
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Medium && !f.no_risk)
+            .count();
+        let merge_low = merged
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Low && !f.no_risk)
+            .count();
+        let merge_info = merged
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Info && !f.no_risk)
+            .count();
         emit(&ReviewEvent::Stats {
             phase: crate::agents::review_event::PipelinePhase::Merge,
-            total_raw: raw_total, total_merged: merged.len(), total_verified: 0,
-            high: merge_high, medium: merge_medium, low: merge_low, info: merge_info,
+            total_raw: raw_total,
+            total_merged: merged.len(),
+            total_verified: 0,
+            high: merge_high,
+            medium: merge_medium,
+            low: merge_low,
+            info: merge_info,
         });
 
         // [5] LEGAL VERIFY: 对抗法条验证
         let legal_verify_count = if self.config.enable_legal_verify {
             emit(&ReviewEvent::Phase {
                 phase: crate::agents::review_event::PipelinePhase::LegalVerify,
-                phase_index: 4, total_phases: 7,
+                phase_index: 4,
+                total_phases: 7,
                 message: "法条引用对抗验证中...".to_string(),
             });
             let lv_count = self.legal_verify(&mut merged).await;
@@ -408,6 +463,8 @@ impl Coordinator {
                 emit(&ReviewEvent::FindingAdded {
                     risk_id: f.risk_id.clone(),
                     severity: severity_str(&f.severity).to_string(),
+                    is_critical: f.is_critical,
+                    critical_reason: f.critical_reason.clone(),
                     risk_type: f.risk_type.clone(),
                     agent: f.agent.clone(),
                     confidence: f.confidence as f64,
@@ -434,23 +491,44 @@ impl Coordinator {
         }
         phase_start = std::time::Instant::now();
 
-        let verified_high = merged.iter().filter(|f| f.severity == RiskSeverity::High && !f.no_risk).count();
-        let verified_medium = merged.iter().filter(|f| f.severity == RiskSeverity::Medium && !f.no_risk).count();
-        let verified_low = merged.iter().filter(|f| f.severity == RiskSeverity::Low && !f.no_risk).count();
-        let verified_info = merged.iter().filter(|f| f.severity == RiskSeverity::Info && !f.no_risk).count();
+        let verified_high = merged
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::High && !f.no_risk)
+            .count();
+        let verified_medium = merged
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Medium && !f.no_risk)
+            .count();
+        let verified_low = merged
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Low && !f.no_risk)
+            .count();
+        let verified_info = merged
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Info && !f.no_risk)
+            .count();
         emit(&ReviewEvent::Stats {
             phase: crate::agents::review_event::PipelinePhase::LegalVerify,
-            total_raw: raw_total, total_merged: merged.len(), total_verified: legal_verify_count,
-            high: verified_high, medium: verified_medium, low: verified_low, info: verified_info,
+            total_raw: raw_total,
+            total_merged: merged.len(),
+            total_verified: legal_verify_count,
+            high: verified_high,
+            medium: verified_medium,
+            low: verified_low,
+            info: verified_info,
         });
 
         // [6] DEBATE: 高风险 + 低置信度正反辩论
         emit(&ReviewEvent::Phase {
             phase: crate::agents::review_event::PipelinePhase::Debate,
-            phase_index: 5, total_phases: 7,
+            phase_index: 5,
+            total_phases: 7,
             message: "高风险辩论裁决中...".to_string(),
         });
         self.debate_high_risk(&mut merged).await;
+        // Debate/LegalVerify 都可能回写 severity 或 Critical。最终出口再次执行
+        // 统一分类、证据准入和跨 Agent 去重，禁止下游阶段绕过政策。
+        merged = self.merge_findings_v3(merged, &emit).retained;
 
         // ── 指标：Debate 阶段耗时 ──
         let debate_duration = phase_start.elapsed().as_millis() as u64;
@@ -463,7 +541,8 @@ impl Coordinator {
         // [7] TRIAGE: 按 severity + confidence 分流
         emit(&ReviewEvent::Phase {
             phase: crate::agents::review_event::PipelinePhase::Triage,
-            phase_index: 6, total_phases: 7,
+            phase_index: 6,
+            total_phases: 7,
             message: "最终排序中...".to_string(),
         });
         let merged_before_triage = merged.len();
@@ -485,7 +564,10 @@ impl Coordinator {
             );
         }
 
-        let high_risk_count = findings.iter().filter(|f| f.severity == RiskSeverity::High).count();
+        let high_risk_count = findings
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::High)
+            .count();
         let graph_snapshot = Some(self.graph.snapshot());
 
         let routing_summary = RoutingSummary {
@@ -555,7 +637,9 @@ impl Coordinator {
                 registered
             );
         } else {
-            eprintln!("  [BLINDSPOT] 本次无新的 Agent 建议（盲区已被现有 Agent 覆盖或无需新增检测维度）");
+            eprintln!(
+                "  [BLINDSPOT] 本次无新的 Agent 建议（盲区已被现有 Agent 覆盖或无需新增检测维度）"
+            );
         }
     }
 
@@ -565,6 +649,7 @@ impl Coordinator {
     ///
     /// Scout 对每条 clause 产出 Hypothesis（finding_role=Hypothesis），
     /// 通过 `add_hypothesis()` 轻量写入 SessionGraph，供 Phase 2 Agent 使用。
+    #[allow(dead_code)]
     async fn scout_phase(&self, clauses: &[ReviewClause]) {
         let scout_def = match self.registry.get(AgentId::Scout) {
             Some(d) => d,
@@ -600,26 +685,28 @@ impl Coordinator {
                         .with_print_lock(print_lock)
                         .with_search_cache(search_cache);
                     // NOTE: Scout 不需要 .with_graph() — SessionGraph 此时只有 Chunk 节点
-                    let mut finding = agent.review_single(&clause, &risk_id).await;
-
-                    if !finding.no_risk {
-                        finding.finding_role = FindingRole::Hypothesis;
-                        finding.knowledge_source = "training_knowledge".into();
-                        finding.hypothesized_by = vec!["ScoutAgent".into()];
-                        graph.add_hypothesis(
-                            RiskNode {
-                                finding: finding.clone(),
-                                law_refs: finding.legal_basis.clone(),
-                            },
-                            &clause.chunk_id,
-                        );
+                    let mut findings = agent.review_single(&clause, &risk_id).await;
+                    for finding in &mut findings {
+                        if !finding.no_risk {
+                            finding.finding_role = FindingRole::Hypothesis;
+                            finding.knowledge_source = "training_knowledge".into();
+                            finding.hypothesized_by = vec!["ScoutAgent".into()];
+                            graph.add_hypothesis(
+                                RiskNode {
+                                    finding: finding.clone(),
+                                    law_refs: finding.legal_basis.clone(),
+                                },
+                                &clause.chunk_id,
+                            );
+                        }
                     }
                     graph.add_reviewed_by(&clause.chunk_id, AgentId::Scout);
                     eprintln!(
-                        "  [SCOUT] {}: risk_type={}, no_risk={}",
-                        clause.chunk_id, finding.risk_type, finding.no_risk,
+                        "  [SCOUT] {}: {} hypotheses",
+                        clause.chunk_id,
+                        findings.iter().filter(|f| !f.no_risk).count(),
                     );
-                    finding
+                    findings
                 }));
             }
 
@@ -630,7 +717,7 @@ impl Coordinator {
             eprintln!(
                 "  [SCOUT] 批次 {}/{} 完成",
                 batch_idx + 1,
-                (total + BATCH_SIZE - 1) / BATCH_SIZE
+                total.div_ceil(BATCH_SIZE)
             );
         }
         eprintln!("  [SCOUT] 全部完成: {} clauses 已初筛", total);
@@ -670,10 +757,7 @@ impl Coordinator {
                 }
                 for verify in &h.verification_required {
                     if !verify.is_empty() {
-                        entries.push((
-                            format!("{} 原文 核心内容", verify),
-                            "法规".to_string(),
-                        ));
+                        entries.push((format!("{} 原文 核心内容", verify), "法规".to_string()));
                     }
                 }
                 if let Some(tmpl) = risk_type_to_search_template(&h.risk_type) {
@@ -699,7 +783,7 @@ impl Coordinator {
         let mut seen_queries: HashSet<String> = HashSet::new();
         let mut unique_queries: Vec<(String, String)> = Vec::new();
 
-        for (_chunk_id, queries) in &chunk_queries {
+        for queries in chunk_queries.values() {
             for (query, category) in queries {
                 let dedup_key = format!("{}|{}", query.to_lowercase(), category);
                 if !seen_queries.contains(&dedup_key) {
@@ -820,10 +904,7 @@ impl Coordinator {
         eprintln!(
             "  [BATCH_SEARCH] 完成: {} 次搜索, {} 个 chunk 有预搜索结果",
             total_searches,
-            chunk_queries
-                .iter()
-                .filter(|(_, q)| !q.is_empty())
-                .count()
+            chunk_queries.iter().filter(|(_, q)| !q.is_empty()).count()
         );
     }
 
@@ -833,10 +914,7 @@ impl Coordinator {
     ///
     /// 每条条款可以被多个 Agent 审查（一对多路由）。
     /// 路由策略：条款文本包含 Agent 的 `section_keywords` 中任一关键词 → 分配。
-    fn route_clauses(
-        &self,
-        clauses: &[ReviewClause],
-    ) -> HashMap<AgentId, Vec<ReviewClause>> {
+    fn route_clauses(&self, clauses: &[ReviewClause]) -> HashMap<AgentId, Vec<ReviewClause>> {
         let mut routing: HashMap<AgentId, Vec<ReviewClause>> = HashMap::new();
 
         for clause in clauses {
@@ -861,12 +939,12 @@ impl Coordinator {
                         .iter()
                         .any(|kw| text_lower.contains(&kw.to_lowercase()));
 
-                    if should_route {
-                        routing
-                            .entry(agent_id.clone())
-                            .or_default()
-                            .push(clause.clone());
-                    }
+                if should_route {
+                    routing
+                        .entry(agent_id.clone())
+                        .or_default()
+                        .push(clause.clone());
+                }
             }
         }
 
@@ -889,11 +967,7 @@ impl Coordinator {
 
         // 日志
         for (agent_id, agent_clauses) in &routing {
-            eprintln!(
-                "  [ROUTE] {} ← {} 条条款",
-                agent_id,
-                agent_clauses.len()
-            );
+            eprintln!("  [ROUTE] {} ← {} 条条款", agent_id, agent_clauses.len());
         }
 
         routing
@@ -1028,8 +1102,7 @@ impl Coordinator {
                     let raw_findings = findings.iter().filter(|f| !f.no_risk).count();
                     eprintln!(
                         "  [EXECUTE] {} 完成，发现 {} 条风险",
-                        agent_name,
-                        raw_findings
+                        agent_name, raw_findings
                     );
 
                     // 发送 AgentProgress → SSE（完成事件）
@@ -1099,10 +1172,17 @@ impl Coordinator {
         emit: &dyn Fn(&ReviewEvent),
     ) -> MergeResult {
         let total = findings.len();
-        // 简单去重：按 risk_type|clause_ids|agent 组合去重
+        // 简单去重：按稳定分类|证据|clause_ids|agent 组合去重。
+        // 同一 chunk 中的不同类别不得仅因文字相似被合并。
         let mut seen: HashMap<String, RiskFinding> = HashMap::new();
         for f in findings {
-            let key = format!("{}|{}|{}", f.risk_type, f.clause_ids.join(","), f.agent);
+            let key = format!(
+                "{}|{}|{}|{}",
+                finding_category(&f),
+                f.source_quote.trim(),
+                f.clause_ids.join(","),
+                f.agent
+            );
             if let Some(existing) = seen.get(&key) {
                 if f.confidence > existing.confidence {
                     // 旧的被替换，通知前端移除旧 risk_id
@@ -1165,8 +1245,7 @@ impl Coordinator {
             }
 
             // 在不同 clause_id 之间创建 linked_to 边
-            let all_clause_ids: Vec<&String> =
-                group.iter().flat_map(|f| &f.clause_ids).collect();
+            let all_clause_ids: Vec<&String> = group.iter().flat_map(|f| &f.clause_ids).collect();
             for i in 0..all_clause_ids.len() {
                 for j in (i + 1)..all_clause_ids.len() {
                     let cid_a = all_clause_ids[i];
@@ -1185,7 +1264,10 @@ impl Coordinator {
         }
 
         if link_count > 0 {
-            eprintln!("  [LINK] 跨 Agent 关联推导完成: {} 条 linked_to 边", link_count);
+            eprintln!(
+                "  [LINK] 跨 Agent 关联推导完成: {} 条 linked_to 边",
+                link_count
+            );
         }
     }
 
@@ -1197,9 +1279,9 @@ impl Coordinator {
     /// 按 `(risk_type, clause_ids)` 分组，同组内保留 confidence 最高的 finding，
     /// 合并 contributors（hypothesized_by, verified_by）。
     ///
-    /// **Stage 2 — 跨组 Jaccard 去重**：
-    /// 对 Stage 1 结果做 Jaccard 文本相似度检查（阈值 0.5），
-    /// 捕获同一条款上 risk_type 标签不同但实质相同的发现。
+    /// **Stage 2 — 同类别证据去重**：
+    /// 只在稳定分类相同、条款相同的前提下比较 source_quote，
+    /// 防止同一 chunk 中多个独立问题被 reason 相似度误合并。
     ///
     /// **Hypothesis→Verified 关联**：
     /// 在处理前，将 Hypothesis 的 agent 注入到同 clause + 同 risk_type 的
@@ -1210,9 +1292,22 @@ impl Coordinator {
         emit: &dyn Fn(&ReviewEvent),
     ) -> MergeResult {
         let total = findings.len();
+        let mut normalized = Vec::with_capacity(total);
+        for mut finding in findings {
+            risk_taxonomy::normalize_finding(&mut finding);
+            if risk_taxonomy::is_actionable(&finding) {
+                normalized.push(finding);
+            } else {
+                emit(&ReviewEvent::FindingRemoved {
+                    risk_id: finding.risk_id,
+                    reason: "证据准入失败：风险结论缺少有效原文引文".to_string(),
+                    merged_into: None,
+                });
+            }
+        }
 
         // 分离 Hypothesis 和 Verified（各自拥有所有权）
-        let (hypotheses, mut verified): (Vec<RiskFinding>, Vec<RiskFinding>) = findings
+        let (hypotheses, mut verified): (Vec<RiskFinding>, Vec<RiskFinding>) = normalized
             .into_iter()
             .partition(|f| f.finding_role == FindingRole::Hypothesis);
 
@@ -1220,26 +1315,25 @@ impl Coordinator {
         for vf in &mut verified {
             for h in &hypotheses {
                 let same_clause = h.clause_ids.iter().any(|c| vf.clause_ids.contains(c));
-                let same_type = h.risk_type == vf.risk_type;
-                if same_clause && same_type {
-                    if !vf.hypothesized_by.contains(&h.agent) {
-                        vf.hypothesized_by.push(h.agent.clone());
-                    }
+                let same_type = finding_category(h) == finding_category(vf);
+                if same_clause && same_type && !vf.hypothesized_by.contains(&h.agent) {
+                    vf.hypothesized_by.push(h.agent.clone());
                 }
             }
         }
 
-        // ── Stage 1: 同 (risk_type, clause_ids) 去重 ──
+        // ── Stage 1: 同 (category_code/risk_type, clause_ids, evidence) 去重 ──
         let mut stage1: Vec<RiskFinding> = Vec::new();
         for vf in verified {
             let mut merged = false;
             for existing in stage1.iter_mut() {
-                let same_type = existing.risk_type == vf.risk_type;
+                let same_type = finding_category(existing) == finding_category(&vf);
                 let same_clause = existing
                     .clause_ids
                     .iter()
                     .any(|c| vf.clause_ids.contains(c));
-                if same_type && same_clause {
+                let same_evidence = evidence_similarity(existing, &vf) >= 0.70;
+                if same_type && same_clause && same_evidence {
                     // 同风险类型 + 同条款 → 合并
                     merge_contributors(existing, &vf);
                     for cid in &vf.clause_ids {
@@ -1279,21 +1373,21 @@ impl Coordinator {
             stage1_removed,
         );
 
-        // ── Stage 2: 跨组 Jaccard 去重（阈值 0.5） ──
+        // ── Stage 2: 同类别 + 同条款 + 高证据相似度去重 ──
         let mut retained: Vec<RiskFinding> = Vec::new();
         for f in stage1 {
             let mut merged = false;
             for existing in retained.iter_mut() {
                 // 不同 clause 不合并
-                let same_clause = existing
-                    .clause_ids
-                    .iter()
-                    .any(|c| f.clause_ids.contains(c));
+                let same_clause = existing.clause_ids.iter().any(|c| f.clause_ids.contains(c));
                 if !same_clause {
                     continue;
                 }
-                let sim = text_similarity(&f.reason, &existing.reason);
-                if sim >= 0.50 {
+                if finding_category(existing) != finding_category(&f) {
+                    continue;
+                }
+                let sim = evidence_similarity(&f, existing);
+                if sim >= 0.65 {
                     merge_contributors(existing, &f);
                     for cid in &f.clause_ids {
                         if !existing.clause_ids.contains(cid) {
@@ -1307,7 +1401,7 @@ impl Coordinator {
                     existing.confidence = existing.confidence.max(f.confidence);
                     emit(&ReviewEvent::FindingRemoved {
                         risk_id: f.risk_id.clone(),
-                        reason: format!("文本相似度合并 (sim={:.2})", sim),
+                        reason: format!("同类别证据相似度合并 (sim={:.2})", sim),
                         merged_into: Some(existing.risk_id.clone()),
                     });
                     merged = true;
@@ -1357,13 +1451,11 @@ impl Coordinator {
     ///
     /// - 旧版：每条 finding 独立 ReAct（N 条 = N 个 ReAct = 6N 次 LLM 调用）
     /// - 新版：按领域分组批量（N 条 ≈ 3-5 组 ≈ 3-5 个 ReAct ≈ 12-20 次 LLM 调用）
-    async fn legal_verify(&self, findings: &mut Vec<RiskFinding>) -> usize {
+    async fn legal_verify(&self, findings: &mut [RiskFinding]) -> usize {
         let to_verify: Vec<RiskFinding> = findings
             .iter()
             .filter(|f| {
-                !f.no_risk
-                    && !f.legal_basis.is_empty()
-                    && f.finding_role == FindingRole::Verified
+                !f.no_risk && !f.legal_basis.is_empty() && f.finding_role == FindingRole::Verified
             })
             .cloned()
             .collect();
@@ -1385,10 +1477,7 @@ impl Coordinator {
             domain_groups.entry(domain).or_default().push(f.clone());
         }
 
-        eprintln!(
-            "  [LEGAL_VERIFY] 分类: {} 个法律领域",
-            domain_groups.len()
-        );
+        eprintln!("  [LEGAL_VERIFY] 分类: {} 个法律领域", domain_groups.len());
         for (domain, group) in &domain_groups {
             eprintln!("    - {} ({} 条)", domain, group.len());
         }
@@ -1417,10 +1506,7 @@ impl Coordinator {
             }
 
             if !verified.is_empty() {
-                eprintln!(
-                    "    [{}] 规则直通: {} 条直接通过",
-                    domain, verified.len()
-                );
+                eprintln!("    [{}] 规则直通: {} 条直接通过", domain, verified.len());
             }
 
             // ── Step C: LLM 批量验证（仅对模糊条目）──
@@ -1475,9 +1561,9 @@ impl Coordinator {
                 for result in &batch_results {
                     if result.risk_type == "__BATCH_VERIFICATION__" {
                         // 从 source_quote 中提取原始 JSON
-                        if let Ok(batch_output) = serde_json::from_str::<BatchVerificationOutput>(
-                            &result.source_quote,
-                        ) {
+                        if let Ok(batch_output) =
+                            serde_json::from_str::<BatchVerificationOutput>(&result.source_quote)
+                        {
                             for entry in &batch_output.verifications {
                                 for original in findings.iter_mut() {
                                     if original.risk_id == entry.risk_id {
@@ -1493,6 +1579,7 @@ impl Coordinator {
                                             }
                                         } else {
                                             original.severity = RiskSeverity::Info;
+                                            original.clear_criticality();
                                             original.reason.push_str(&format!(
                                                 "\n[LegalVerify] ❌ 批量验证未通过 (domain={}, confidence={:.2}): {}。已降级。",
                                                 domain, entry.confidence, entry.reason
@@ -1504,10 +1591,7 @@ impl Coordinator {
                                 }
                             }
                         } else {
-                            eprintln!(
-                                "    [{}] ⚠️ 批量结果 JSON 解析失败",
-                                domain
-                            );
+                            eprintln!("    [{}] ⚠️ 批量结果 JSON 解析失败", domain);
                         }
                         break; // 只解析第一个 BATCH_VERIFICATION 标记
                     }
@@ -1529,6 +1613,7 @@ impl Coordinator {
                         if original.risk_id == af.risk_id {
                             if original.confidence < 0.5 {
                                 original.severity = RiskSeverity::Info;
+                                original.clear_criticality();
                                 original
                                     .reason
                                     .push_str("\n[LegalVerify] ❌ 置信度不足，已降级 (fallback)。");
@@ -1542,60 +1627,62 @@ impl Coordinator {
         }
 
         // ── Step D: Other 领域（逐条 fallback）──
-        if let Some(other_group) = domain_groups.get(&LegalDomain::Other) {
-            if !other_group.is_empty() && legal_def.is_some() {
-                eprintln!(
-                    "  [LEGAL_VERIFY] Other 领域 {} 条 → 逐条 fallback 验证...",
-                    other_group.len()
-                );
-                let def = legal_def.unwrap();
-                for f in other_group {
-                    let clause = ReviewClause {
-                        chunk_id: format!("legal_verify_{}", f.risk_id),
-                        section_path: vec!["法条验证".to_string(), f.risk_id.clone()],
-                        text: Self::format_single_legal_verify_task(f),
-                        page_start: 0,
-                        page_end: 0,
-                        tier: RiskTier::Medium,
-                        tier_max_turns: 3, // fallback 模式减到 3 轮
-                    };
+        if let Some(other_group) = domain_groups.get(&LegalDomain::Other)
+            && !other_group.is_empty()
+            && legal_def.is_some()
+        {
+            eprintln!(
+                "  [LEGAL_VERIFY] Other 领域 {} 条 → 逐条 fallback 验证...",
+                other_group.len()
+            );
+            let def = legal_def.unwrap();
+            for f in other_group {
+                let clause = ReviewClause {
+                    chunk_id: format!("legal_verify_{}", f.risk_id),
+                    section_path: vec!["法条验证".to_string(), f.risk_id.clone()],
+                    text: Self::format_single_legal_verify_task(f),
+                    page_start: 0,
+                    page_end: 0,
+                    tier: RiskTier::Medium,
+                    tier_max_turns: 3, // fallback 模式减到 3 轮
+                };
 
-                    let config = def.to_agent_config();
-                    let llm = (self.llm_factory)();
-                    let tools = (self.tools_factory)();
-                    let agent = ReActLoop::new(config, llm, tools)
-                        .with_print_lock(self.print_lock.clone())
-                        .with_search_cache(self.shared_search_cache.clone());
+                let config = def.to_agent_config();
+                let llm = (self.llm_factory)();
+                let tools = (self.tools_factory)();
+                let agent = ReActLoop::new(config, llm, tools)
+                    .with_print_lock(self.print_lock.clone())
+                    .with_search_cache(self.shared_search_cache.clone());
 
-                    let verify_findings = agent.review(&[clause]).await;
-                    for vf in &verify_findings {
-                        if vf.no_risk {
-                            continue;
-                        }
-                        let original_risk_id = vf
-                            .clause_ids
-                            .first()
-                            .and_then(|cid| cid.strip_prefix("legal_verify_"))
-                            .unwrap_or("");
-                        for original in findings.iter_mut() {
-                            if original.risk_id == original_risk_id {
-                                if vf.confidence < 0.5 {
-                                    original.severity = RiskSeverity::Info;
-                                    original.reason.push_str(
-                                        "\n[LegalVerify] ❌ 法条引用验证未通过，已降级。",
-                                    );
-                                } else {
-                                    original.reason.push_str(&format!(
-                                        "\n[LegalVerify] ✅ 法条引用验证通过 (confidence={:.2})。",
-                                        vf.confidence
-                                    ));
-                                    if !vf.legal_basis.is_empty() {
-                                        original.legal_basis = vf.legal_basis.clone();
-                                    }
+                let verify_findings = agent.review(&[clause]).await;
+                for vf in &verify_findings {
+                    if vf.no_risk {
+                        continue;
+                    }
+                    let original_risk_id = vf
+                        .clause_ids
+                        .first()
+                        .and_then(|cid| cid.strip_prefix("legal_verify_"))
+                        .unwrap_or("");
+                    for original in findings.iter_mut() {
+                        if original.risk_id == original_risk_id {
+                            if vf.confidence < 0.5 {
+                                original.severity = RiskSeverity::Info;
+                                original.clear_criticality();
+                                original
+                                    .reason
+                                    .push_str("\n[LegalVerify] ❌ 法条引用验证未通过，已降级。");
+                            } else {
+                                original.reason.push_str(&format!(
+                                    "\n[LegalVerify] ✅ 法条引用验证通过 (confidence={:.2})。",
+                                    vf.confidence
+                                ));
+                                if !vf.legal_basis.is_empty() {
+                                    original.legal_basis = vf.legal_basis.clone();
                                 }
-                                total_verified += 1;
-                                break;
                             }
+                            total_verified += 1;
+                            break;
                         }
                     }
                 }
@@ -1637,8 +1724,7 @@ impl Coordinator {
         for law_ref in &finding.legal_basis {
             // 提取法条引用中的法规名和条款号
             let clean = law_ref
-                .replace('[', "")
-                .replace(']', "")
+                .replace(['[', ']'], "")
                 .replace("《", "")
                 .replace("》", "");
             // 去掉 Markdown URL: "政府采购法第二十七条](http://...)"
@@ -1653,7 +1739,7 @@ impl Coordinator {
                 if clean.contains(law_name) {
                     has_any_law = true;
                     // 尝试提取条款号
-                    if let Some(article_num) = Self::extract_article_number(&clean) {
+                    if let Some(article_num) = Self::extract_article_number(clean) {
                         if article_num >= *min_article && article_num <= *max_article {
                             matched = true;
                         }
@@ -1702,11 +1788,22 @@ impl Coordinator {
 
     /// 将单条待验证 finding 格式化为 LegalVerifyAgent 的输入文本（fallback 用）。
     fn format_single_legal_verify_task(f: &RiskFinding) -> String {
-        let mut task = String::from("## 法条验证任务\n\n请验证以下风险发现中的法条引用是否真实、准确、适用：\n\n");
-        task.push_str(&format!("risk_id={} | risk_type={} | agent={}\n", f.risk_id, f.risk_type, f.agent));
-        task.push_str(&format!("条款文本: {}\n", f.source_quote.chars().take(500).collect::<String>()));
+        let mut task = String::from(
+            "## 法条验证任务\n\n请验证以下风险发现中的法条引用是否真实、准确、适用：\n\n",
+        );
+        task.push_str(&format!(
+            "risk_id={} | risk_type={} | agent={}\n",
+            f.risk_id, f.risk_type, f.agent
+        ));
+        task.push_str(&format!(
+            "条款文本: {}\n",
+            f.source_quote.chars().take(500).collect::<String>()
+        ));
         task.push_str(&format!("法条引用: {}\n", f.legal_basis.join("; ")));
-        task.push_str(&format!("推理: {}\n\n", f.reason.chars().take(500).collect::<String>()));
+        task.push_str(&format!(
+            "推理: {}\n\n",
+            f.reason.chars().take(500).collect::<String>()
+        ));
         task.push_str("请对上述法条引用进行对抗性验证，使用 output_finding 输出验证结论。\n\n");
         task.push_str("🛑 无论验证通过或修正，每条 legal_basis 必须包含可验证的 URL 链接（Markdown 格式: [法条名](URL)），禁止输出纯文本法条名。");
         task
@@ -1714,24 +1811,30 @@ impl Coordinator {
 
     /// 将同一法律领域的多条待验证 finding 格式化为批量验证输入文本。
     fn format_batch_legal_verify_task(domain: &LegalDomain, findings: &[&RiskFinding]) -> String {
-        let mut task = format!(
-            "## 批量法条验证任务 — 领域: {}\n\n",
-            domain
-        );
+        let mut task = format!("## 批量法条验证任务 — 领域: {}\n\n", domain);
         task.push_str(&format!(
             "你需要一次验证 {} 条风险发现的法条引用。它们都属于【{}】领域，共享法律上下文。\n\n",
             findings.len(),
             domain
         ));
         task.push_str("### 验证规则\n\n");
-        task.push_str("1. 对每条 finding，验证其 legal_basis 是否：真实存在、条款号正确、适用于该场景\n");
+        task.push_str(
+            "1. 对每条 finding，验证其 legal_basis 是否：真实存在、条款号正确、适用于该场景\n",
+        );
         task.push_str("2. 使用 web_search 搜索法条原文（一次搜索可覆盖多条 finding）\n");
         task.push_str("3. 修正错误的法条引用，替换为正确的法条名 + URL 链接\n");
-        task.push_str("4. 全部验证完成后，调用 **output_verification_batch** 一次性输出所有结论\n\n");
+        task.push_str(
+            "4. 全部验证完成后，调用 **output_verification_batch** 一次性输出所有结论\n\n",
+        );
         task.push_str("---\n\n");
 
         for (i, f) in findings.iter().enumerate() {
-            task.push_str(&format!("#### [{}/{}] risk_id={}\n", i + 1, findings.len(), f.risk_id));
+            task.push_str(&format!(
+                "#### [{}/{}] risk_id={}\n",
+                i + 1,
+                findings.len(),
+                f.risk_id
+            ));
             task.push_str(&format!("- risk_type: {}\n", f.risk_type));
             task.push_str(&format!("- agent: {}\n", f.agent));
             task.push_str(&format!(
@@ -1752,12 +1855,16 @@ impl Coordinator {
     }
 
     /// LegalVerify 静态 fallback：简单的置信度检查（不调用 LLM）。
-    fn legal_verify_fallback(&self, findings: &mut Vec<RiskFinding>) {
+    #[allow(dead_code)]
+    fn legal_verify_fallback(&self, findings: &mut [RiskFinding]) {
         for finding in findings.iter_mut() {
             if !finding.no_risk && !finding.legal_basis.is_empty() {
                 if finding.confidence < 0.5 {
                     finding.severity = RiskSeverity::Info;
-                    finding.reason.push_str("\n[LegalVerify] ❌ 法条引用置信度不足，已降级 (fallback)。");
+                    finding.clear_criticality();
+                    finding
+                        .reason
+                        .push_str("\n[LegalVerify] ❌ 法条引用置信度不足，已降级 (fallback)。");
                 } else {
                     finding.reason.push_str(&format!(
                         "\n[LegalVerify] ✅ 法条引用置信度充足 (fallback, confidence={:.2})。",
@@ -1773,7 +1880,7 @@ impl Coordinator {
     /// 对 High + confidence ≤ 0.85 的发现启动 DebateAgent 辩论。
     /// ≤ 0.85（非 < 0.85）——LLM 的自然置信度下限约 0.85，
     /// 含等号能捕获所有"不够确信"的 High 发现。
-    async fn debate_high_risk(&self, findings: &mut Vec<RiskFinding>) {
+    async fn debate_high_risk(&self, findings: &mut [RiskFinding]) {
         let candidates: Vec<RiskFinding> = findings
             .iter()
             .filter(|f| {
@@ -1841,9 +1948,7 @@ impl Coordinator {
                     .with_print_lock(self.print_lock.clone())
                     .with_search_cache(self.shared_search_cache.clone());
                 let risk_id = candidate.risk_id.clone();
-                tokio::spawn(async move {
-                    (risk_id, agent.review(&[debate_clause]).await)
-                })
+                tokio::spawn(async move { (risk_id, agent.review(&[debate_clause]).await) })
             })
             .collect();
 
@@ -1854,16 +1959,18 @@ impl Coordinator {
                         if df.no_risk {
                             continue;
                         }
-                        if let Some(original) = findings
-                            .iter_mut()
-                            .find(|f| f.risk_id == risk_id)
-                        {
+                        if let Some(original) = findings.iter_mut().find(|f| f.risk_id == risk_id) {
                             original.severity = df.severity;
+                            original.is_critical =
+                                df.is_critical && df.severity == RiskSeverity::High;
+                            original.critical_reason = if original.is_critical {
+                                df.critical_reason.clone()
+                            } else {
+                                String::new()
+                            };
                             original.confidence = df.confidence;
-                            original.reason = format!(
-                                "{}\n\n[Debate] 辩论裁决: {}",
-                                original.reason, df.reason
-                            );
+                            original.reason =
+                                format!("{}\n\n[Debate] 辩论裁决: {}", original.reason, df.reason);
                             original.suggestion = df.suggestion.clone();
                             eprintln!(
                                 "  [DEBATE] {} → severity={} confidence={:.2}",
@@ -1884,13 +1991,23 @@ impl Coordinator {
     /// 判断章节是否为"前导内容"（纯元数据/邀请函/目录等，无需盲点复查）。
     fn is_frontmatter_section(section_path: &[String]) -> bool {
         let frontmatter_keywords = [
-            "磋商邀请", "磋商公告", "招标公告", "投标邀请",
-            "未归类", "封面", "目录", "前附表", "须知前附表",
-            "采购公告", "竞争性谈判", "询价公告", "单一来源",
+            "磋商邀请",
+            "磋商公告",
+            "招标公告",
+            "投标邀请",
+            "未归类",
+            "封面",
+            "目录",
+            "前附表",
+            "须知前附表",
+            "采购公告",
+            "竞争性谈判",
+            "询价公告",
+            "单一来源",
         ];
-        section_path.iter().any(|s| {
-            frontmatter_keywords.iter().any(|kw| s.contains(kw))
-        })
+        section_path
+            .iter()
+            .any(|s| frontmatter_keywords.iter().any(|kw| s.contains(kw)))
     }
 
     /// 构造 BlindSpotAgent 的图上下文附录（注入 system message）。
@@ -1916,7 +2033,7 @@ impl Coordinator {
                     r.finding.confidence,
                 ));
             }
-            ctx.push_str("\n");
+            ctx.push('\n');
         }
 
         // contradicts 边
@@ -1930,7 +2047,7 @@ impl Coordinator {
                     ctx.push_str(&format!("- {} ↔ {} : {}\n", cid, other_cid, reason));
                 }
             }
-            ctx.push_str("\n");
+            ctx.push('\n');
         }
 
         // same_law 边
@@ -1944,7 +2061,7 @@ impl Coordinator {
                     ctx.push_str(&format!("- {} 共享法条: {}\n", cid, others.join(", ")));
                 }
             }
-            ctx.push_str("\n");
+            ctx.push('\n');
         }
 
         // Scout Hypothesis 覆盖度（已初筛维度参考）
@@ -1968,7 +2085,7 @@ impl Coordinator {
                     r.finding.verification_required.join(", "),
                 ));
             }
-            ctx.push_str("\n");
+            ctx.push('\n');
         }
 
         // 审查覆盖统计
@@ -1997,11 +2114,7 @@ impl Coordinator {
             .chunks
             .keys()
             .filter(|cid| {
-                let reviewed = snapshot
-                    .reviewed_by
-                    .get(*cid)
-                    .map(|v| v.len())
-                    .unwrap_or(0);
+                let reviewed = snapshot.reviewed_by.get(*cid).map(|v| v.len()).unwrap_or(0);
                 let has_risk = snapshot
                     .has_risk
                     .get(*cid)
@@ -2009,12 +2122,11 @@ impl Coordinator {
                     .unwrap_or(false);
 
                 // 跳过 L1 格式条款和 frontmatter
-                if let Some(chunk) = snapshot.chunks.get(*cid) {
-                    if chunk.tier == RiskTier::Low
-                        || Self::is_frontmatter_section(&chunk.section_path)
-                    {
-                        return false;
-                    }
+                if let Some(chunk) = snapshot.chunks.get(*cid)
+                    && (chunk.tier == RiskTier::Low
+                        || Self::is_frontmatter_section(&chunk.section_path))
+                {
+                    return false;
                 }
 
                 reviewed == 0 || (reviewed <= 1 && !has_risk)
@@ -2023,18 +2135,21 @@ impl Coordinator {
             .collect();
 
         if candidate_ids.is_empty() {
-            eprintln!(
-                "  [BLINDSPOT] 无候选条款（所有条款已被充分审查），跳过 ReAct 扫描"
-            );
+            eprintln!("  [BLINDSPOT] 无候选条款（所有条款已被充分审查），跳过 ReAct 扫描");
             return Vec::new();
         }
 
         let total_candidates = candidate_ids.len();
-        let capped = total_candidates.min(50);
-        if total_candidates > 50 {
+        let max_candidates = std::env::var("AIBID_BLINDSPOT_MAX_CANDIDATES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(12)
+            .clamp(1, 50);
+        let capped = total_candidates.min(max_candidates);
+        if total_candidates > max_candidates {
             eprintln!(
-                "  [BLINDSPOT] 候选条款过多 ({} 条)，截取前 50 条",
-                total_candidates
+                "  [BLINDSPOT] 候选条款过多 ({} 条)，按后台预算截取前 {} 条",
+                total_candidates, max_candidates,
             );
         }
 
@@ -2095,8 +2210,7 @@ impl Coordinator {
 
         let total_findings = findings.len();
         let no_risk_count = findings.iter().filter(|f| f.no_risk).count();
-        let real_findings: Vec<RiskFinding> =
-            findings.into_iter().filter(|f| !f.no_risk).collect();
+        let real_findings: Vec<RiskFinding> = findings.into_iter().filter(|f| !f.no_risk).collect();
 
         if real_findings.is_empty() {
             if no_risk_count > 0 {
@@ -2147,7 +2261,15 @@ impl Coordinator {
         }
 
         // ── Post-ReAct Sweep: 确保每条候选条款都有有效审查结论 ──
-        {
+        let sweep_enabled = std::env::var("AIBID_BLINDSPOT_SWEEP_ENABLED")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
+            .unwrap_or(false);
+        if sweep_enabled {
             let covered: std::collections::HashSet<&str> = real_findings
                 .iter()
                 .flat_map(|f| f.clause_ids.iter().map(|s| s.as_str()))
@@ -2248,12 +2370,11 @@ impl Coordinator {
             // 过滤会被后续 skip 的 L1/frontmatter，精确判断是否需要提前退出
             let mut effective_count = 0usize;
             for cid in &no_risk_chunks {
-                if let Some(chunk) = snapshot.chunks.get(*cid) {
-                    if chunk.tier != RiskTier::Low
-                        && !Self::is_frontmatter_section(&chunk.section_path)
-                    {
-                        effective_count += 1;
-                    }
+                if let Some(chunk) = snapshot.chunks.get(*cid)
+                    && chunk.tier != RiskTier::Low
+                    && !Self::is_frontmatter_section(&chunk.section_path)
+                {
+                    effective_count += 1;
                 }
             }
             if effective_count <= 1 {
@@ -2274,7 +2395,10 @@ impl Coordinator {
                     agent: "BlindSpotAgent".to_string(),
                     no_risk: false,
                     severity: RiskSeverity::Info,
+                    is_critical: false,
+                    critical_reason: String::new(),
                     risk_type: "审查盲点".to_string(),
+                    category_code: "REVIEW_BLIND_SPOT".to_string(),
                     source_quote: chunk.text_preview.clone(),
                     legal_basis: Vec::new(),
                     case_refs: Vec::new(),
@@ -2312,54 +2436,52 @@ impl Coordinator {
                     .get(*cid)
                     .map(|v| v.len() <= 1)
                     .unwrap_or(true)
+                && let Some(chunk) = snapshot.chunks.get(*cid)
             {
-                if let Some(chunk) = snapshot.chunks.get(*cid) {
-                    // L1 条款已是"格式/信息"快速扫描，无需盲点复查
-                    if chunk.tier == RiskTier::Low {
-                        continue;
-                    }
-                    // 前导内容（封面/磋商邀请/目录等）纯元数据，无需盲点复查
-                    if Self::is_frontmatter_section(&chunk.section_path) {
-                        continue;
-                    }
-                    blind_findings.push(RiskFinding {
-                        risk_id: format!("BLIND_NO_RISK_{}", cid),
-                        clause_ids: vec![(*cid).clone()],
-                        block_ids: Vec::new(),
-                        agent: "BlindSpotAgent".to_string(),
-                        no_risk: true,
-                        severity: RiskSeverity::Info,
-                        risk_type: "潜在遗漏".to_string(),
-                        source_quote: chunk.text_preview.clone(),
-                        legal_basis: Vec::new(),
-                        case_refs: Vec::new(),
-                        reason: format!(
-                            "条款 {} 仅被 {} 个 Agent 审查且无风险发现，建议人工确认。",
-                            cid,
-                            snapshot
-                                .reviewed_by
-                                .get(*cid)
-                                .map(|v| v.len())
-                                .unwrap_or(0)
-                        ),
-                        suggestion: "建议人工快速复核确认无风险。".to_string(),
-                        confidence: 0.6,
-                        initial_tier: RiskTier::Medium,
-                        final_tier: RiskTier::Medium,
-                        tier_escalated: false,
-                        truncated: false,
-                        suggested_agent: None,
-                        citations: Vec::new(),
-                        finding_role: FindingRole::default(),
-                        knowledge_source: String::new(),
-                        verification_required: Vec::new(),
-                        hypothesized_by: Vec::new(),
-                        verified_by: Vec::new(),
-                        page_number: Some(chunk.page_start + 1),
-                        section_path: Some(chunk.section_path.clone()),
-                        context: Some(chunk.text_preview.chars().take(500).collect()),
-                    });
+                // L1 条款已是"格式/信息"快速扫描，无需盲点复查
+                if chunk.tier == RiskTier::Low {
+                    continue;
                 }
+                // 前导内容（封面/磋商邀请/目录等）纯元数据，无需盲点复查
+                if Self::is_frontmatter_section(&chunk.section_path) {
+                    continue;
+                }
+                blind_findings.push(RiskFinding {
+                    risk_id: format!("BLIND_NO_RISK_{}", cid),
+                    clause_ids: vec![(*cid).clone()],
+                    block_ids: Vec::new(),
+                    agent: "BlindSpotAgent".to_string(),
+                    no_risk: true,
+                    severity: RiskSeverity::Info,
+                    is_critical: false,
+                    critical_reason: String::new(),
+                    risk_type: "潜在遗漏".to_string(),
+                    category_code: "POTENTIAL_OMISSION".to_string(),
+                    source_quote: chunk.text_preview.clone(),
+                    legal_basis: Vec::new(),
+                    case_refs: Vec::new(),
+                    reason: format!(
+                        "条款 {} 仅被 {} 个 Agent 审查且无风险发现，建议人工确认。",
+                        cid,
+                        snapshot.reviewed_by.get(*cid).map(|v| v.len()).unwrap_or(0)
+                    ),
+                    suggestion: "建议人工快速复核确认无风险。".to_string(),
+                    confidence: 0.6,
+                    initial_tier: RiskTier::Medium,
+                    final_tier: RiskTier::Medium,
+                    tier_escalated: false,
+                    truncated: false,
+                    suggested_agent: None,
+                    citations: Vec::new(),
+                    finding_role: FindingRole::default(),
+                    knowledge_source: String::new(),
+                    verification_required: Vec::new(),
+                    hypothesized_by: Vec::new(),
+                    verified_by: Vec::new(),
+                    page_number: Some(chunk.page_start + 1),
+                    section_path: Some(chunk.section_path.clone()),
+                    context: Some(chunk.text_preview.chars().take(500).collect()),
+                });
             }
         }
 
@@ -2377,15 +2499,29 @@ impl Coordinator {
         findings.retain(|f| f.finding_role == FindingRole::Verified);
         // 排序：High → Medium → Low → Info; 同 severity 内 confidence 降序
         findings.sort_by(|a, b| {
-            b.severity
-                .cmp(&a.severity)
-                .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+            b.severity.cmp(&a.severity).then_with(|| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
-        let high = findings.iter().filter(|f| f.severity == RiskSeverity::High).count();
-        let medium = findings.iter().filter(|f| f.severity == RiskSeverity::Medium).count();
-        let low = findings.iter().filter(|f| f.severity == RiskSeverity::Low).count();
-        let info = findings.iter().filter(|f| f.severity == RiskSeverity::Info).count();
+        let high = findings
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::High)
+            .count();
+        let medium = findings
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Medium)
+            .count();
+        let low = findings
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Low)
+            .count();
+        let info = findings
+            .iter()
+            .filter(|f| f.severity == RiskSeverity::Info)
+            .count();
 
         eprintln!(
             "  [TRIAGE] 🔴High={} 🟡Medium={} 🟢Low={} ℹ️Info={}",
@@ -2420,8 +2556,7 @@ impl Coordinator {
                 continue;
             }
             self.registry.register_dynamic(def);
-            self.dynamic_definitions
-                .insert(def.id.clone(), def.clone());
+            self.dynamic_definitions.insert(def.id.clone(), def.clone());
             self.config
                 .enabled_agents
                 .push(AgentId::Dynamic(def.id.clone()));
@@ -2477,8 +2612,11 @@ impl Coordinator {
             def.section_keywords.iter().map(|s| s.as_str()).collect();
 
         for existing in self.dynamic_definitions.values() {
-            let existing_kws: std::collections::HashSet<&str> =
-                existing.section_keywords.iter().map(|s| s.as_str()).collect();
+            let existing_kws: std::collections::HashSet<&str> = existing
+                .section_keywords
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
             let intersection = new_kws.intersection(&existing_kws).count();
             let union = new_kws.union(&existing_kws).count();
             if union > 0 && (intersection as f64 / union as f64) > 0.5 {
@@ -2512,7 +2650,9 @@ impl Coordinator {
 
         // 上限 20，淘汰最旧
         if manifest.agents.len() > 20 {
-            manifest.agents.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            manifest
+                .agents
+                .sort_by(|a, b| a.created_at.cmp(&b.created_at));
             manifest.agents.remove(0); // 移除最旧
         }
 
@@ -2546,7 +2686,41 @@ impl Coordinator {
 
 // ─── STS 辅助函数 ──────────────────────────────────────────────
 
-/// 计算两个 reason 文本的 Jaccard 相似度（基于字符 trigram）。
+fn finding_category(finding: &RiskFinding) -> String {
+    risk_taxonomy::canonical_category(finding)
+}
+
+fn evidence_similarity(a: &RiskFinding, b: &RiskFinding) -> f64 {
+    let aq = a.source_quote.trim();
+    let bq = b.source_quote.trim();
+    if aq.is_empty() || bq.is_empty() {
+        return 0.0;
+    }
+    if aq == bq || aq.contains(bq) || bq.contains(aq) {
+        return 1.0;
+    }
+    let normalized_a = normalize_evidence_dates(aq);
+    let normalized_b = normalize_evidence_dates(bq);
+    if normalized_a == normalized_b
+        || normalized_a.contains(&normalized_b)
+        || normalized_b.contains(&normalized_a)
+    {
+        return 1.0;
+    }
+    text_similarity(&normalized_a, &normalized_b)
+}
+
+/// 脱敏流程可能把一位 Agent 的日期变成 `[日期]`，另一位仍保留原日期。
+/// 这两种引文应视为同一证据，避免产生跨 Agent 重复项。
+fn normalize_evidence_dates(text: &str) -> String {
+    static DATE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let date_re = DATE_RE.get_or_init(|| {
+        regex::Regex::new(r"\d{4}年\d{1,2}月\d{1,2}日|\[日期\]").expect("valid evidence date regex")
+    });
+    date_re.replace_all(text, "日期").replace(' ', "")
+}
+
+/// 计算两个文本的 Jaccard 相似度（基于字符 trigram）。
 fn text_similarity(a: &str, b: &str) -> f64 {
     fn trigrams(s: &str) -> std::collections::HashSet<[char; 3]> {
         let cleaned: Vec<char> = s.chars().filter(|c| c.is_alphanumeric()).collect();
@@ -2567,6 +2741,23 @@ fn text_similarity(a: &str, b: &str) -> f64 {
 
 /// 合并 contributors：追加 hypothesized_by 和 verified_by，去重。
 fn merge_contributors(existing: &mut RiskFinding, new: &RiskFinding) {
+    if new.is_critical {
+        existing.is_critical = true;
+        if existing.critical_reason.trim().is_empty() {
+            existing.critical_reason = new.critical_reason.clone();
+        } else if !new.critical_reason.trim().is_empty()
+            && !existing
+                .critical_reason
+                .contains(new.critical_reason.trim())
+        {
+            existing.critical_reason = format!(
+                "{}；{}",
+                existing.critical_reason.trim(),
+                new.critical_reason.trim()
+            );
+        }
+        existing.normalize_criticality();
+    }
     for h in &new.hypothesized_by {
         if !existing.hypothesized_by.contains(h) {
             existing.hypothesized_by.push(h.clone());
@@ -2608,6 +2799,7 @@ fn dedup_legal_basis(a: &[String], b: &[String]) -> Vec<String> {
 // ─── 测试 ────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -2623,9 +2815,7 @@ mod tests {
             registry,
             dynamic_definitions: HashMap::new(),
             llm_factory: Arc::new(|| unreachable!("llm_factory 不应在离线测试中调用")),
-            tools_factory: Arc::new(|| {
-                unreachable!("tools_factory 不应在离线测试中调用")
-            }),
+            tools_factory: Arc::new(|| unreachable!("tools_factory 不应在离线测试中调用")),
             bus,
             graph,
             trace,
@@ -2656,7 +2846,10 @@ mod tests {
             agent: agent.to_string(),
             no_risk: false,
             severity: RiskSeverity::High,
+            is_critical: false,
+            critical_reason: String::new(),
             risk_type: "测试风险".to_string(),
+            category_code: String::new(),
             source_quote: "测试原文".to_string(),
             legal_basis: vec!["《测试法》第1条".to_string()],
             case_refs: vec![],
@@ -2698,11 +2891,29 @@ mod tests {
         let routing = coordinator.route_clauses(&clauses);
 
         // ch_001 → FactCheck (含"格式"和"封面")
-        assert!(routing.get(&AgentId::FactCheck).unwrap().iter().any(|c| c.chunk_id == "ch_001"));
+        assert!(
+            routing
+                .get(&AgentId::FactCheck)
+                .unwrap()
+                .iter()
+                .any(|c| c.chunk_id == "ch_001")
+        );
         // ch_002 → SemanticRisk (含"品牌")
-        assert!(routing.get(&AgentId::SemanticRisk).unwrap().iter().any(|c| c.chunk_id == "ch_002"));
+        assert!(
+            routing
+                .get(&AgentId::SemanticRisk)
+                .unwrap()
+                .iter()
+                .any(|c| c.chunk_id == "ch_002")
+        );
         // ch_003 → Contract (含"付款")
-        assert!(routing.get(&AgentId::Contract).unwrap().iter().any(|c| c.chunk_id == "ch_003"));
+        assert!(
+            routing
+                .get(&AgentId::Contract)
+                .unwrap()
+                .iter()
+                .any(|c| c.chunk_id == "ch_003")
+        );
     }
 
     #[test]
@@ -2719,8 +2930,20 @@ mod tests {
 
         let routing = coordinator.route_clauses(&clauses);
         // "评分"+"价格"+"技术" 应同时命中 Scoring 和 Demand
-        assert!(routing.get(&AgentId::Scoring).unwrap().iter().any(|c| c.chunk_id == "ch_004"));
-        assert!(routing.get(&AgentId::Demand).unwrap().iter().any(|c| c.chunk_id == "ch_004"));
+        assert!(
+            routing
+                .get(&AgentId::Scoring)
+                .unwrap()
+                .iter()
+                .any(|c| c.chunk_id == "ch_004")
+        );
+        assert!(
+            routing
+                .get(&AgentId::Demand)
+                .unwrap()
+                .iter()
+                .any(|c| c.chunk_id == "ch_004")
+        );
     }
 
     #[test]
@@ -2748,13 +2971,20 @@ mod tests {
         let coordinator = make_test_coordinator(config, registry);
 
         // 这条条款不含 SemanticRisk 的任何关键词 → 不会被分配
-        let clauses = vec![make_test_clause("ch_006", "本文件为竞争性磋商文件的组成部分")];
+        let clauses = vec![make_test_clause(
+            "ch_006",
+            "本文件为竞争性磋商文件的组成部分",
+        )];
 
         let routing = coordinator.route_clauses(&clauses);
         // fallback: 即使 FactCheck 不在 enabled_agents，也应通过 fallback 逻辑分配
         let factcheck_clauses = routing.get(&AgentId::FactCheck);
         assert!(
-            factcheck_clauses.is_some() && factcheck_clauses.unwrap().iter().any(|c| c.chunk_id == "ch_006"),
+            factcheck_clauses.is_some()
+                && factcheck_clauses
+                    .unwrap()
+                    .iter()
+                    .any(|c| c.chunk_id == "ch_006"),
             "无匹配条款应 fallback 到 FactCheckAgent"
         );
     }
@@ -2792,7 +3022,11 @@ mod tests {
         let routing = coordinator.route_clauses(&clauses);
         // 应被路由到 Dynamic Agent
         assert!(
-            routing.get(&dynamic_id).unwrap().iter().any(|c| c.chunk_id == "ch_007"),
+            routing
+                .get(&dynamic_id)
+                .unwrap()
+                .iter()
+                .any(|c| c.chunk_id == "ch_007"),
             "动态 Agent 应通过其 section_keywords 接收条款"
         );
     }
@@ -2835,7 +3069,11 @@ mod tests {
         // f1 和 f2 的 key 不同（agent 不同），所以都保留
         // f3 是不同 clause
         // f4 是不同 risk_type
-        assert_eq!(merged.len(), 4, "不同 agent 或 clause 或 risk_type 的发现不应去重");
+        assert_eq!(
+            merged.len(),
+            4,
+            "不同 agent 或 clause 或 risk_type 的发现不应去重"
+        );
     }
 
     #[test]
@@ -2861,6 +3099,32 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert!((merged[0].confidence - 0.95).abs() < 0.001);
         assert_eq!(merged[0].risk_id, "R_002");
+    }
+
+    #[test]
+    fn test_merge_v3_keeps_distinct_categories_with_similar_text() {
+        let coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let mut local_registration = make_test_finding("R_001", "ch_001", "SemanticRiskAgent");
+        local_registration.category_code = "LOCAL_REGISTRATION".into();
+        local_registration.risk_type = "地域注册限制".into();
+        local_registration.source_quote = "投标人须在本地注册并缴纳5%保证金".into();
+        local_registration.reason = "该条款构成不合理资格限制，应删除限制条件".into();
+
+        let mut excessive_deposit = make_test_finding("R_002", "ch_001", "ProcedureAgent");
+        excessive_deposit.category_code = "EXCESSIVE_DEPOSIT".into();
+        excessive_deposit.risk_type = "保证金比例过高".into();
+        excessive_deposit.source_quote = "投标人须在本地注册并缴纳5%保证金".into();
+        excessive_deposit.reason = "该条款构成不合理资格限制，应删除限制条件".into();
+
+        let merged = coordinator
+            .merge_findings_v3(vec![local_registration, excessive_deposit], &|_| {})
+            .retained;
+        assert_eq!(
+            merged.len(),
+            2,
+            "同一chunk中的不同风险类别不得因理由或证据文本相似而合并"
+        );
     }
 
     // ── [4b] LINK 测试 ───────────────────────────────────────
@@ -2933,7 +3197,8 @@ mod tests {
         coordinator.graph.add_chunk(ChunkNode {
             chunk_id: "ch_001".into(),
             section_path: vec!["测试".into()],
-            page_start: 0, page_end: 1,
+            page_start: 0,
+            page_end: 1,
             text_preview: "条款1".into(),
             tier: RiskTier::Medium,
         });
@@ -2942,7 +3207,10 @@ mod tests {
 
         // 同一 Agent 的同类型发现不应产生 linked_to 边
         let ctx = coordinator.graph.query_clause_context("ch_001");
-        assert!(ctx.linked_chunks.is_empty(), "同一 Agent 不应产生 linked_to 边");
+        assert!(
+            ctx.linked_chunks.is_empty(),
+            "同一 Agent 不应产生 linked_to 边"
+        );
     }
 
     // ── [7] TRIAGE 测试 ──────────────────────────────────────
@@ -2998,11 +3266,15 @@ mod tests {
 
     #[test]
     fn test_sanitize_agent_id_removes_non_ascii() {
-        let coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
         // 纯中文 → 无 ascii 字符 → fallback "Unknown"
         assert_eq!(coordinator.sanitize_agent_id("品牌组合排他检测"), "Unknown");
         // 纯英文
-        assert_eq!(coordinator.sanitize_agent_id("BrandComboDetector"), "BrandComboDetector");
+        assert_eq!(
+            coordinator.sanitize_agent_id("BrandComboDetector"),
+            "BrandComboDetector"
+        );
         // 混合 → 只保留 ascii
         assert_eq!(coordinator.sanitize_agent_id("品牌Brand检测"), "Brand");
         // 空 → fallback
@@ -3013,7 +3285,8 @@ mod tests {
 
     #[test]
     fn test_is_duplicate_dynamic_agent_jaccard_below_threshold() {
-        let mut coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let mut coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
 
         // 已有 Agent: keywords = {"品牌","指定","独家","原厂"}
         let existing = DynamicAgentDefinition {
@@ -3029,7 +3302,9 @@ mod tests {
             reason: "test".into(),
             active: true,
         };
-        coordinator.dynamic_definitions.insert("Dynamic_Existing".into(), existing);
+        coordinator
+            .dynamic_definitions
+            .insert("Dynamic_Existing".into(), existing);
 
         // 新 Agent: keywords = {"品牌","指定","授权"}
         // 交集={"品牌","指定"}(2), 并集={"品牌","指定","独家","原厂","授权"}(5)
@@ -3048,12 +3323,16 @@ mod tests {
             active: false,
         };
 
-        assert!(!coordinator.is_duplicate_dynamic_agent(&new_def), "Jaccard=0.4 不应判定为重复");
+        assert!(
+            !coordinator.is_duplicate_dynamic_agent(&new_def),
+            "Jaccard=0.4 不应判定为重复"
+        );
     }
 
     #[test]
     fn test_is_duplicate_dynamic_agent_jaccard_above_threshold() {
-        let mut coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let mut coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
 
         let existing = DynamicAgentDefinition {
             id: "Dynamic_Existing".into(),
@@ -3068,7 +3347,9 @@ mod tests {
             reason: "test".into(),
             active: true,
         };
-        coordinator.dynamic_definitions.insert("Dynamic_Existing".into(), existing.clone());
+        coordinator
+            .dynamic_definitions
+            .insert("Dynamic_Existing".into(), existing.clone());
 
         // 新 Agent: keywords = {"品牌","指定"}
         // 交集={"品牌","指定"}(2), 并集={"品牌","指定","独家"}(3)
@@ -3078,12 +3359,16 @@ mod tests {
             ..existing
         };
 
-        assert!(coordinator.is_duplicate_dynamic_agent(&new_def), "Jaccard=0.67 应判定为重复");
+        assert!(
+            coordinator.is_duplicate_dynamic_agent(&new_def),
+            "Jaccard=0.67 应判定为重复"
+        );
     }
 
     #[test]
     fn test_is_duplicate_no_existing_agents() {
-        let coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
         // 无已有动态 Agent → 不重复
         let new_def = DynamicAgentDefinition {
             id: "Dynamic_First".into(),
@@ -3105,7 +3390,8 @@ mod tests {
 
     #[test]
     fn test_register_dynamic_agents_from_findings() {
-        let coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
 
         let finding = RiskFinding {
             suggested_agent: Some(SuggestedAgent {
@@ -3147,7 +3433,8 @@ mod tests {
 
     #[test]
     fn test_register_dynamic_agents_empty_suggested_agent() {
-        let coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
 
         // 没有 suggested_agent 的 finding
         let finding = make_test_finding("R_001", "ch_001", "FactCheckAgent");
@@ -3157,7 +3444,8 @@ mod tests {
 
     #[test]
     fn test_register_dynamic_agents_empty_prompt_skipped() {
-        let coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
 
         let finding = RiskFinding {
             suggested_agent: Some(SuggestedAgent {
@@ -3177,7 +3465,8 @@ mod tests {
 
     #[test]
     fn test_load_dynamic_agents_file_not_exists() {
-        let mut coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let mut coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
 
         // 确保文件不存在（测试环境应该没有）
         if std::path::Path::new(&data_path_str("agents/dynamic_agents.json")).exists() {
@@ -3219,7 +3508,8 @@ mod tests {
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         std::fs::write(&original_path, &json).unwrap();
 
-        let mut coordinator = make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
+        let mut coordinator =
+            make_test_coordinator(CoordinatorConfig::default(), AgentRegistry::builtin());
         let loaded = coordinator.load_dynamic_agents().expect("不应报错");
         assert_eq!(loaded, 0, "active=false 的 Agent 不应被加载");
 
@@ -3235,9 +3525,29 @@ mod tests {
     #[test]
     fn test_is_frontmatter_section() {
         assert!(Coordinator::is_frontmatter_section(&["磋商邀请".into()]));
-        assert!(Coordinator::is_frontmatter_section(&["第一章".into(), "投标邀请".into()]));
+        assert!(Coordinator::is_frontmatter_section(&[
+            "第一章".into(),
+            "投标邀请".into()
+        ]));
         assert!(Coordinator::is_frontmatter_section(&["目录".into()]));
-        assert!(!Coordinator::is_frontmatter_section(&["第二章".into(), "采购需求".into()]));
-        assert!(!Coordinator::is_frontmatter_section(&["第四章".into(), "合同条款".into()]));
+        assert!(!Coordinator::is_frontmatter_section(&[
+            "第二章".into(),
+            "采购需求".into()
+        ]));
+        assert!(!Coordinator::is_frontmatter_section(&[
+            "第四章".into(),
+            "合同条款".into()
+        ]));
+    }
+
+    #[test]
+    fn test_normalize_evidence_dates_matches_redacted_and_original() {
+        let redacted = "投标截止时间为[日期]9时，同时规定[日期]17时后提交的文件一律拒收。";
+        let original =
+            "投标截止时间为2026年9月20日9时，同时规定2026年9月18日17时后提交的文件一律拒收。";
+        assert_eq!(
+            normalize_evidence_dates(redacted),
+            normalize_evidence_dates(original)
+        );
     }
 }

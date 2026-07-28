@@ -13,7 +13,7 @@
 //! 2. 如果 clause_b 提供 → 精确对比两个条款
 //! 3. 结果写入 SessionGraph 的 contradicts 边
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -112,7 +112,11 @@ impl SearchContradictionTool {
         chunk_order: Arc<Vec<String>>,
         graph: Option<Arc<SessionGraph>>,
     ) -> Self {
-        Self { chunks, chunk_order, graph }
+        Self {
+            chunks,
+            chunk_order,
+            graph,
+        }
     }
 
     /// 对比两个条款，检测矛盾。
@@ -136,31 +140,19 @@ impl SearchContradictionTool {
         // ② 逻辑矛盾：正反互斥
         let logic_conflict = Self::check_logic_conflict(text_a, text_b);
         if let Some(contrast) = logic_conflict {
-            return Some((
-                ContradictionType::LogicConflict,
-                contrast,
-                None,
-            ));
+            return Some((ContradictionType::LogicConflict, contrast, None));
         }
 
         // ③ 数据矛盾：数字不一致
         let data_inconsistency = Self::check_data_inconsistency(text_a, text_b);
         if let Some(contrast) = data_inconsistency {
-            return Some((
-                ContradictionType::DataInconsistency,
-                contrast,
-                None,
-            ));
+            return Some((ContradictionType::DataInconsistency, contrast, None));
         }
 
         // ④ 悬空引用
         let dangling = Self::check_dangling_reference(text_a, text_b);
         if let Some(contrast) = dangling {
-            return Some((
-                ContradictionType::DanglingReference,
-                contrast,
-                None,
-            ));
+            return Some((ContradictionType::DanglingReference, contrast, None));
         }
 
         None
@@ -191,14 +183,14 @@ impl SearchContradictionTool {
                 None
             };
 
-            if let (Some(level_a), Some(level_b)) = (extract_level(text_a), extract_level(text_b)) {
-                if level_a > level_b {
-                    // A 要求较低（二级=2），B 奖励较高（一级=1）
-                    return Some(format!(
-                        "隐性升级：条款 A 接受低资质（第{}级），但条款 B 给高资质（第{}级）额外加分——形成事实上的资质升级",
-                        level_a, level_b
-                    ));
-                }
+            if let (Some(level_a), Some(level_b)) = (extract_level(text_a), extract_level(text_b))
+                && level_a > level_b
+            {
+                // A 要求较低（二级=2），B 奖励较高（一级=1）
+                return Some(format!(
+                    "隐性升级：条款 A 接受低资质（第{}级），但条款 B 给高资质（第{}级）额外加分——形成事实上的资质升级",
+                    level_a, level_b
+                ));
             }
             // 通用隐性升级提示
             return Some(
@@ -212,8 +204,16 @@ impl SearchContradictionTool {
     /// 检测逻辑矛盾：A 说 X，B 说 非X
     fn check_logic_conflict(text_a: &str, text_b: &str) -> Option<String> {
         let conflict_pairs: &[(&str, &str, &str)] = &[
-            ("不接受联合体", "联合体", "联合体投标矛盾：一个条款不接受，另一个条款涉及联合体"),
-            ("不允许分包", "分包", "分包矛盾：一个条款不允许，另一个条款涉及分包"),
+            (
+                "不接受联合体",
+                "联合体",
+                "联合体投标矛盾：一个条款不接受，另一个条款涉及联合体",
+            ),
+            (
+                "不允许分包",
+                "分包",
+                "分包矛盾：一个条款不允许，另一个条款涉及分包",
+            ),
             ("不允许转包", "转包", "转包矛盾"),
             ("资格后审", "资格预审", "资格审查方式矛盾"),
             ("最低评标价法", "综合评分法", "评标方法矛盾"),
@@ -246,10 +246,10 @@ impl SearchContradictionTool {
                     while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                         i += 1;
                     }
-                    if let Ok(n) = chars[start..i].iter().collect::<String>().parse::<f64>() {
-                        if n > 0.0 {
-                            nums.push(n);
-                        }
+                    if let Ok(n) = chars[start..i].iter().collect::<String>().parse::<f64>()
+                        && n > 0.0
+                    {
+                        nums.push(n);
                     }
                 } else {
                     i += 1;
@@ -259,8 +259,18 @@ impl SearchContradictionTool {
         };
 
         // 查找共同的关键上下文词
-        let context_words = ["保证金", "合同金额", "预算", "付款", "预付款", "质保金", "履约"];
-        let has_shared_context = context_words.iter().any(|w| text_a.contains(w) && text_b.contains(w));
+        let context_words = [
+            "保证金",
+            "合同金额",
+            "预算",
+            "付款",
+            "预付款",
+            "质保金",
+            "履约",
+        ];
+        let has_shared_context = context_words
+            .iter()
+            .any(|w| text_a.contains(w) && text_b.contains(w));
 
         if has_shared_context {
             let nums_a = extract_numbers(text_a);
@@ -310,16 +320,16 @@ impl SearchContradictionTool {
             if other_id == clause_a_id {
                 continue;
             }
-            if let Some(chunk_b) = self.chunks.get(other_id) {
-                if let Some((ct, contrast, _legal)) = Self::compare_pair(chunk_a, chunk_b) {
-                    candidates.push(ContradictionCandidate {
-                        chunk_id: other_id.clone(),
-                        section_path: chunk_b.section_path.clone(),
-                        contradiction_type: ct.as_str().to_string(),
-                        contrast,
-                        text_preview: chunk_b.text.chars().take(200).collect(),
-                    });
-                }
+            if let Some(chunk_b) = self.chunks.get(other_id)
+                && let Some((ct, contrast, _legal)) = Self::compare_pair(chunk_a, chunk_b)
+            {
+                candidates.push(ContradictionCandidate {
+                    chunk_id: other_id.clone(),
+                    section_path: chunk_b.section_path.clone(),
+                    contradiction_type: ct.as_str().to_string(),
+                    contrast,
+                    text_preview: chunk_b.text.chars().take(200).collect(),
+                });
             }
         }
 
@@ -387,14 +397,18 @@ impl AgentTool for SearchContradictionTool {
 
             let (ct, contrast, legal_basis) =
                 Self::compare_pair(chunk_a, chunk_b).unwrap_or_else(|| {
-                    (ContradictionType::NoContradiction, "未发现明显矛盾".to_string(), None)
+                    (
+                        ContradictionType::NoContradiction,
+                        "未发现明显矛盾".to_string(),
+                        None,
+                    )
                 });
 
             // 如果发现矛盾，写入 SessionGraph
-            if !matches!(ct, ContradictionType::NoContradiction) {
-                if let Some(ref graph) = self.graph {
-                    graph.add_contradicts(&parsed.clause_a, clause_b_id, &contrast);
-                }
+            if !matches!(ct, ContradictionType::NoContradiction)
+                && let Some(ref graph) = self.graph
+            {
+                graph.add_contradicts(&parsed.clause_a, clause_b_id, &contrast);
             }
 
             let result = ContradictionResult {
@@ -478,7 +492,10 @@ mod tests {
         let b = make_chunk("ch_B", "具有一级资质的投标人额外加分");
         let result = SearchContradictionTool::compare_pair(&a, &b);
         assert!(result.is_some());
-        assert!(matches!(result.unwrap().0, ContradictionType::ImplicitUpgrade));
+        assert!(matches!(
+            result.unwrap().0,
+            ContradictionType::ImplicitUpgrade
+        ));
     }
 
     #[test]
@@ -487,7 +504,10 @@ mod tests {
         let b = make_chunk("ch_B", "联合体各方须承担连带责任");
         let result = SearchContradictionTool::compare_pair(&a, &b);
         assert!(result.is_some());
-        assert!(matches!(result.unwrap().0, ContradictionType::LogicConflict));
+        assert!(matches!(
+            result.unwrap().0,
+            ContradictionType::LogicConflict
+        ));
     }
 
     #[test]
@@ -504,6 +524,9 @@ mod tests {
         let b = make_chunk("ch_B", "合同金额为480万元，履约保证金为48万元");
         let result = SearchContradictionTool::compare_pair(&a, &b);
         assert!(result.is_some());
-        assert!(matches!(result.unwrap().0, ContradictionType::DataInconsistency));
+        assert!(matches!(
+            result.unwrap().0,
+            ContradictionType::DataInconsistency
+        ));
     }
 }

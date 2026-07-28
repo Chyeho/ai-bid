@@ -112,7 +112,8 @@ pub struct ParsedTraceEvent {
 
 /// 解析 trace.jsonl 文件，返回事件列表。
 pub fn parse_trace_file(path: &Path) -> Result<Vec<ParsedTraceEvent>, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| format!("无法读取 trace 文件: {}", e))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("无法读取 trace 文件: {}", e))?;
 
     let mut events = Vec::new();
     for (line_no, line) in content.lines().enumerate() {
@@ -120,8 +121,8 @@ pub fn parse_trace_file(path: &Path) -> Result<Vec<ParsedTraceEvent>, String> {
         if line.is_empty() {
             continue;
         }
-        let value: serde_json::Value =
-            serde_json::from_str(line).map_err(|e| format!("行 {} JSON 非法: {}", line_no + 1, e))?;
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("行 {} JSON 非法: {}", line_no + 1, e))?;
 
         events.push(ParsedTraceEvent {
             agent_name: value["agent_name"].as_str().unwrap_or("").to_string(),
@@ -156,10 +157,7 @@ pub fn check_timestamps_monotonic(events: &[ParsedTraceEvent]) -> Result<(), Str
         if window[0].timestamp > window[1].timestamp {
             return Err(format!(
                 "timestamp 回退: {} → {} (events: {} → {})",
-                window[0].timestamp,
-                window[1].timestamp,
-                window[0].summary,
-                window[1].summary
+                window[0].timestamp, window[1].timestamp, window[0].summary, window[1].summary
             ));
         }
     }
@@ -240,17 +238,13 @@ pub fn findings_by_agent(findings: &[RiskFinding]) -> HashMap<String, usize> {
 pub fn findings_by_severity(findings: &[RiskFinding]) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     for f in findings {
-        *counts
-            .entry(format!("{:?}", f.severity))
-            .or_default() += 1;
+        *counts.entry(format!("{:?}", f.severity)).or_default() += 1;
     }
     counts
 }
 
 /// 检查是否有 Agent 的 conversation 泄漏到了另一个 Agent（通过 trace 中的 clause_id 交叉检查）。
-pub fn check_conversation_isolation(
-    events: &[ParsedTraceEvent],
-) -> Result<(), Vec<String>> {
+pub fn check_conversation_isolation(events: &[ParsedTraceEvent]) -> Result<(), Vec<String>> {
     // 策略：每个 Agent 处理的 clause_id 集合应该是其被路由到的 clause 集合
     // 如果 Agent A 的 trace 中出现了它不应该处理的 clause_id → 泄漏
     let violations = Vec::new();
@@ -258,13 +252,13 @@ pub fn check_conversation_isolation(
     // 收集每个 Agent 涉及的 clause_id
     let mut agent_clauses: HashMap<String, Vec<String>> = HashMap::new();
     for e in events {
-        if let Some(ref cid) = e.clause_id {
-            if !cid.is_empty() {
-                agent_clauses
-                    .entry(e.agent_name.clone())
-                    .or_default()
-                    .push(cid.clone());
-            }
+        if let Some(ref cid) = e.clause_id
+            && !cid.is_empty()
+        {
+            agent_clauses
+                .entry(e.agent_name.clone())
+                .or_default()
+                .push(cid.clone());
         }
     }
 
@@ -315,10 +309,19 @@ pub fn make_l2_clause(id: &str, text: &str) -> ReviewClause {
 /// §8 双通道协同测试数据：4 条条款，覆盖 L1/L2/L3。
 pub fn bus_test_clauses() -> Vec<ReviewClause> {
     vec![
-        make_l1_clause("ch_001", "投标文件封面格式要求见附件一，正本须加盖公章并密封递交。"),
+        make_l1_clause(
+            "ch_001",
+            "投标文件封面格式要求见附件一，正本须加盖公章并密封递交。",
+        ),
         make_l3_clause("ch_002", "本项目核心交换机须采用华为品牌，不接受替代方案。"),
-        make_l3_clause("ch_003", "投标人须在东莞地区设有常驻服务机构，并提供本地社保缴纳证明。"),
-        make_l2_clause("ch_004", "付款方式：合同签订后支付30%预付款，验收合格后支付70%尾款。"),
+        make_l3_clause(
+            "ch_003",
+            "投标人须在东莞地区设有常驻服务机构，并提供本地社保缴纳证明。",
+        ),
+        make_l2_clause(
+            "ch_004",
+            "付款方式：合同签订后支付30%预付款，验收合格后支付70%尾款。",
+        ),
     ]
 }
 
@@ -326,13 +329,30 @@ pub fn bus_test_clauses() -> Vec<ReviewClause> {
 pub fn memory_test_clauses() -> Vec<ReviewClause> {
     vec![
         make_l1_clause("ch_001", "投标文件封面格式要求见附件一，正本须加盖公章。"),
-        make_l2_clause("ch_002", "供应商须具备依法缴纳税收和社会保障资金的良好记录。"),
-        make_l2_clause("ch_003", "项目工期为合同签订后60个日历日内完成全部建设内容。"),
-        make_l3_clause("ch_004", "本项目指定采用某品牌专利技术，且须提供原厂商针对本项目的唯一授权函。"),
+        make_l2_clause(
+            "ch_002",
+            "供应商须具备依法缴纳税收和社会保障资金的良好记录。",
+        ),
+        make_l2_clause(
+            "ch_003",
+            "项目工期为合同签订后60个日历日内完成全部建设内容。",
+        ),
+        make_l3_clause(
+            "ch_004",
+            "本项目指定采用某品牌专利技术，且须提供原厂商针对本项目的唯一授权函。",
+        ),
         make_l3_clause("ch_005", "投标人须在本市设有分支机构，并提供本地业绩证明。"),
         // 触发 ProcedureAgent（"评审"/"评标"）和 ScoringAgent（"评分"/"分值"/"权重"）
-        make_test_clause("ch_006", "评审委员会由5人组成，评分采用综合评分法，价格分权重30%，技术分权重70%。", "第四章 评审办法"),
-        make_test_clause("ch_007", "投标保证金为人民币贰万元，未中标人的保证金在评标结束后5个工作日内退还。", "第五章 投标保证金"),
+        make_test_clause(
+            "ch_006",
+            "评审委员会由5人组成，评分采用综合评分法，价格分权重30%，技术分权重70%。",
+            "第四章 评审办法",
+        ),
+        make_test_clause(
+            "ch_007",
+            "投标保证金为人民币贰万元，未中标人的保证金在评标结束后5个工作日内退还。",
+            "第五章 投标保证金",
+        ),
     ]
 }
 
@@ -358,12 +378,23 @@ pub fn legal_test_clauses() -> Vec<ReviewClause> {
 pub fn blindspot_test_clauses() -> Vec<ReviewClause> {
     vec![
         make_l1_clause("ch_001", "投标文件封面格式要求见附件一，须加盖公章。"),
-        make_l2_clause("ch_002", "供应商须具备依法缴纳税收和社会保障资金的良好记录。"),
+        make_l2_clause(
+            "ch_002",
+            "供应商须具备依法缴纳税收和社会保障资金的良好记录。",
+        ),
         make_l2_clause("ch_003", "项目工期为合同签订后60个日历日内完成。"),
         make_l3_clause("ch_004", "本项目须采用华为品牌核心交换机，不接受替代品牌。"),
         // 以下两条是"冷门条款"，只含通用表述，期望只被 FactCheck fallback 覆盖
-        make_test_clause("ch_005", "本项目建设地点位于松山湖校区，投标人须自行踏勘现场。", "第五章 项目概况"),
-        make_test_clause("ch_006", "中标人须在合同签订前提交履约保证金，金额为合同价的5%。", "第六章 其他要求"),
+        make_test_clause(
+            "ch_005",
+            "本项目建设地点位于松山湖校区，投标人须自行踏勘现场。",
+            "第五章 项目概况",
+        ),
+        make_test_clause(
+            "ch_006",
+            "中标人须在合同签订前提交履约保证金，金额为合同价的5%。",
+            "第六章 其他要求",
+        ),
     ]
 }
 

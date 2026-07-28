@@ -21,6 +21,8 @@ interface BackendFinding {
   agent: string;
   no_risk: boolean;
   severity: string;
+  is_critical?: boolean;
+  critical_reason?: string;
   risk_type: string;
   source_quote: string;
   legal_basis: string[];
@@ -122,6 +124,8 @@ export const mapBackendFinding = (raw: BackendFinding): AuditIssue => {
     issueNo: raw.risk_id,
     riskId: raw.risk_id,
     severity,
+    isCritical: raw.is_critical ?? false,
+    criticalReason: raw.critical_reason || undefined,
     category: raw.risk_type || '未分类',
     agentName: raw.agent,
     agent: raw.agent,

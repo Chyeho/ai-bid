@@ -229,6 +229,7 @@ impl MetricsCollector {
     }
 
     /// 设置 Coordinator 级别的质量统计（在 review 完成后调用一次）。
+    #[allow(clippy::too_many_arguments)]
     pub fn set_coordinator_stats(
         &mut self,
         raw_count: usize,
@@ -308,14 +309,13 @@ impl MetricsCollector {
                 let mut detail = raw.detail.clone();
 
                 // 如果有 coordinator 子阶段，注入到 AgentReview 详情中
-                if !raw.sub_phases.is_empty() {
-                    if let StageDetail::AgentReview {
+                if !raw.sub_phases.is_empty()
+                    && let StageDetail::AgentReview {
                         ref mut coordinator_phases,
                         ..
                     } = detail
-                    {
-                        *coordinator_phases = Some(raw.sub_phases.clone());
-                    }
+                {
+                    *coordinator_phases = Some(raw.sub_phases.clone());
                 }
 
                 StageRecord {
@@ -540,19 +540,6 @@ impl MetricsCollector {
         } else {
             // qwen-plus 及其他默认定价
             (QWEN_PLUS_INPUT_PRICE, QWEN_PLUS_OUTPUT_PRICE)
-        }
-    }
-}
-
-impl Default for ToolUsageSummary {
-    fn default() -> Self {
-        Self {
-            search_document: 0,
-            read_section: 0,
-            search_knowledge: 0,
-            output_finding: 0,
-            answer_user: 0,
-            other: 0,
         }
     }
 }

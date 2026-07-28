@@ -177,7 +177,7 @@ pub struct AgentLlmStats {
     pub avg_duration_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolUsageSummary {
     pub search_document: usize,
     pub read_section: usize,

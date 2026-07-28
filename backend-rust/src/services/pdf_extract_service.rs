@@ -30,9 +30,8 @@ use crate::domain::raw_document::{
 // ---------- 文本清洗工具 ----------
 
 /// 匹配"汉字后跟空白再跟汉字"的模式，用于合并被空格拆散的中文词组。
-static CJK_SPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"([一-鿿])\s+([一-鿿])").expect("CJK regex 编译失败")
-});
+static CJK_SPACE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([一-鿿])\s+([一-鿿])").expect("CJK regex 编译失败"));
 
 /// 匹配 2 个及以上的连续空格
 static MULTI_SPACE_RE: LazyLock<Regex> =
@@ -72,8 +71,16 @@ fn reconstruct_text_from_words(words: &[RawWord]) -> String {
 
     let mut sorted: Vec<&RawWord> = words.iter().collect();
     sorted.sort_by(|a, b| {
-        a.bbox.top.partial_cmp(&b.bbox.top).unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.bbox.x0.partial_cmp(&b.bbox.x0).unwrap_or(std::cmp::Ordering::Equal))
+        a.bbox
+            .top
+            .partial_cmp(&b.bbox.top)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.bbox
+                    .x0
+                    .partial_cmp(&b.bbox.x0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
     let mut rows: Vec<Vec<&RawWord>> = Vec::new();
@@ -93,7 +100,12 @@ fn reconstruct_text_from_words(words: &[RawWord]) -> String {
 
     let mut lines: Vec<String> = Vec::new();
     for row in &mut rows {
-        row.sort_by(|a, b| a.bbox.x0.partial_cmp(&b.bbox.x0).unwrap_or(std::cmp::Ordering::Equal));
+        row.sort_by(|a, b| {
+            a.bbox
+                .x0
+                .partial_cmp(&b.bbox.x0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let first_text = &row[0].text;
         let avg_w = if first_text.is_empty() {
@@ -146,8 +158,16 @@ fn compute_blocks(words: &[RawWord], page_index: usize) -> Vec<RawBlock> {
 
     let mut sorted: Vec<&RawWord> = words.iter().collect();
     sorted.sort_by(|a, b| {
-        a.bbox.top.partial_cmp(&b.bbox.top).unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.bbox.x0.partial_cmp(&b.bbox.x0).unwrap_or(std::cmp::Ordering::Equal))
+        a.bbox
+            .top
+            .partial_cmp(&b.bbox.top)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.bbox
+                    .x0
+                    .partial_cmp(&b.bbox.x0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
     // Step 1: 分组为行
@@ -175,7 +195,8 @@ fn compute_blocks(words: &[RawWord], page_index: usize) -> Vec<RawBlock> {
         let row_top = row.iter().map(|w| w.bbox.top).fold(f64::INFINITY, f64::min);
         let row_bottom = row.iter().map(|w| w.bbox.bottom).fold(0.0, f64::max);
 
-        let start_new = prev_bottom.map_or(false, |pb| (row_top - pb) > line_height * HEADING_GAP_RATIO);
+        let start_new =
+            prev_bottom.is_some_and(|pb| (row_top - pb) > line_height * HEADING_GAP_RATIO);
 
         if start_new && !block_rows.is_empty() {
             blocks.push(build_block(&block_rows, page_index, blocks.len()));
@@ -197,15 +218,26 @@ fn compute_blocks(words: &[RawWord], page_index: usize) -> Vec<RawBlock> {
 fn build_block(rows: &[Vec<&RawWord>], page_index: usize, block_index: usize) -> RawBlock {
     let all_words: Vec<&&RawWord> = rows.iter().flat_map(|r| r.iter()).collect();
 
-    let x0 = all_words.iter().map(|w| w.bbox.x0).fold(f64::INFINITY, f64::min);
-    let top = all_words.iter().map(|w| w.bbox.top).fold(f64::INFINITY, f64::min);
+    let x0 = all_words
+        .iter()
+        .map(|w| w.bbox.x0)
+        .fold(f64::INFINITY, f64::min);
+    let top = all_words
+        .iter()
+        .map(|w| w.bbox.top)
+        .fold(f64::INFINITY, f64::min);
     let x1 = all_words.iter().map(|w| w.bbox.x1).fold(0.0, f64::max);
     let bottom = all_words.iter().map(|w| w.bbox.bottom).fold(0.0, f64::max);
 
     let mut row_texts: Vec<String> = Vec::new();
     for row in rows {
         let mut sorted_row: Vec<&&RawWord> = row.iter().collect();
-        sorted_row.sort_by(|a, b| a.bbox.x0.partial_cmp(&b.bbox.x0).unwrap_or(std::cmp::Ordering::Equal));
+        sorted_row.sort_by(|a, b| {
+            a.bbox
+                .x0
+                .partial_cmp(&b.bbox.x0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let text: String = sorted_row.iter().map(|w| w.text.as_str()).collect();
         if !text.trim().is_empty() {
             row_texts.push(text);
@@ -222,7 +254,12 @@ fn build_block(rows: &[Vec<&RawWord>], page_index: usize, block_index: usize) ->
         id: format!("b_{}_{}", page_index, block_index),
         block_type,
         text: row_texts.join("\n"),
-        bbox: BBox { x0, top, x1, bottom },
+        bbox: BBox {
+            x0,
+            top,
+            x1,
+            bottom,
+        },
     }
 }
 
@@ -347,11 +384,12 @@ pub fn extract_pdf_to_raw_json(path: &str) -> Result<RawDocument> {
 pub fn extract_with_python(input_path: &str, output_path: &str) -> Result<()> {
     // 编译期嵌入脚本的绝对路径（位于 backend-rust/scripts/）
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/pdf_extract.py");
+    let python = std::env::var("AI_BID_PYTHON_EXECUTABLE").unwrap_or_else(|_| "python".to_string());
 
-    let output = Command::new("python")
-        .args([&script, input_path, output_path])
+    let output = Command::new(&python)
+        .args([script, input_path, output_path])
         .output()
-        .with_context(|| format!("无法执行 Python 脚本: {}", script))?;
+        .with_context(|| format!("无法使用 {} 执行 Python 脚本: {}", python, script))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -431,7 +469,12 @@ mod tests {
         RawWord {
             id: String::new(),
             text: text.to_string(),
-            bbox: BBox { x0, top, x1, bottom },
+            bbox: BBox {
+                x0,
+                top,
+                x1,
+                bottom,
+            },
         }
     }
 
@@ -501,7 +544,15 @@ mod tests {
     fn test_compute_blocks_single_line_heading() {
         // 单行单词 ≤ 10 → heading
         let words: Vec<RawWord> = (0..5)
-            .map(|i| make_word(&format!("w{}", i), 50.0 + i as f64 * 30.0, 100.0, 75.0 + i as f64 * 30.0, 110.0))
+            .map(|i| {
+                make_word(
+                    &format!("w{}", i),
+                    50.0 + i as f64 * 30.0,
+                    100.0,
+                    75.0 + i as f64 * 30.0,
+                    110.0,
+                )
+            })
             .collect();
         let blocks = compute_blocks(&words, 0);
         assert_eq!(blocks.len(), 1);
@@ -515,11 +566,23 @@ mod tests {
         let mut words = Vec::new();
         // Line 1: 10 words
         for i in 0..10 {
-            words.push(make_word(&format!("L1W{}", i), 50.0 + i as f64 * 30.0, 100.0, 75.0 + i as f64 * 30.0, 110.0));
+            words.push(make_word(
+                &format!("L1W{}", i),
+                50.0 + i as f64 * 30.0,
+                100.0,
+                75.0 + i as f64 * 30.0,
+                110.0,
+            ));
         }
         // Line 2: 5 words (same paragraph, gap < 1.8x line_height)
         for i in 0..5 {
-            words.push(make_word(&format!("L2W{}", i), 50.0 + i as f64 * 30.0, 118.0, 75.0 + i as f64 * 30.0, 128.0));
+            words.push(make_word(
+                &format!("L2W{}", i),
+                50.0 + i as f64 * 30.0,
+                118.0,
+                75.0 + i as f64 * 30.0,
+                128.0,
+            ));
         }
         let blocks = compute_blocks(&words, 2);
         assert_eq!(blocks.len(), 1);
@@ -533,11 +596,23 @@ mod tests {
         let mut words = Vec::new();
         // Paragraph 1: line at y=100, height=10
         for i in 0..3 {
-            words.push(make_word(&format!("P1W{}", i), 50.0 + i as f64 * 30.0, 100.0, 75.0, 110.0));
+            words.push(make_word(
+                &format!("P1W{}", i),
+                50.0 + i as f64 * 30.0,
+                100.0,
+                75.0,
+                110.0,
+            ));
         }
         // Paragraph 2: line at y=140, gap=30 > 1.8*10=18 → new block
         for i in 0..3 {
-            words.push(make_word(&format!("P2W{}", i), 50.0 + i as f64 * 30.0, 140.0, 75.0, 150.0));
+            words.push(make_word(
+                &format!("P2W{}", i),
+                50.0 + i as f64 * 30.0,
+                140.0,
+                75.0,
+                150.0,
+            ));
         }
         let blocks = compute_blocks(&words, 1);
         assert_eq!(blocks.len(), 2);
@@ -552,7 +627,13 @@ mod tests {
         for p in 0..3 {
             let y = 100.0 + p as f64 * 40.0;
             for i in 0..5 {
-                words.push(make_word(&format!("W{}", i), 50.0 + i as f64 * 30.0, y, 75.0, y + 10.0));
+                words.push(make_word(
+                    &format!("W{}", i),
+                    50.0 + i as f64 * 30.0,
+                    y,
+                    75.0,
+                    y + 10.0,
+                ));
             }
         }
         let blocks = compute_blocks(&words, 5);

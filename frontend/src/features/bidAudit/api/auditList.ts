@@ -16,7 +16,11 @@ export const getAllAuditList = async (): Promise<AuditListItem[]> => {
       '/api/bid-documents/projects'
    );
 
-   return res.data;
+   if (res.code !== 0 && res.code !== 200) {
+      throw new Error(res.msg || '审核项目列表加载失败');
+   }
+
+   return res.data || [];
 };
 
 export const getAuditListWithParams = async (
@@ -39,6 +43,10 @@ export const getAuditListWithParams = async (
       params: queryParams,
    });
 
+   if (res.code !== 0 && res.code !== 200) {
+      throw new Error(res.msg || '审核列表加载失败');
+   }
+
    return res.data;
 };
 
@@ -48,6 +56,10 @@ export const getProjectVersions = async (
    const res = await request.get<unknown, BaseResponse<ProjectItem[]>>(
       `/api/bid-documents/project/${projectId}/versions`
    );
+
+   if (res.code !== 0 && res.code !== 200) {
+      throw new Error(res.msg || '项目版本列表加载失败');
+   }
 
    return (
       res.data ?? [

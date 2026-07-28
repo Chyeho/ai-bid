@@ -91,6 +91,10 @@ export interface AuditIssue {
   issueNo: string;
   riskId?: string;
   severity: Severity;
+  /** 是否属于重大/红线问题；重大问题仍使用 severity='high' */
+  isCritical?: boolean;
+  /** 重大问题判定依据 */
+  criticalReason?: string;
   category: string;
   /** 发现此风险的 Agent 名称（如 FactCheckAgent / SemanticRiskAgent） */
   agentName?: string;
@@ -136,6 +140,8 @@ export interface AuditIssue {
 /** 对齐 Rust RoutingSummary + 4 级统计 */
 export interface AuditSummary {
   totalIssues: number;
+  /** 触发重大风险红线的问题数；它与 high 严重度正交，且是 high 的子集 */
+  critical?: number;
   high: number;
   medium: number;
   low: number;
@@ -377,6 +383,8 @@ export type FindingLifecycle = 'verified' | 'blind_spot' | 'debated';
 export interface FindingAddedEvent {
   risk_id: string;
   severity: string;
+  is_critical?: boolean;
+  critical_reason?: string;
   risk_type: string;
   agent: string;
   confidence: number;

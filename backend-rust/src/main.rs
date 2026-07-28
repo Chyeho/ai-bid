@@ -14,22 +14,22 @@ use serde::Serialize;
 
 // Agent 框架
 use ai_bid::agents::bus::AgentBus;
+use ai_bid::agents::chat_agent::ChatAgent;
 use ai_bid::agents::coordinator::Coordinator;
 use ai_bid::agents::fact_check::create_fact_check_agent;
-use ai_bid::services::llm_client::create_llm_client;
 use ai_bid::agents::registry::AgentRegistry;
 use ai_bid::agents::session_graph::SessionGraph;
+use ai_bid::agents::tools::ToolRegistry;
+use ai_bid::agents::tools::answer_user::AnswerUserTool;
+use ai_bid::agents::tools::output_finding::OutputFindingTool;
+use ai_bid::agents::tools::read_section::ReadSectionTool;
 use ai_bid::agents::tools::search_document::SearchDocumentTool;
 use ai_bid::agents::tools::search_knowledge::{
     DashScopeSearchBackend, SearchBuffer, SearchKnowledgeTool,
 };
-use ai_bid::agents::tools::read_section::ReadSectionTool;
-use ai_bid::agents::tools::output_finding::OutputFindingTool;
-use ai_bid::agents::tools::answer_user::AnswerUserTool;
-use ai_bid::agents::tools::ToolRegistry;
 use ai_bid::agents::trace::TraceLog;
 use ai_bid::agents::types::{ChatAgentConfig, CoordinatorConfig, CoordinatorOutput, ReviewClause};
-use ai_bid::agents::chat_agent::ChatAgent;
+use ai_bid::services::llm_client::create_llm_client;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -105,7 +105,10 @@ impl ChunkingOutput {
         config: &ChunkingConfig,
         chunks: &[Chunk],
     ) -> Self {
-        let leaf_count = chunks.iter().filter(|c| matches!(c.chunk_type, ChunkType::Leaf)).count();
+        let leaf_count = chunks
+            .iter()
+            .filter(|c| matches!(c.chunk_type, ChunkType::Leaf))
+            .count();
         let merged_count = chunks
             .iter()
             .filter(|c| matches!(c.chunk_type, ChunkType::Merged { .. }))
@@ -202,12 +205,10 @@ async fn main() -> Result<()> {
     // ── 指标采集器 ─────────────────────────────────────────────
     let llm_model = std::env::var("DASHSCOPE_MODEL")
         .unwrap_or_else(|_| std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen-plus".to_string()));
-    let metrics = Arc::new(Mutex::new(
-        ai_bid::metrics::MetricsCollector::new(
-            ai_bid::metrics::SCHEMA_VERSION,
-            &llm_model,
-        ),
-    ));
+    let metrics = Arc::new(Mutex::new(ai_bid::metrics::MetricsCollector::new(
+        ai_bid::metrics::SCHEMA_VERSION,
+        &llm_model,
+    )));
     let pipeline_start = std::time::Instant::now();
     let mut phase_start = pipeline_start;
 
@@ -279,8 +280,7 @@ async fn main() -> Result<()> {
             // Python 兜底后，读回 RawDocument
             let json_str = fs::read_to_string(&raw_json_path)
                 .with_context(|| "无法读取 Python 兜底输出的 JSON")?;
-            serde_json::from_str(&json_str)
-                .with_context(|| "Python 兜底输出的 JSON 解析失败")?
+            serde_json::from_str(&json_str).with_context(|| "Python 兜底输出的 JSON 解析失败")?
         }
     };
 
@@ -357,7 +357,7 @@ async fn main() -> Result<()> {
         let block_page: std::collections::HashMap<&str, usize> = raw_doc
             .pages
             .iter()
-            .flat_map(|p| p.blocks.iter().map(move |b| (b.id.as_str(), p.page_index as usize)))
+            .flat_map(|p| p.blocks.iter().map(move |b| (b.id.as_str(), p.page_index)))
             .collect();
 
         // 按页码分组 orphan blocks
@@ -431,14 +431,12 @@ async fn main() -> Result<()> {
 
     println!("正在注入表格内容到章节结构...");
     // ★ 跨页表格合并：同一逻辑表格跨页时被 PDF 提取器拆散，先合并再注入
-    let cross_page_merged = ai_bid::services::sectionize_service::merge_cross_page_tables(&mut raw_doc);
+    let cross_page_merged =
+        ai_bid::services::sectionize_service::merge_cross_page_tables(&mut raw_doc);
     if cross_page_merged > 0 {
         println!("  已合并 {} 组跨页表格", cross_page_merged);
     }
-    ai_bid::services::sectionize_service::inject_tables_into_sections(
-        &mut all_sections,
-        &raw_doc,
-    );
+    ai_bid::services::sectionize_service::inject_tables_into_sections(&mut all_sections, &raw_doc);
     // 递归统计所有 section（含子节点）中 t_ 前缀的 block_id 数量
     fn count_table_ids(sections: &[ai_bid::services::sectionize_service::Section]) -> usize {
         sections
@@ -473,8 +471,7 @@ async fn main() -> Result<()> {
     populate_bbox_refs(&mut chunks, &raw_doc);
 
     let chunks_dir = data_path_str("output/chunks");
-    fs::create_dir_all(&chunks_dir)
-        .with_context(|| format!("无法创建输出目录: {}", chunks_dir))?;
+    fs::create_dir_all(&chunks_dir).with_context(|| format!("无法创建输出目录: {}", chunks_dir))?;
 
     let chunks_path = format!("{}/{}_chunks.json", chunks_dir, stem);
 
@@ -537,8 +534,7 @@ async fn main() -> Result<()> {
     );
 
     let doc_index = if is_remote {
-        let api_client =
-            ai_bid::services::embedding_api_client::EmbeddingApiClient::from_env()?;
+        let api_client = ai_bid::services::embedding_api_client::EmbeddingApiClient::from_env()?;
         ai_bid::services::embedding_service::embed_chunks_remote(
             &chunks,
             &chunking_config,
@@ -563,11 +559,7 @@ async fn main() -> Result<()> {
     println!(
         "  索引完成: {} 条向量, 维度 {}",
         doc_index.len(),
-        doc_index
-            .embeddings
-            .first()
-            .map(|v| v.len())
-            .unwrap_or(0)
+        doc_index.embeddings.first().map(|v| v.len()).unwrap_or(0)
     );
 
     // ── 指标：阶段 4 Embedding ──
@@ -584,7 +576,6 @@ async fn main() -> Result<()> {
                 dimension: embed_dimension,
             },
         );
-        phase_start = std::time::Instant::now();
     }
 
     // ─── 阶段 5: 语义搜索验证（V5.6）──────────────────────────
@@ -673,15 +664,15 @@ async fn main() -> Result<()> {
         let agent_embed = Arc::new(embed_client);
 
         // 4. 创建 LLM 客户端（Arc 共享）
-        let llm: Arc<dyn ai_bid::agents::react_loop::LlmClient> =
-            create_llm_client()?.into();
+        let llm: Arc<dyn ai_bid::agents::react_loop::LlmClient> = create_llm_client()?.into();
 
         // 5. 搜索后端选择（复用阶段 6 逻辑）
         let search_backend =
             env::var("AIBID_SEARCH_BACKEND").unwrap_or_else(|_| "dashscope".to_string());
 
         let shared_search_buffer: Option<Arc<SearchBuffer>> = if search_backend == "searxng" {
-            let url = env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+            let url =
+                env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
             Some(SearchBuffer::new(url))
         } else {
             None
@@ -760,7 +751,10 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(5);
-    println!("  最大并行条款: {} (设置 AIBID_MAX_PARALLEL_CLAUSES 调整)", max_parallel);
+    println!(
+        "  最大并行条款: {} (设置 AIBID_MAX_PARALLEL_CLAUSES 调整)",
+        max_parallel
+    );
 
     let review_clauses: Vec<ReviewClause> = chunks
         .iter()
@@ -814,8 +808,12 @@ async fn main() -> Result<()> {
         if search_backend == "dashscope" {
             let ds = DashScopeSearchBackend::from_env()
                 .expect("DashScope 搜索后端初始化失败。请设置 DASHSCOPE_API_KEY");
-            println!("  DashScope 联网搜索后端已启用 (model={})",
-                std::env::var("DASHSCOPE_SEARCH_MODEL").or_else(|_| std::env::var("DASHSCOPE_MODEL")).unwrap_or_else(|_| "qwen-plus".to_string()));
+            println!(
+                "  DashScope 联网搜索后端已启用 (model={})",
+                std::env::var("DASHSCOPE_SEARCH_MODEL")
+                    .or_else(|_| std::env::var("DASHSCOPE_MODEL"))
+                    .unwrap_or_else(|_| "qwen-plus".to_string())
+            );
             Some(Arc::new(ds))
         } else {
             None
@@ -848,13 +846,9 @@ async fn main() -> Result<()> {
             )));
             // 根据搜索后端选择工具变体
             if let Some(ref ds) = ds_search {
-                registry.register(Box::new(SearchKnowledgeTool::with_dashscope(
-                    ds.clone(),
-                )));
+                registry.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
             } else if let Some(ref buf) = buffer {
-                registry.register(Box::new(SearchKnowledgeTool::with_buffer(
-                    buf.clone(),
-                )));
+                registry.register(Box::new(SearchKnowledgeTool::with_buffer(buf.clone())));
             } else {
                 panic!("搜索后端未初始化");
             }
@@ -982,16 +976,16 @@ async fn main() -> Result<()> {
     );
     println!(
         "  合规条款: {} 条",
-        findings.iter().filter(|f| f.no_risk && !f.truncated).count()
+        findings
+            .iter()
+            .filter(|f| f.no_risk && !f.truncated)
+            .count()
     );
     println!(
         "  截断(需人工): {} 条",
         findings.iter().filter(|f| f.truncated).count()
     );
-    println!(
-        "  🔴 High: {} 条",
-        output.routing_summary.high_risk_count
-    );
+    println!("  🔴 High: {} 条", output.routing_summary.high_risk_count);
     println!("  结果文件: {}", findings_path);
 
     // 打印 Agent 分布
@@ -1005,11 +999,17 @@ async fn main() -> Result<()> {
     for f in findings {
         if !f.no_risk {
             println!();
-            println!("  ┌─ {} [{}] confidence={:.2}", f.risk_id, f.severity, f.confidence);
+            println!(
+                "  ┌─ {} [{}] confidence={:.2}",
+                f.risk_id, f.severity, f.confidence
+            );
             println!("  │  条款: {}", f.clause_ids.join(", "));
             println!("  │  类型: {}", f.risk_type);
             println!("  │  法条: {}", f.legal_basis.join("; "));
-            println!("  │  理由: {}", f.reason.chars().take(200).collect::<String>());
+            println!(
+                "  │  理由: {}",
+                f.reason.chars().take(200).collect::<String>()
+            );
             println!("  └──────────────────────────────");
         }
     }
@@ -1039,7 +1039,8 @@ async fn main() -> Result<()> {
 
         let run_id = chrono::Local::now().format("%Y%m%dT%H%M%S").to_string();
         let use_coordinator = env::var("AIBID_COORDINATOR").unwrap_or_default() == "1";
-        let search_backend = env::var("AIBID_SEARCH_BACKEND").unwrap_or_else(|_| "dashscope".to_string());
+        let search_backend =
+            env::var("AIBID_SEARCH_BACKEND").unwrap_or_else(|_| "dashscope".to_string());
 
         let meta = ai_bid::metrics::RunMeta {
             run_id: run_id.clone(),
@@ -1078,17 +1079,17 @@ async fn main() -> Result<()> {
         };
         fs::create_dir_all(&runs_dir).ok();
         let run_path = format!("{}/{}.json", runs_dir, run_id);
-        if let Ok(json) = serde_json::to_string_pretty(&run_metrics) {
-            if fs::write(&run_path, &json).is_ok() {
-                eprintln!("\n📊 指标已写入: {}", run_path);
-                eprintln!(
-                    "   总耗时 {:.1}s | Token {} in + {} out | 成本 ¥{:.2}",
-                    run_metrics.latency.total_wall_clock_secs,
-                    run_metrics.llm_efficiency.totals.tokens_input,
-                    run_metrics.llm_efficiency.totals.tokens_output,
-                    run_metrics.llm_efficiency.totals.cost_cny,
-                );
-            }
+        if let Ok(json) = serde_json::to_string_pretty(&run_metrics)
+            && fs::write(&run_path, &json).is_ok()
+        {
+            eprintln!("\n📊 指标已写入: {}", run_path);
+            eprintln!(
+                "   总耗时 {:.1}s | Token {} in + {} out | 成本 ¥{:.2}",
+                run_metrics.latency.total_wall_clock_secs,
+                run_metrics.llm_efficiency.totals.tokens_input,
+                run_metrics.llm_efficiency.totals.tokens_output,
+                run_metrics.llm_efficiency.totals.cost_cny,
+            );
         }
     }
 

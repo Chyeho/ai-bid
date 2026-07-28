@@ -1,18 +1,11 @@
-//! `output_finding` 工具 — 输出审查结论。
+//! `output_finding` 终端工具。
 //!
-//! 这是 ReAct 循环的"终端"工具。Agent 调用此工具表示证据已经充分，
-//! 可以下结论。ReAct 循环检测到此工具调用后立即退出，返回 RiskFinding。
-//!
-//! 工具实现本身是一个透传：将 LLM 传入的参数原样返回，
-//! ReActLoop 从 tool_call arguments 中解析 RiskFinding。
+//! 工具名为兼容旧 Agent 配置而保留；新协议一次输出零到多条风险发现。
 
 use anyhow::Result;
 
 use super::AgentTool;
 
-/// `output_finding` 工具的参数即 RiskFinding 的所有字段。
-/// 这里不重复定义结构体——直接在 definition 中描述 JSON Schema，
-/// execute 中透传 LLM 传入的参数。
 pub struct OutputFindingTool;
 
 #[async_trait::async_trait]
@@ -26,91 +19,104 @@ impl AgentTool for OutputFindingTool {
             "type": "function",
             "function": {
                 "name": "output_finding",
-                "description": "输出审查结论——你对该条款的最终判断。\
-                    调用此工具表示你认为证据已经充分，可以下结论。\
-                    调用后本条款的审查循环立即结束。\
-                    【使用场景】① 你已完成完整的推理链——理解条款 → 搜索法规 → 搜索案例 → \
-                    （如需要）search_document 发现关联章节 → read_section 精读确认—— \
-                    且每一步都有实际证据支撑，此时输出结论。\
-                    ② 经过充分搜索确实找不到相关法规/案例支撑风险判定—— \
-                    此时输出 no_risk=true，这是负责任的审查结论，不是'没审出来'。\
-                    【不使用场景 — 出现以下情况不要输出，继续审查】\
-                    ① 搜到了相关法规但还没看到法规全文——先 read_section 或其他方式确认法规内容。\
-                    ② search_document 返回了关联条款但你还没精读确认——先 read_section。\
-                    ③ 推理链有跳跃（'这看起来像地域歧视'但没说明为什么构成地域歧视、依据哪条法规）\
-                    ——补全推理逻辑再输出。\
-                    ④ 你只搜了一个 category 且结果为空——换 category 或换搜索词再试一次。\
-                    【confidence 校准指南 — 必须诚实】\
-                    · ≥0.9: 有法规原文直接适用 + 有案例佐证。\
-                    · 0.75–0.89: 有法规原文适用但案例缺失或不完全匹配。\
-                    · 0.6–0.74: 仅凭语义判断（'这很像地域歧视'）但没有直接法规支撑—— \
-                    此时 severity 不应设为 high，且应标注推荐人工复核。\
-                    · <0.6: 不应输出 high severity 的判定；可输出 medium/low 或走人工复核。\
-                    【注意】\
-                    · no_risk=true 和 severity=high 一样是严肃结论——两者都需要充分证据。\
-                    · reason 必须写完整的推理链条（读了什么→搜了什么→为什么这样判定），\
-                    不只是重复 risk_type。推理链是后续 Legal Verify 和人工复核的基础。\
-                    · source_quote 必须来自 read_section 返回的原文，精确到字。",
+                "description": "批量输出当前条款的最终审查结论。必须逐段检查并一次列出所有相互独立的问题；\
+                    例如同一条款同时存在地域限制、保证金超限、单方变更时，应输出3条finding。\
+                    没有风险时返回findings=[]，不要创建“无风险”占位项。\
+                    findings最多5条；若仍有独立问题未展开，has_more=true。\
+                    每条source_quote只引用支撑该风险的最小充分原文；每条reason独立说明事实、规则和结论。\
+                    confidence应诚实校准：≥0.9=法规与案例双支撑；0.75-0.89=有直接法规；\
+                    0.6-0.74=主要依赖语义判断；低于0.6不得输出high。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "risk_id": {
-                            "type": "string",
-                            "description": "风险唯一标识，格式 R_XXX（如 R_001）。框架会自动填充此字段，LLM 无需输出。"
+                        "findings": {
+                            "type": "array",
+                            "maxItems": 5,
+                            "description": "相互独立的风险发现；无风险时为空数组。",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "no_risk": {
+                                        "type": "boolean",
+                                        "description": "批量格式中必须为false；无风险请返回空findings。"
+                                    },
+                                    "severity": {
+                                        "type": "string",
+                                        "enum": ["high", "medium", "low", "info"],
+                                        "description": "high=必须修改，medium=建议修改，low=优化建议，info=信息提示。"
+                                    },
+                                    "is_critical": {
+                                        "type": "boolean",
+                                        "description": "是否属于会造成不合理排除、投标无效或严重破坏公平竞争的重大/红线问题。重大问题仍使用severity=high。"
+                                    },
+                                    "critical_reason": {
+                                        "type": "string",
+                                        "description": "重大问题判定依据；非重大问题必须为空字符串。"
+                                    },
+                                    "risk_type": {
+                                        "type": "string",
+                                        "description": "面向用户的风险类型标签。"
+                                    },
+                                    "category_code": {
+                                        "type": "string",
+                                        "enum": [
+                                            "LOCAL_REGISTRATION", "BRAND_LOCK", "UNRELATED_CERT",
+                                            "REGIONAL_PERFORMANCE", "SCALE_THRESHOLD",
+                                            "SHORT_DEADLINE", "EXCESSIVE_DEPOSIT", "OEM_AUTHORIZATION",
+                                            "SUBJECTIVE_SCORING", "LOCAL_AWARD", "VAGUE_ACCEPTANCE",
+                                            "UNBOUNDED_IP", "UNILATERAL_CHANGE", "CONFLICTING_DATES",
+                                            "UNCLEAR_PENALTY", "OTHER"
+                                        ],
+                                        "description": "稳定风险分类编码。必须从枚举选择；确实不属于已知15类时使用OTHER。"
+                                    },
+                                    "source_quote": {
+                                        "type": "string",
+                                        "description": "从条款原文逐字摘录、只支撑本条风险的最小充分证据。"
+                                    },
+                                    "legal_basis": {
+                                        "type": "array",
+                                        "items": { "type": "string" },
+                                        "description": "直接支撑本条风险的法条引用列表。"
+                                    },
+                                    "reason": {
+                                        "type": "string",
+                                        "description": "针对本条风险的完整推理链：原文事实→适用规则→风险结论。"
+                                    },
+                                    "suggestion": {
+                                        "type": "string",
+                                        "description": "针对本条风险的可执行修改建议。"
+                                    },
+                                    "confidence": {
+                                        "type": "number",
+                                        "minimum": 0.0,
+                                        "maximum": 1.0,
+                                        "description": "本条风险的置信度。"
+                                    }
+                                },
+                                "required": [
+                                    "no_risk", "severity", "is_critical", "critical_reason",
+                                    "risk_type", "category_code", "source_quote", "legal_basis",
+                                    "reason", "suggestion", "confidence"
+                                ]
+                            }
                         },
-                        "no_risk": {
+                        "has_more": {
                             "type": "boolean",
-                            "description": "是否判定为无风险。true = 该条款合规，不需要后续处理。"
+                            "description": "是否仍有因5条上限或上下文不足而未展开的独立问题。"
                         },
-                        "severity": {
-                            "type": "string",
-                            "enum": ["high", "medium", "low", "info"],
-                            "description": "风险严重程度。high=红线问题必须改，medium=建议修改，low=优化建议，info=信息性（no_risk时必须用info）"
-                        },
-                        "risk_type": {
-                            "type": "string",
-                            "description": "风险类型标签。如：地域歧视/品牌指定/程序违规/资质排他/评分倾斜/需求不清/合同违规/格式缺失/组合风险/无风险"
-                        },
-                        "source_quote": {
-                            "type": "string",
-                            "description": "从 read_section 返回的原文中逐字摘录的违规文本。no_risk=true 时可为空字符串。"
-                        },
-                        "legal_basis": {
+                        "coverage": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "法条引用列表。每条格式：'法条名称（web_search 返回的 source url）'。如 ['《政府采购法》第5条 https://...', '《实施条例》第20条(二) https://...']。如果搜索结果中无对应 URL，可省略。"
-                        },
-                        "reason": {
-                            "type": "string",
-                            "description": "完整推理链：读了什么 → 搜了什么 → 为什么这样判定。引用搜索结果中的法条/案例时，使用 Markdown 链接格式：[法条名称](URL)。例如：'根据[《政府采购法》第5条](https://...)，禁止以地域作为供应商资格条件…'。框架会自动在末尾追加完整的 📎 搜索来源清单。"
-                        },
-                        "suggestion": {
-                            "type": "string",
-                            "description": "修改建议。no_risk=true 时可为空字符串。"
-                        },
-                        "confidence": {
-                            "type": "number",
-                            "minimum": 0.0,
-                            "maximum": 1.0,
-                            "description": "整体置信度。≥0.9=法规+案例双支撑；0.75-0.89=有法规但案例缺失；0.6-0.74=仅语义判断；<0.6=不应输出high"
-                        },
-                        "clause_ids": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "关联的条款chunk_id列表。对于单个条款审查，直接传 [\"ch_XXX\"]。框架会自动填充，此字段可选。"
+                            "description": "已检查的风险域，如qualification、procedure、scoring、demand、contract。"
                         }
                     },
-                    "required": ["no_risk", "severity", "risk_type", "source_quote", "legal_basis", "reason", "suggestion", "confidence"]
+                    "required": ["findings", "has_more", "coverage"]
                 }
             }
         })
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value> {
-        // output_finding 是终端工具：LLM 传入的参数就是 RiskFinding 的 JSON。
-        // ReAct 循环通过检查 tool_call.name == "output_finding" 来检测退出条件，
-        // 然后从 tool_call.arguments 中解析 RiskFinding。
-        // 这里直接透传参数。
         Ok(args)
     }
 }

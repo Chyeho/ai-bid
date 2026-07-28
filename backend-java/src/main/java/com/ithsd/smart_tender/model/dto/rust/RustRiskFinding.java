@@ -31,6 +31,12 @@ public class RustRiskFinding {
     // ── 核心判定 ──
     private boolean noRisk;
     private String severity;   // "high" | "medium" | "low" | "info"
+    /** 重大/红线问题标志；与四级 severity 正交，重大问题仍为 high */
+    @JsonProperty("is_critical")
+    private boolean critical;
+    /** 重大问题判定依据 */
+    @JsonProperty("critical_reason")
+    private String criticalReason;
     private String riskType;   // "地域歧视" / "品牌指定" / "程序违规" / …
 
     // ── 证据 ──

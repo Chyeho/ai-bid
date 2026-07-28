@@ -7,6 +7,7 @@ import com.ithsd.smart_tender.model.vo.AuditTaskCreateVO;
 import com.ithsd.smart_tender.model.vo.AuditTaskStatusVO;
 import com.ithsd.smart_tender.model.vo.ResultVO;
 import com.ithsd.smart_tender.service.AuditTaskService;
+import com.ithsd.smart_tender.service.AuditEngineService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -30,9 +31,13 @@ import java.util.Map;
 @RequestMapping("/api/audit-tasks")
 public class AuditTaskController {
     private final AuditTaskService auditTaskService;
+    private final AuditEngineService auditEngineService;
 
-    public AuditTaskController(AuditTaskService auditTaskService) {
+    public AuditTaskController(
+            AuditTaskService auditTaskService,
+            AuditEngineService auditEngineService) {
         this.auditTaskService = auditTaskService;
+        this.auditEngineService = auditEngineService;
     }
 
     @PostMapping
@@ -43,6 +48,17 @@ public class AuditTaskController {
     @GetMapping("/{taskId}")
     public Result<AuditTaskStatusVO> getStatus(@PathVariable @NotBlank(message = "taskId不能为空") String taskId) {
         return Result.success(auditTaskService.getStatus(taskId));
+    }
+
+    /**
+     * 恢复因 Java 重启、SSE 丢帧等原因遗留的审核中任务。
+     * 先读取状态完成归属校验，再从 Rust 结果缓存恢复，不会重新调用模型。
+     */
+    @PostMapping("/{taskId}/recover")
+    public Result<Boolean> recover(
+            @PathVariable @NotBlank(message = "taskId不能为空") String taskId) {
+        auditTaskService.getStatus(taskId);
+        return Result.success(auditEngineService.recover(taskId));
     }
 
     @GetMapping("/{taskId}/result")

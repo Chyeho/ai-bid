@@ -65,6 +65,8 @@ export function buildClauseMap(
         clause.risks.push({
           risk_id: riskId,
           severity: issue.severity,
+          is_critical: issue.isCritical ?? false,
+          critical_reason: issue.criticalReason ?? '',
           risk_type: issue.category ?? '',
           agent: issue.agent ?? issue.agentName ?? '',
           confidence: 0,

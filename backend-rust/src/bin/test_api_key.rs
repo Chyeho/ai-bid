@@ -26,14 +26,17 @@ async fn main() -> Result<()> {
         .or_else(|_| std::env::var("OPENAI_API_KEY"))
         .context("❌ DASHSCOPE_API_KEY 或 OPENAI_API_KEY 未设置（检查 .env）")?;
 
-    let model = std::env::var("DASHSCOPE_MODEL")
-        .unwrap_or_else(|_| "qwen-plus".to_string());
+    let model = std::env::var("DASHSCOPE_MODEL").unwrap_or_else(|_| "qwen-plus".to_string());
 
     let endpoint = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
 
     // 安全预览 Key（不输出完整密钥）
     let key_preview = if api_key.len() > 12 {
-        format!("{}...{}", &api_key[..8], &api_key[api_key.len().saturating_sub(4)..])
+        format!(
+            "{}...{}",
+            &api_key[..8],
+            &api_key[api_key.len().saturating_sub(4)..]
+        )
     } else {
         "***".to_string()
     };
@@ -78,16 +81,16 @@ async fn main() -> Result<()> {
         .context("❌ 网络请求失败（检查网络 / API 端点可达性）")?;
 
     let status = response.status();
-    let response_body: Value = response
-        .json()
-        .await
-        .context("❌ 解析响应 JSON 失败")?;
+    let response_body: Value = response.json().await.context("❌ 解析响应 JSON 失败")?;
 
     // ── 错误处理 ──
     if !status.is_success() {
         println!();
         println!("❌ API 返回错误 HTTP {}:", status);
-        println!("{}", serde_json::to_string_pretty(&response_body).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response_body).unwrap_or_default()
+        );
         anyhow::bail!("API 调用失败 — 请检查 API Key 是否有效");
     }
 
@@ -123,7 +126,8 @@ async fn main() -> Result<()> {
     println!();
     println!("✅ 连通测试成功！");
     println!("   回复:    {}", content);
-    println!("   Tokens:  prompt={}, completion={}, total={}",
+    println!(
+        "   Tokens:  prompt={}, completion={}, total={}",
         input_tokens, output_tokens, total_tokens,
     );
     println!();

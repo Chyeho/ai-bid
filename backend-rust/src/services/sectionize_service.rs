@@ -57,13 +57,15 @@ static HEADING_PATTERNS: LazyLock<Vec<HeadingPattern>> = LazyLock::new(|| {
         HeadingPattern {
             pattern_type: "cjk_numbered",
             level: 2,
-            regex: Regex::new(r"^[一二三四五六七八九十百千]+[、.．]\s*\S").expect("cjk_numbered regex"),
+            regex: Regex::new(r"^[一二三四五六七八九十百千]+[、.．]\s*\S")
+                .expect("cjk_numbered regex"),
         },
         // Level 3: 括号中文序号 （一）（二）...
         HeadingPattern {
             pattern_type: "paren_cjk",
             level: 3,
-            regex: Regex::new(r"^[（(][一二三四五六七八九十百千]+[）)]\s*\S").expect("paren_cjk regex"),
+            regex: Regex::new(r"^[（(][一二三四五六七八九十百千]+[）)]\s*\S")
+                .expect("paren_cjk regex"),
         },
         // Level 4: 数字序号 (1. 2、3) ...) — 要求后跟非空且标题短
         HeadingPattern {
@@ -105,9 +107,8 @@ struct HeadingPattern {
 /// 输入: "采购包1（...二期））1.主要商务要求"
 /// 输出: ["采购包1（...二期））", "1.主要商务要求"]
 /// ```
-static INLINE_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[)）](\d+[.、)）])").expect("inline heading regex")
-});
+static INLINE_HEADING_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[)）](\d+[.、)）])").expect("inline heading regex"));
 
 /// 将行内标题从前置内容中拆分出来。
 ///
@@ -264,11 +265,8 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
 
     for (block, page_idx) in &all_blocks {
         // ★ P1: 行内标题预拆分 — 将 "）1.主要商务要求" 拆为独立行
-        let expanded_lines: Vec<String> = block
-            .text
-            .lines()
-            .flat_map(|l| split_inline_headings(l))
-            .collect();
+        let expanded_lines: Vec<String> =
+            block.text.lines().flat_map(split_inline_headings).collect();
 
         let mut block_has_candidate = false;
 
@@ -288,7 +286,7 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
             // 此时标题仍取原始行，以保留重要性标记。
             let stripped = strip_emphasis_prefix(line);
             let try_lines: [(&str, bool); 2] = [
-                (line, false),                          // 原始行，匹配位置即标题起始
+                (line, false),                           // 原始行，匹配位置即标题起始
                 (stripped, stripped.len() < line.len()), // 去符号版，命中则用原始行整体作标题
             ];
 
@@ -309,15 +307,19 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
                         // 标题长度上限过滤：过长的"标题"大概率是正文误匹配
                         // 层级越高（数字越小）标题应越短
                         let max_title_len = match pattern.level {
-                            1 => 40,  // 章/部分标题 ≤ 40 字符
+                            1 => 40, // 章/部分标题 ≤ 40 字符
                             2 => {
                                 // cjk_numbered 易将法律条款长句误匹配为标题
                                 // （如 "一、《深圳经济特区政府采购条例》第五十七条..."）
                                 // 真实的中文序号标题（"一、技术要求"）均 ≤ 25 字
-                                if pattern.pattern_type == "cjk_numbered" { 25 } else { 40 }
+                                if pattern.pattern_type == "cjk_numbered" {
+                                    25
+                                } else {
+                                    40
+                                }
                             }
-                            3 => 60,  // 括号中文序号 ≤ 60 字符
-                            _ => 40,  // Level 4+ 数字/条款序号 ≤ 40 字符
+                            3 => 60, // 括号中文序号 ≤ 60 字符
+                            _ => 40, // Level 4+ 数字/条款序号 ≤ 40 字符
                         };
                         if title.chars().count() > max_title_len {
                             continue;
@@ -326,7 +328,8 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
                         // 规则 A：句末标点排除 — Level 4 digit_dot 标题含 。！？ → 跳过
                         // 中文完整句子必然以句号结尾，而真实标题不会。
                         // 精确打击被误匹配的完整句子（如 "1.1本招标文件适用于..."）
-                        if pattern.pattern_type == "digit_dot" && title.contains(['。', '！', '？']) {
+                        if pattern.pattern_type == "digit_dot" && title.contains(['。', '！', '？'])
+                        {
                             continue;
                         }
 
@@ -349,24 +352,24 @@ pub fn sectionize(raw: &RawDocument) -> SectionizeOutput {
         // 如果 block 被标注为 heading 但所有行均未匹配任何编号标题模式，
         // 将首行短文本作为 plain_heading 候选。
         // 典型场景："付款方式""验收要求" 等无编号的表格列标题。
-        if !block_has_candidate && block.block_type == BlockType::Heading {
-            if let Some(first_line) = block
+        if !block_has_candidate
+            && block.block_type == BlockType::Heading
+            && let Some(first_line) = block
                 .text
                 .lines()
                 .map(|l| l.trim())
                 .find(|l| !l.is_empty() && !is_page_noise(l))
-            {
-                let char_count = first_line.chars().count();
-                // 仅接受短文本（≤ 30 字符），避免将长段落误判为标题
-                if char_count >= 2 && char_count <= 30 {
-                    candidates.push(HeadingCandidate {
-                        level: 5, // 最低层，挂到最近的上级 section 下
-                        title: first_line.to_string(),
-                        pattern: "plain_heading",
-                        page: *page_idx,
-                        block_id: block.id.clone(),
-                    });
-                }
+        {
+            let char_count = first_line.chars().count();
+            // 仅接受短文本（≤ 30 字符），避免将长段落误判为标题
+            if (2..=30).contains(&char_count) {
+                candidates.push(HeadingCandidate {
+                    level: 5, // 最低层，挂到最近的上级 section 下
+                    title: first_line.to_string(),
+                    pattern: "plain_heading",
+                    page: *page_idx,
+                    block_id: block.id.clone(),
+                });
             }
         }
     }
@@ -508,9 +511,9 @@ fn filter_pseudo_section_candidates(
 
     // ── 规则 2: cjk_numbered 以 。！？ 结尾 → 完整句子，非章节标题 ──
     //           （真实标题如 "一、技术要求" 不会以句末标点结尾）
-    for idx in 0..first_l1 {
-        if candidates[idx].pattern == "cjk_numbered" {
-            let t = candidates[idx].title.trim();
+    for (idx, candidate) in candidates.iter().enumerate().take(first_l1) {
+        if candidate.pattern == "cjk_numbered" {
+            let t = candidate.title.trim();
             if t.ends_with('。') || t.ends_with('！') || t.ends_with('？') {
                 remove_indices.push(idx);
             }
@@ -544,9 +547,7 @@ fn filter_pseudo_section_candidates(
 /// 3. 检测连续性：成员数 ≥2 且编号递增 → 保留组；孤立成员 → 移除
 /// 4. 额外信号：标题过长（>35 chars for digit_dot / >50 for paren_digit）的孤立候选
 ///    → 确认为正文内容泄漏 → 移除
-fn validate_numbering_chains(
-    mut candidates: Vec<HeadingCandidate>,
-) -> Vec<HeadingCandidate> {
+fn validate_numbering_chains(mut candidates: Vec<HeadingCandidate>) -> Vec<HeadingCandidate> {
     if candidates.is_empty() {
         return candidates;
     }
@@ -560,9 +561,9 @@ fn validate_numbering_chains(
     #[derive(Debug, Clone)]
     struct IndexedCandidate {
         global_idx: usize,
-        rank: usize,        // 编号深度: "1." = 1, "1.1" = 2
+        rank: usize,          // 编号深度: "1." = 1, "1.1" = 2
         num_prefix: Vec<u32>, // 编号序列: "1.2.3" → [1, 2, 3]
-        title_len: usize,   // 标题字符数
+        title_len: usize,     // 标题字符数
     }
 
     let mut indexed: Vec<IndexedCandidate> = Vec::new();
@@ -593,7 +594,7 @@ fn validate_numbering_chains(
 
     let mut remove_indices: Vec<usize> = Vec::new();
 
-    for (_key, member_indices) in &groups {
+    for member_indices in groups.values() {
         if member_indices.len() < 2 {
             // 孤立候选（该 pattern+rank 组只有 1 个成员）→ 额外检查
             for &mi in member_indices {
@@ -615,11 +616,21 @@ fn validate_numbering_chains(
                 let ends_with_preposition = {
                     let t = c.title.trim();
                     // 中文单字介词：对、为、在、按、由、以、与、和、从、向、被、把、将、就、至
-                    t.ends_with('对') || t.ends_with('为') || t.ends_with('在')
-                        || t.ends_with('按') || t.ends_with('由') || t.ends_with('以')
-                        || t.ends_with('与') || t.ends_with('和') || t.ends_with('从')
-                        || t.ends_with('向') || t.ends_with('被') || t.ends_with('把')
-                        || t.ends_with('将') || t.ends_with('就') || t.ends_with('至')
+                    t.ends_with('对')
+                        || t.ends_with('为')
+                        || t.ends_with('在')
+                        || t.ends_with('按')
+                        || t.ends_with('由')
+                        || t.ends_with('以')
+                        || t.ends_with('与')
+                        || t.ends_with('和')
+                        || t.ends_with('从')
+                        || t.ends_with('向')
+                        || t.ends_with('被')
+                        || t.ends_with('把')
+                        || t.ends_with('将')
+                        || t.ends_with('就')
+                        || t.ends_with('至')
                 };
 
                 if long_title || has_colon || ends_with_preposition {
@@ -668,11 +679,21 @@ fn validate_numbering_chains(
             // "2、工程交接后，供应商应按照以下要求对" → 完整句应为"对施工场地进行清理"
             let ends_with_preposition = {
                 let t = c.title.trim();
-                t.ends_with('对') || t.ends_with('为') || t.ends_with('在')
-                    || t.ends_with('按') || t.ends_with('由') || t.ends_with('以')
-                    || t.ends_with('与') || t.ends_with('和') || t.ends_with('从')
-                    || t.ends_with('向') || t.ends_with('被') || t.ends_with('把')
-                    || t.ends_with('将') || t.ends_with('就') || t.ends_with('至')
+                t.ends_with('对')
+                    || t.ends_with('为')
+                    || t.ends_with('在')
+                    || t.ends_with('按')
+                    || t.ends_with('由')
+                    || t.ends_with('以')
+                    || t.ends_with('与')
+                    || t.ends_with('和')
+                    || t.ends_with('从')
+                    || t.ends_with('向')
+                    || t.ends_with('被')
+                    || t.ends_with('把')
+                    || t.ends_with('将')
+                    || t.ends_with('就')
+                    || t.ends_with('至')
             };
 
             if ends_with_sentence || too_long || ends_with_preposition {
@@ -783,13 +804,11 @@ fn filter_toc_page_candidates(
                     Some(pos) => {
                         // 该 block 之后还有 block → 检查是否有紧邻的 Paragraph
                         let has_body_after = page_block_ids[pos..].iter().any(|&id| {
-                            all_blocks
-                                .iter()
-                                .any(|(b, _)| {
-                                    b.id == id
-                                        && b.block_type
-                                            == crate::domain::raw_document::BlockType::Paragraph
-                                })
+                            all_blocks.iter().any(|(b, _)| {
+                                b.id == id
+                                    && b.block_type
+                                        == crate::domain::raw_document::BlockType::Paragraph
+                            })
                         });
                         // 目录页 level-1 标题后不应有紧邻的 Paragraph body
                         !has_body_after
@@ -824,9 +843,7 @@ fn filter_toc_page_candidates(
 fn strip_emphasis_prefix(s: &str) -> &str {
     // 标书常见重点标注符号
     const EMPHASIS: &[char] = &[
-        '★', '▲', '●', '■', '◆', '◎', '☆',
-        '△', '▽', '◁', '▷', '◇', '□', '○',
-        '✔', '☑', '❗', '✓',
+        '★', '▲', '●', '■', '◆', '◎', '☆', '△', '▽', '◁', '▷', '◇', '□', '○', '✔', '☑', '❗', '✓',
     ];
     let trimmed = s.trim();
     match trimmed.chars().next() {
@@ -844,7 +861,11 @@ fn matches_heading_pattern(line: &str) -> bool {
             let max_title_len = match pattern.level {
                 1 => 40,
                 2 => {
-                    if pattern.pattern_type == "cjk_numbered" { 25 } else { 40 }
+                    if pattern.pattern_type == "cjk_numbered" {
+                        25
+                    } else {
+                        40
+                    }
                 }
                 3 => 60,
                 _ => 40,
@@ -882,12 +903,8 @@ fn build_section_tree(
 
     for (i, candidate) in candidates.iter().enumerate() {
         let next_boundary = find_next_boundary(candidates, i);
-        let block_ids = collect_blocks_between(
-            all_blocks,
-            candidate,
-            next_boundary,
-            &mut assigned_blocks,
-        );
+        let block_ids =
+            collect_blocks_between(all_blocks, candidate, next_boundary, &mut assigned_blocks);
         let page_end = block_ids
             .iter()
             .filter_map(|bid| find_block_page(all_blocks, bid))
@@ -897,7 +914,8 @@ fn build_section_tree(
         let (body_text, body_page_start, body_page_end) =
             extract_section_body(candidate, next_boundary, all_blocks, &block_ids);
         // Level 1-2（章/节标题）本身即为完整标题，不检测截断
-        let title_truncated = candidate.level >= 3 && is_title_truncated(&candidate.title, &body_text);
+        let title_truncated =
+            candidate.level >= 3 && is_title_truncated(&candidate.title, &body_text);
 
         // 如果标题被 PDF 折行截断，将续接正文合并回标题，
         // 避免"标题 + 正文"的人为割裂。
@@ -950,9 +968,9 @@ fn build_section_tree(
     let n = sections.len();
     let mut children_of: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut root_indices: Vec<usize> = Vec::new();
-    for idx in 0..n {
-        match parent_of[idx] {
-            Some(p) => children_of[p].push(idx),
+    for (idx, p) in parent_of.iter().enumerate() {
+        match p {
+            Some(p) => children_of[*p].push(idx),
             None => root_indices.push(idx),
         }
     }
@@ -986,7 +1004,10 @@ fn take_section_from_flat(
 
 /// 找到下一个层级 ≤ 当前候选层级的标题候选（同级或更高级）。
 /// 这标记了当前 section 的结束位置。
-fn find_next_boundary(candidates: &[HeadingCandidate], current_idx: usize) -> Option<&HeadingCandidate> {
+fn find_next_boundary(
+    candidates: &[HeadingCandidate],
+    current_idx: usize,
+) -> Option<&HeadingCandidate> {
     let current = &candidates[current_idx];
     candidates[current_idx + 1..]
         .iter()
@@ -1013,18 +1034,18 @@ fn collect_blocks_between(
             assigned.insert(block.id.clone());
         }
 
-        if let Some(end_candidate) = end {
-            if block.id == end_candidate.block_id {
-                // 只有当 end 与 start 不在同一个 block 时，才弹出 end block
-                // （end block 属于下一个 section）。
-                // 如果 start 和 end 共享同一个 block，说明该 block 内存在多个标题，
-                // 当前 section 的内容仍然包含在该 block 中，因此保留。
-                if end_candidate.block_id != start.block_id {
-                    ids.pop();
-                    assigned.remove(&end_candidate.block_id);
-                }
-                break;
+        if let Some(end_candidate) = end
+            && block.id == end_candidate.block_id
+        {
+            // 只有当 end 与 start 不在同一个 block 时，才弹出 end block
+            // （end block 属于下一个 section）。
+            // 如果 start 和 end 共享同一个 block，说明该 block 内存在多个标题，
+            // 当前 section 的内容仍然包含在该 block 中，因此保留。
+            if end_candidate.block_id != start.block_id {
+                ids.pop();
+                assigned.remove(&end_candidate.block_id);
             }
+            break;
         }
     }
 
@@ -1094,11 +1115,11 @@ fn extract_section_body(
             }
 
             // 遇到下一边界标题 → 停止
-            if let Some(end) = next_boundary {
-                if trimmed == end.title.trim() {
-                    done = true;
-                    break;
-                }
+            if let Some(end) = next_boundary
+                && trimmed == end.title.trim()
+            {
+                done = true;
+                break;
             }
 
             // 追踪正文来源的页码范围
@@ -1113,7 +1134,7 @@ fn extract_section_body(
     }
 
     // 去除尾部空行
-    while body_lines.last().map_or(false, |l| l.is_empty()) {
+    while body_lines.last().is_some_and(|l| l.is_empty()) {
         body_lines.pop();
     }
 
@@ -1192,7 +1213,10 @@ fn is_new_semantic_unit(s: &str) -> bool {
     }
 
     // 3. 特殊符号标记 → ▲ ★ ● ■ ◆
-    if matches!(c0, '\u{25B2}' | '\u{2605}' | '\u{25CF}' | '\u{25A0}' | '\u{25C6}') {
+    if matches!(
+        c0,
+        '\u{25B2}' | '\u{2605}' | '\u{25CF}' | '\u{25A0}' | '\u{25C6}'
+    ) {
         return true;
     }
 
@@ -1248,8 +1272,7 @@ fn is_title_truncated(title: &str, body_text: &str) -> bool {
             .next()
             .map_or(0, |c| c.len_utf8());
         let first_sentence_end = end_byte + end_char_len;
-        let combined_len = title.chars().count()
-            + body_text[..first_sentence_end].chars().count();
+        let combined_len = title.chars().count() + body_text[..first_sentence_end].chars().count();
         // 组合后不超过 120 字符且以句号结尾 → title 是句子前半段
         if combined_len <= 120 {
             return false;
@@ -1257,14 +1280,17 @@ fn is_title_truncated(title: &str, body_text: &str) -> bool {
     }
 
     // 跳过 body_text 开头的空白字符
-    let body_first = body_text.chars().find(|c| !c.is_whitespace()).unwrap_or('\0');
+    let body_first = body_text
+        .chars()
+        .find(|c| !c.is_whitespace())
+        .unwrap_or('\0');
     if body_first == '\0' {
         return false;
     }
     // body 首字符是 CJK 汉字、小写字母或 ASCII 数字 → 续接
     // ASCII 数字捕获 "4驻场要求"、"7质量保证" 等标书常见模式
-    body_first >= '\u{4E00}' && body_first <= '\u{9FFF}'
-        || body_first >= '\u{3400}' && body_first <= '\u{4DBF}'
+    ('\u{4E00}'..='\u{9FFF}').contains(&body_first)
+        || ('\u{3400}'..='\u{4DBF}').contains(&body_first)
         || body_first.is_ascii_lowercase()
         || body_first.is_ascii_digit()
 }
@@ -1333,7 +1359,8 @@ fn merge_truncated_title(title: &str, body_text: &str) -> (String, String) {
             let end = byte_pos + char_len;
             let merge_text = &trimmed[..end]; // 到第一个句末标点（含）
             let take_count = merge_text.chars().count().min(cap);
-            let split_byte: usize = merge_text.char_indices()
+            let split_byte: usize = merge_text
+                .char_indices()
                 .nth(take_count)
                 .map(|(i, _)| i)
                 .unwrap_or(merge_text.len());
@@ -1354,7 +1381,8 @@ fn merge_truncated_title(title: &str, body_text: &str) -> (String, String) {
         // 无句末标点的行：仅合并不超过 cap 的字符数
         let take_count = line.chars().count().min(cap);
         if take_count < line.chars().count() {
-            let split_byte: usize = line.char_indices()
+            let split_byte: usize = line
+                .char_indices()
                 .nth(take_count)
                 .map(|(i, _)| i)
                 .unwrap_or(line.len());
@@ -1535,18 +1563,26 @@ pub fn merge_cross_page_tables(raw_doc: &mut RawDocument) -> usize {
         let last_idx = page_n.tables.len() - 1;
 
         // 先提取比较所需的信息（不可变借用）
-        let cols_n = page_n.tables[last_idx].rows.first().map(|r| r.len()).unwrap_or(0);
+        let cols_n = page_n.tables[last_idx]
+            .rows
+            .first()
+            .map(|r| r.len())
+            .unwrap_or(0);
         let cols_n1 = page_n1.tables[0].rows.first().map(|r| r.len()).unwrap_or(0);
         if cols_n == 0 || cols_n != cols_n1 {
             continue;
         }
 
-        let first_cell_n = page_n.tables[last_idx].rows.first()
+        let first_cell_n = page_n.tables[last_idx]
+            .rows
+            .first()
             .and_then(|r| r.first())
             .and_then(|c| c.as_deref())
             .unwrap_or("")
             .to_string();
-        let first_cell_n1 = page_n1.tables[0].rows.first()
+        let first_cell_n1 = page_n1.tables[0]
+            .rows
+            .first()
             .and_then(|r| r.first())
             .and_then(|c| c.as_deref())
             .unwrap_or("")
@@ -1606,10 +1642,7 @@ pub fn merge_cross_page_tables(raw_doc: &mut RawDocument) -> usize {
 /// - 单元格内的换行符替换为空格
 /// - 空单元格输出为空字符串
 /// - 表格之间用 `\n\n` 分隔
-pub fn inject_tables_into_sections(
-    sections: &mut [Section],
-    raw_doc: &RawDocument,
-) {
+pub fn inject_tables_into_sections(sections: &mut [Section], raw_doc: &RawDocument) {
     // 构建 page → tables 索引（只读，一次扫描）
     let page_tables: std::collections::HashMap<usize, &[RawTable]> = raw_doc
         .pages
@@ -1709,10 +1742,7 @@ fn format_table_as_markdown(table: &RawTable) -> Option<String> {
     }
 
     // 计算列数（取最大行宽）
-    let col_count = table.rows.iter()
-        .map(|row| row.len())
-        .max()
-        .unwrap_or(0);
+    let col_count = table.rows.iter().map(|row| row.len()).max().unwrap_or(0);
 
     if col_count == 0 {
         return None;
@@ -1760,7 +1790,9 @@ mod tests {
         assert!(is_page_noise("第2页共78页温馨提示")); // 短后缀也过滤
         assert!(is_page_noise("78第72页共页")); // 残缺变体
         // Unicode 私有区控制字符 (U+F06E)
-        assert!(is_page_noise("系统架构要求应用系统采用浏览器/服务器架构，如无特殊原因，禁止要求终端用户安装客\u{F06E}"));
+        assert!(is_page_noise(
+            "系统架构要求应用系统采用浏览器/服务器架构，如无特殊原因，禁止要求终端用户安装客\u{F06E}"
+        ));
         // 非噪声
         assert!(!is_page_noise("第一章"));
         assert!(!is_page_noise("1. 供应商资格"));
@@ -1838,9 +1870,22 @@ mod tests {
         let result = split_inline_headings(
             "采购包1（东莞理工学院松山湖校区智慧教室环境改造工程（二期））1.主要商务要求",
         );
-        assert_eq!(result.len(), 2, "应拆分为前缀和标题两部分，实际: {:?}", result);
-        assert!(result[0].contains("（二期））"), "前缀应包含右括号，实际: {}", result[0]);
-        assert_eq!(result[1], "1.主要商务要求", "标题应从数字开始，实际: {}", result[1]);
+        assert_eq!(
+            result.len(),
+            2,
+            "应拆分为前缀和标题两部分，实际: {:?}",
+            result
+        );
+        assert!(
+            result[0].contains("（二期））"),
+            "前缀应包含右括号，实际: {}",
+            result[0]
+        );
+        assert_eq!(
+            result[1], "1.主要商务要求",
+            "标题应从数字开始，实际: {}",
+            result[1]
+        );
     }
 
     #[test]
@@ -1884,13 +1929,23 @@ mod tests {
                         id: "b_0_0".to_string(),
                         block_type: BlockType::Heading,
                         text: "六、《资格条件承诺函》格式".to_string(),
-                        bbox: BBox { x0: 90.0, top: 75.0, x1: 350.0, bottom: 100.0 },
+                        bbox: BBox {
+                            x0: 90.0,
+                            top: 75.0,
+                            x1: 350.0,
+                            bottom: 100.0,
+                        },
                     },
                     RawBlock {
                         id: "b_0_1".to_string(),
                         block_type: BlockType::Paragraph,
                         text: "采购包1（东莞理工学院）1.主要商务要求".to_string(),
-                        bbox: BBox { x0: 90.0, top: 560.0, x1: 500.0, bottom: 580.0 },
+                        bbox: BBox {
+                            x0: 90.0,
+                            top: 560.0,
+                            x1: 500.0,
+                            bottom: 580.0,
+                        },
                     },
                 ],
                 tables: vec![],
@@ -1999,7 +2054,8 @@ mod tests {
         // ★ 验证层级关系: "付款方式" 应在 "1.主要商务要求" 下
         // （"付款方式" 的 section path 祖先应包含 "1.主要商务要求"）
         if has_business_req && has_payment {
-            let payment_under_business = verify_child_of(&output.sections, "1.主要商务要求", "付款方式");
+            let payment_under_business =
+                verify_child_of(&output.sections, "1.主要商务要求", "付款方式");
             assert!(
                 payment_under_business,
                 "层级关系错误: '付款方式' 应位于 '1.主要商务要求' 下"
@@ -2054,16 +2110,21 @@ mod tests {
         let tables_after: Vec<usize> = doc.pages.iter().map(|p| p.tables.len()).collect();
 
         // 验证：应该有合并发生（page 9 + page 10 的表格被合并）
-        assert!(merged > 0,
+        assert!(
+            merged > 0,
             "应至少合并 1 组跨页表格。\n\
              合并前各页表格数: {:?}\n\
              合并后各页表格数: {:?}",
-            tables_before, tables_after);
+            tables_before,
+            tables_after
+        );
 
         // 验证 page 9 (index 9) 的最后一个表格包含了"付款方式"和"验收要求"
         let page_9 = &doc.pages[9];
         let last_table = page_9.tables.last().expect("page 9 应有表格");
-        let all_cells: Vec<String> = last_table.rows.iter()
+        let all_cells: Vec<String> = last_table
+            .rows
+            .iter()
             .flat_map(|r| r.iter())
             .filter_map(|c| c.as_deref())
             .map(|s| s.chars().take(50).collect())
@@ -2073,12 +2134,21 @@ mod tests {
         let has_acceptance = all_cells.iter().any(|c| c.contains("验收要求"));
         let has_delivery_time = all_cells.iter().any(|c| c.contains("标的提供的时间"));
 
-        assert!(has_delivery_time,
-            "合并后表格应包含 '标的提供的时间'（来自原 t_9_0）。\n单元格: {:?}", all_cells);
-        assert!(has_payment,
-            "合并后表格应包含 '付款方式'（来自原 t_10_0）。\n单元格: {:?}", all_cells);
-        assert!(has_acceptance,
-            "合并后表格应包含 '验收要求'（来自原 t_10_0）。\n单元格: {:?}", all_cells);
+        assert!(
+            has_delivery_time,
+            "合并后表格应包含 '标的提供的时间'（来自原 t_9_0）。\n单元格: {:?}",
+            all_cells
+        );
+        assert!(
+            has_payment,
+            "合并后表格应包含 '付款方式'（来自原 t_10_0）。\n单元格: {:?}",
+            all_cells
+        );
+        assert!(
+            has_acceptance,
+            "合并后表格应包含 '验收要求'（来自原 t_10_0）。\n单元格: {:?}",
+            all_cells
+        );
 
         println!(
             "✅ 跨页表格合并测试通过: {} 组合并，合并前后表格数 {:?} → {:?}",

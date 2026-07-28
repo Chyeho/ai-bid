@@ -8,6 +8,9 @@
 //! $env:AIBID_AGENT=1
 //! cargo run --bin test_agents -- --test bus       # §8 双通道协同
 //! cargo run --bin test_agents -- --test memory    # §9 分层记忆
+
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::too_many_arguments)]
 //! cargo run --bin test_agents -- --test execute   # §10.3 并行隔离
 //! cargo run --bin test_agents -- --test legal     # §10.5 LEGAL VERIFY
 //! cargo run --bin test_agents -- --test blindspot # §10.6 BLINDSPOT
@@ -26,15 +29,15 @@ use ai_bid::agents::coordinator::Coordinator;
 use ai_bid::agents::registry::AgentRegistry;
 use ai_bid::agents::session_graph::SessionGraph;
 use ai_bid::agents::testing::*;
+use ai_bid::agents::tools::ToolRegistry;
 use ai_bid::agents::tools::output_finding::OutputFindingTool;
 use ai_bid::agents::tools::read_section::ReadSectionTool;
 use ai_bid::agents::tools::search_knowledge::{
     DashScopeSearchBackend, SearchBuffer, SearchKnowledgeTool,
 };
-use ai_bid::agents::tools::ToolRegistry;
-use ai_bid::domain::chunk::{Chunk, ChunkType};
 use ai_bid::agents::trace::TraceLog;
 use ai_bid::agents::types::*;
+use ai_bid::domain::chunk::{Chunk, ChunkType};
 use ai_bid::paths::data_path_str;
 use ai_bid::services::llm_client::create_llm_client;
 use std::collections::HashMap;
@@ -50,7 +53,8 @@ fn init_search_backend() -> (
     Option<Arc<DashScopeSearchBackend>>,
     Option<Arc<SearchBuffer>>,
 ) {
-    let search_backend = env::var("AIBID_SEARCH_BACKEND").unwrap_or_else(|_| "dashscope".to_string());
+    let search_backend =
+        env::var("AIBID_SEARCH_BACKEND").unwrap_or_else(|_| "dashscope".to_string());
 
     if search_backend == "searxng" {
         let searxng_url =
@@ -62,7 +66,9 @@ fn init_search_backend() -> (
             .expect("DashScope 搜索后端初始化失败。请设置 DASHSCOPE_API_KEY");
         eprintln!(
             "  搜索后端: DashScope (model={})",
-            env::var("DASHSCOPE_SEARCH_MODEL").or_else(|_| env::var("DASHSCOPE_MODEL")).unwrap_or_else(|_| "qwen-plus".to_string())
+            env::var("DASHSCOPE_SEARCH_MODEL")
+                .or_else(|_| env::var("DASHSCOPE_MODEL"))
+                .unwrap_or_else(|_| "qwen-plus".to_string())
         );
         (Some(Arc::new(ds)), None)
     }
@@ -141,7 +147,10 @@ fn make_tools_factory(
         } else {
             panic!("搜索后端未初始化");
         }
-        registry.register(Box::new(ReadSectionTool::new(chunks.clone(), chunk_order.clone())));
+        registry.register(Box::new(ReadSectionTool::new(
+            chunks.clone(),
+            chunk_order.clone(),
+        )));
         registry.register(Box::new(MockSearchDocumentTool));
         registry.register(Box::new(OutputFindingTool));
         registry
@@ -197,25 +206,27 @@ fn make_coordinator(
 ) -> Coordinator {
     let registry = AgentRegistry::builtin();
     let llm_factory: Arc<dyn Fn() -> Box<dyn ai_bid::agents::react_loop::LlmClient> + Send + Sync> =
-        Arc::new(move || {
-            create_llm_client().expect("创建 LLM 客户端失败。请检查 API 密钥环境变量")
-        });
+        Arc::new(move || create_llm_client().expect("创建 LLM 客户端失败。请检查 API 密钥环境变量"));
     let tools_factory = make_tools_factory(ds_search, buffer, chunks, chunk_order);
 
-    Coordinator::new(config, registry, llm_factory, tools_factory, bus, graph, trace)
+    Coordinator::new(
+        config,
+        registry,
+        llm_factory,
+        tools_factory,
+        bus,
+        graph,
+        trace,
+    )
 }
 
 // ─── 辅助：运行管线并收集 trace ────────────────────────────────────
 
-async fn run_pipeline(
-    coordinator: &Coordinator,
-    clauses: &[ReviewClause],
-) -> CoordinatorOutput {
-    let output = coordinator
+async fn run_pipeline(coordinator: &Coordinator, clauses: &[ReviewClause]) -> CoordinatorOutput {
+    coordinator
         .review(clauses)
         .await
-        .expect("Coordinator::review 不应 panic");
-    output
+        .expect("Coordinator::review 不应 panic")
 }
 
 /// 从 CoordinatorOutput 中提取结构化信息用于测试断言。
@@ -314,7 +325,10 @@ fn analyze_output(output: &CoordinatorOutput) -> PipelineResult {
 // §8 — 双通道协同
 // ═══════════════════════════════════════════════════════════════════
 
-async fn test_bus(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option<Arc<SearchBuffer>>) -> Vec<TestCheck> {
+async fn test_bus(
+    ds_search: Option<Arc<DashScopeSearchBackend>>,
+    buffer: Option<Arc<SearchBuffer>>,
+) -> Vec<TestCheck> {
     let test_name = "bus";
     eprintln!("\n━━━━━━ §8 双通道协同 ━━━━━━");
 
@@ -332,9 +346,21 @@ async fn test_bus(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option
 
     let clauses = bus_test_clauses();
     let (chunks, chunk_order) = build_chunk_data(&clauses);
-    let coordinator = make_coordinator(config, ds_search, buffer, bus, graph, trace, chunks, chunk_order);
+    let coordinator = make_coordinator(
+        config,
+        ds_search,
+        buffer,
+        bus,
+        graph,
+        trace,
+        chunks,
+        chunk_order,
+    );
 
-    eprintln!("  条款: {} 条 | Agent: FactCheck + SemanticRisk", clauses.len());
+    eprintln!(
+        "  条款: {} 条 | Agent: FactCheck + SemanticRisk",
+        clauses.len()
+    );
     let output = run_pipeline(&coordinator, &clauses).await;
     let result = analyze_output(&output);
 
@@ -342,13 +368,21 @@ async fn test_bus(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option
     let has_factcheck = result.agent_counts.contains_key("FactCheckAgent");
     let has_semantic = result.agent_counts.contains_key("SemanticRiskAgent");
     if has_factcheck && has_semantic {
-        checks.push(TestCheck::pass(test_name, "both_agents_produced_findings",
-            &format!("FactCheck={} findings, SemanticRisk={} findings",
+        checks.push(TestCheck::pass(
+            test_name,
+            "both_agents_produced_findings",
+            &format!(
+                "FactCheck={} findings, SemanticRisk={} findings",
                 result.agent_counts.get("FactCheckAgent").unwrap_or(&0),
-                result.agent_counts.get("SemanticRiskAgent").unwrap_or(&0))));
+                result.agent_counts.get("SemanticRiskAgent").unwrap_or(&0)
+            ),
+        ));
     } else {
-        checks.push(TestCheck::fail(test_name, "both_agents_produced_findings",
-            &format!("FactCheck={}, SemanticRisk={}", has_factcheck, has_semantic)));
+        checks.push(TestCheck::fail(
+            test_name,
+            "both_agents_produced_findings",
+            &format!("FactCheck={}, SemanticRisk={}", has_factcheck, has_semantic),
+        ));
     }
 
     // Check 2: SessionGraph snapshot 完整
@@ -356,14 +390,28 @@ async fn test_bus(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option
         let chunks_ok = !snap.chunks.is_empty();
         let reviewed_ok = !snap.reviewed_by.is_empty();
         if chunks_ok && reviewed_ok {
-            checks.push(TestCheck::pass(test_name, "session_graph_populated",
-                &format!("chunks={}, reviewed_by edges={}", snap.chunks.len(), snap.reviewed_by.len())));
+            checks.push(TestCheck::pass(
+                test_name,
+                "session_graph_populated",
+                &format!(
+                    "chunks={}, reviewed_by edges={}",
+                    snap.chunks.len(),
+                    snap.reviewed_by.len()
+                ),
+            ));
         } else {
-            checks.push(TestCheck::fail(test_name, "session_graph_populated",
-                "SessionGraph chunks 或 reviewed_by 为空"));
+            checks.push(TestCheck::fail(
+                test_name,
+                "session_graph_populated",
+                "SessionGraph chunks 或 reviewed_by 为空",
+            ));
         }
     } else {
-        checks.push(TestCheck::fail(test_name, "session_graph_populated", "graph_snapshot 为 None"));
+        checks.push(TestCheck::fail(
+            test_name,
+            "session_graph_populated",
+            "graph_snapshot 为 None",
+        ));
     }
 
     // Check 3: 从 trace 检查 AgentBus 消息传递
@@ -371,26 +419,49 @@ async fn test_bus(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option
     let (has_bus_send, has_bus_recv) = {
         let trace_guard = trace_for_check.lock().await;
         let send = trace_guard.events.iter().any(|e| {
-            matches!(e.event_type, ai_bid::agents::trace::TraceEventType::AgentBusSend)
+            matches!(
+                e.event_type,
+                ai_bid::agents::trace::TraceEventType::AgentBusSend
+            )
         });
         let recv = trace_guard.events.iter().any(|e| {
-            matches!(e.event_type, ai_bid::agents::trace::TraceEventType::AgentBusRecv)
+            matches!(
+                e.event_type,
+                ai_bid::agents::trace::TraceEventType::AgentBusRecv
+            )
         });
         (send, recv)
     };
     if has_bus_recv {
-        checks.push(TestCheck::pass(test_name, "agent_bus_messages", "检测到 AgentBus 消息传递"));
+        checks.push(TestCheck::pass(
+            test_name,
+            "agent_bus_messages",
+            "检测到 AgentBus 消息传递",
+        ));
     } else if has_bus_send {
-        checks.push(TestCheck::skip(test_name, "agent_bus_messages",
-            "AgentBus 有广播但未被接收（竞态窗口：接收方 LLM 调用期间到达）"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "agent_bus_messages",
+            "AgentBus 有广播但未被接收（竞态窗口：接收方 LLM 调用期间到达）",
+        ));
     } else {
-        checks.push(TestCheck::skip(test_name, "agent_bus_messages",
-            "AgentBus 无广播（所有 finding 均为 medium 或 info）"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "agent_bus_messages",
+            "AgentBus 无广播（所有 finding 均为 medium 或 info）",
+        ));
     }
 
     // Check 4: 输出文件结构合法
-    checks.push(TestCheck::pass(test_name, "output_structure_valid",
-        &format!("total_findings={}, high_risk={}", output.findings.len(), result.high_risk_count)));
+    checks.push(TestCheck::pass(
+        test_name,
+        "output_structure_valid",
+        &format!(
+            "total_findings={}, high_risk={}",
+            output.findings.len(),
+            result.high_risk_count
+        ),
+    ));
 
     checks
 }
@@ -399,7 +470,10 @@ async fn test_bus(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option
 // §9 — 分层记忆
 // ═══════════════════════════════════════════════════════════════════
 
-async fn test_memory(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option<Arc<SearchBuffer>>) -> Vec<TestCheck> {
+async fn test_memory(
+    ds_search: Option<Arc<DashScopeSearchBackend>>,
+    buffer: Option<Arc<SearchBuffer>>,
+) -> Vec<TestCheck> {
     let test_name = "memory";
     eprintln!("\n━━━━━━ §9 分层记忆 ━━━━━━");
 
@@ -412,7 +486,16 @@ async fn test_memory(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opt
 
     let clauses = memory_test_clauses();
     let (chunks, chunk_order) = build_chunk_data(&clauses);
-    let coordinator = make_coordinator(config, ds_search, buffer, bus, graph, trace, chunks, chunk_order);
+    let coordinator = make_coordinator(
+        config,
+        ds_search,
+        buffer,
+        bus,
+        graph,
+        trace,
+        chunks,
+        chunk_order,
+    );
 
     eprintln!("  条款: {} 条 | Agent: 全部 7 个 reviewer", clauses.len());
     let output = run_pipeline(&coordinator, &clauses).await;
@@ -421,54 +504,96 @@ async fn test_memory(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opt
     // Check 1: GraphSnapshot 完整性
     if let Some(ref snap) = output.graph_snapshot {
         let mut missing = Vec::new();
-        if snap.chunks.is_empty() { missing.push("chunks"); }
-        if snap.agents.is_empty() { missing.push("agents"); }
+        if snap.chunks.is_empty() {
+            missing.push("chunks");
+        }
+        if snap.agents.is_empty() {
+            missing.push("agents");
+        }
         // risks/reviewed_by/has_risk 可能为空（如果所有条款无风险），不作为 FAIL
 
         if missing.is_empty() {
-            checks.push(TestCheck::pass(test_name, "graph_snapshot_complete",
-                &format!("chunks={}, agents={}, risks={}, reviewed_by={}",
-                    snap.chunks.len(), snap.agents.len(),
-                    snap.risks.len(), snap.reviewed_by.len())));
+            checks.push(TestCheck::pass(
+                test_name,
+                "graph_snapshot_complete",
+                &format!(
+                    "chunks={}, agents={}, risks={}, reviewed_by={}",
+                    snap.chunks.len(),
+                    snap.agents.len(),
+                    snap.risks.len(),
+                    snap.reviewed_by.len()
+                ),
+            ));
         } else {
-            checks.push(TestCheck::fail(test_name, "graph_snapshot_complete",
-                &format!("缺少字段: {}", missing.join(", "))));
+            checks.push(TestCheck::fail(
+                test_name,
+                "graph_snapshot_complete",
+                &format!("缺少字段: {}", missing.join(", ")),
+            ));
         }
     } else {
-        checks.push(TestCheck::fail(test_name, "graph_snapshot_complete", "graph_snapshot 为 None"));
+        checks.push(TestCheck::fail(
+            test_name,
+            "graph_snapshot_complete",
+            "graph_snapshot 为 None",
+        ));
     }
 
     // Check 2: 多个 Agent 产出了 finding（SessionGraph 在各 Agent 间共享）
     let unique_agents = result.agent_counts.len();
     if unique_agents >= 2 {
-        checks.push(TestCheck::pass(test_name, "multi_agent_shared_graph",
-            &format!("{} 个 Agent 在共享 SessionGraph 上工作", unique_agents)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "multi_agent_shared_graph",
+            &format!("{} 个 Agent 在共享 SessionGraph 上工作", unique_agents),
+        ));
     } else {
-        checks.push(TestCheck::fail(test_name, "multi_agent_shared_graph",
-            &format!("仅 {} 个 Agent 产出 finding", unique_agents)));
+        checks.push(TestCheck::fail(
+            test_name,
+            "multi_agent_shared_graph",
+            &format!("仅 {} 个 Agent 产出 finding", unique_agents),
+        ));
     }
 
     // Check 3: 输出结构完整
-    checks.push(TestCheck::pass(test_name, "output_complete",
-        &format!("findings={}, with_legal_basis={}, blindspot={}",
-            output.findings.len(), result.with_legal_basis, result.blind_spot_findings)));
+    checks.push(TestCheck::pass(
+        test_name,
+        "output_complete",
+        &format!(
+            "findings={}, with_legal_basis={}, blindspot={}",
+            output.findings.len(),
+            result.with_legal_basis,
+            result.blind_spot_findings
+        ),
+    ));
 
     // Check 4: 数据不跨 Session 泄漏（通过创建新 graph 验证）
     let new_graph = SessionGraph::new();
     let new_snapshot = new_graph.snapshot();
     if new_snapshot.chunks.is_empty() && new_snapshot.risks.is_empty() {
-        checks.push(TestCheck::pass(test_name, "no_cross_session_leak",
-            "新建 SessionGraph 为空，无跨 Session 数据泄漏"));
+        checks.push(TestCheck::pass(
+            test_name,
+            "no_cross_session_leak",
+            "新建 SessionGraph 为空，无跨 Session 数据泄漏",
+        ));
     } else {
-        checks.push(TestCheck::fail(test_name, "no_cross_session_leak",
-            "新建 SessionGraph 非空，存在数据泄漏"));
+        checks.push(TestCheck::fail(
+            test_name,
+            "no_cross_session_leak",
+            "新建 SessionGraph 非空，存在数据泄漏",
+        ));
     }
 
     // Check 5: 全部 7 个 reviewer Agent 均被路由到至少 1 条条款
     let route_counts = &output.routing_summary.agent_clause_counts;
     let expected_reviewers = [
-        "FactCheckAgent", "ProcedureAgent", "RuleEngineAgent",
-        "SemanticRiskAgent", "ScoringAgent", "DemandAgent", "ContractAgent",
+        "FactCheckAgent",
+        "ProcedureAgent",
+        "RuleEngineAgent",
+        "SemanticRiskAgent",
+        "ScoringAgent",
+        "DemandAgent",
+        "ContractAgent",
     ];
     let mut missing_agents: Vec<&str> = Vec::new();
     for agent in &expected_reviewers {
@@ -477,15 +602,26 @@ async fn test_memory(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opt
         }
     }
     if missing_agents.is_empty() {
-        checks.push(TestCheck::pass(test_name, "all_agents_routed",
-            &format!("全部 {} 个 reviewer 均被路由到条款 (route map: {:?})",
+        checks.push(TestCheck::pass(
+            test_name,
+            "all_agents_routed",
+            &format!(
+                "全部 {} 个 reviewer 均被路由到条款 (route map: {:?})",
                 expected_reviewers.len(),
-                route_counts.keys().collect::<Vec<_>>())));
+                route_counts.keys().collect::<Vec<_>>()
+            ),
+        ));
     } else {
-        checks.push(TestCheck::fail(test_name, "all_agents_routed",
-            &format!("{} 个 Agent 未被路由: {:?}。route map: {:?}",
-                missing_agents.len(), missing_agents,
-                route_counts.keys().collect::<Vec<_>>())));
+        checks.push(TestCheck::fail(
+            test_name,
+            "all_agents_routed",
+            &format!(
+                "{} 个 Agent 未被路由: {:?}。route map: {:?}",
+                missing_agents.len(),
+                missing_agents,
+                route_counts.keys().collect::<Vec<_>>()
+            ),
+        ));
     }
 
     checks
@@ -495,7 +631,10 @@ async fn test_memory(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opt
 // §10.3 — 并行 Agent 隔离
 // ═══════════════════════════════════════════════════════════════════
 
-async fn test_execute(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option<Arc<SearchBuffer>>) -> Vec<TestCheck> {
+async fn test_execute(
+    ds_search: Option<Arc<DashScopeSearchBackend>>,
+    buffer: Option<Arc<SearchBuffer>>,
+) -> Vec<TestCheck> {
     let test_name = "execute";
     eprintln!("\n━━━━━━ §10.3 并行 Agent 隔离 ━━━━━━");
 
@@ -505,45 +644,78 @@ async fn test_execute(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Op
     let mut config = CoordinatorConfig::default();
     // 启用 5 个 Agent
     config.enabled_agents = vec![
-        AgentId::FactCheck, AgentId::Procedure, AgentId::SemanticRisk,
-        AgentId::Scoring, AgentId::Contract,
+        AgentId::FactCheck,
+        AgentId::Procedure,
+        AgentId::SemanticRisk,
+        AgentId::Scoring,
+        AgentId::Contract,
     ];
     config.enable_legal_verify = false;
     config.blind_spot_fallback_enabled = false;
 
     let clauses = memory_test_clauses(); // 5 条条款
     let (chunks, chunk_order) = build_chunk_data(&clauses);
-    let coordinator = make_coordinator(config, ds_search, buffer, bus, graph, trace, chunks, chunk_order);
+    let coordinator = make_coordinator(
+        config,
+        ds_search,
+        buffer,
+        bus,
+        graph,
+        trace,
+        chunks,
+        chunk_order,
+    );
 
-    eprintln!("  条款: {} 条 | Agent: FactCheck, Procedure, SemanticRisk, Scoring, Contract", clauses.len());
+    eprintln!(
+        "  条款: {} 条 | Agent: FactCheck, Procedure, SemanticRisk, Scoring, Contract",
+        clauses.len()
+    );
     let output = run_pipeline(&coordinator, &clauses).await;
     let result = analyze_output(&output);
 
     // Check 1: 多个 Agent 并行产出了 finding
     let agent_count = result.agent_counts.len();
     if agent_count >= 3 {
-        checks.push(TestCheck::pass(test_name, "multi_agent_parallel",
-            &format!("{} 个 Agent 并行产出 finding: {:?}", agent_count,
-                result.agent_counts.keys().collect::<Vec<_>>())));
+        checks.push(TestCheck::pass(
+            test_name,
+            "multi_agent_parallel",
+            &format!(
+                "{} 个 Agent 并行产出 finding: {:?}",
+                agent_count,
+                result.agent_counts.keys().collect::<Vec<_>>()
+            ),
+        ));
     } else {
-        checks.push(TestCheck::fail(test_name, "multi_agent_parallel",
-            &format!("仅 {} 个 Agent 产出（预期 ≥3）", agent_count)));
+        checks.push(TestCheck::fail(
+            test_name,
+            "multi_agent_parallel",
+            &format!("仅 {} 个 Agent 产出（预期 ≥3）", agent_count),
+        ));
     }
 
     // Check 2: 各 Agent 的 finding 互不污染（不同 agent 字段值不同）
-    let agents: std::collections::HashSet<&str> = output.findings.iter()
-        .map(|f| f.agent.as_str()).collect();
+    let agents: std::collections::HashSet<&str> =
+        output.findings.iter().map(|f| f.agent.as_str()).collect();
     if agents.len() >= 3 {
-        checks.push(TestCheck::pass(test_name, "agent_isolation",
-            &format!("{} 个独立 Agent 身份: {:?}", agents.len(), agents)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "agent_isolation",
+            &format!("{} 个独立 Agent 身份: {:?}", agents.len(), agents),
+        ));
     } else {
-        checks.push(TestCheck::fail(test_name, "agent_isolation",
-            "Agent finding 的 agent 字段缺乏多样性"));
+        checks.push(TestCheck::fail(
+            test_name,
+            "agent_isolation",
+            "Agent finding 的 agent 字段缺乏多样性",
+        ));
     }
 
     // Check 3: 系统不 panic
-    checks.push(TestCheck::pass(test_name, "no_panic",
-        &format!("正常完成，{} findings", output.findings.len())));
+    checks.push(TestCheck::pass(
+        test_name,
+        "no_panic",
+        &format!("正常完成，{} findings", output.findings.len()),
+    ));
 
     checks
 }
@@ -552,7 +724,10 @@ async fn test_execute(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Op
 // §10.5 — LEGAL VERIFY
 // ═══════════════════════════════════════════════════════════════════
 
-async fn test_legal(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option<Arc<SearchBuffer>>) -> Vec<TestCheck> {
+async fn test_legal(
+    ds_search: Option<Arc<DashScopeSearchBackend>>,
+    buffer: Option<Arc<SearchBuffer>>,
+) -> Vec<TestCheck> {
     let test_name = "legal";
     eprintln!("\n━━━━━━ §10.5 LEGAL VERIFY ━━━━━━");
 
@@ -560,14 +735,27 @@ async fn test_legal(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
     let (bus, graph, trace) = make_shared_infra();
 
     let mut config = CoordinatorConfig::default();
-    config.enabled_agents = vec![AgentId::FactCheck, AgentId::SemanticRisk, AgentId::Procedure];
+    config.enabled_agents = vec![
+        AgentId::FactCheck,
+        AgentId::SemanticRisk,
+        AgentId::Procedure,
+    ];
     config.enable_legal_verify = true;
     config.legal_verify_max_turns = 3;
     config.blind_spot_fallback_enabled = false;
 
     let clauses = legal_test_clauses();
     let (chunks, chunk_order) = build_chunk_data(&clauses);
-    let coordinator = make_coordinator(config, ds_search, buffer, bus, graph, trace, chunks, chunk_order);
+    let coordinator = make_coordinator(
+        config,
+        ds_search,
+        buffer,
+        bus,
+        graph,
+        trace,
+        chunks,
+        chunk_order,
+    );
 
     eprintln!("  条款: {} 条 | LegalVerify 已启用", clauses.len());
     let output = run_pipeline(&coordinator, &clauses).await;
@@ -575,40 +763,67 @@ async fn test_legal(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
 
     // Check 1: 有 legal_basis 的 finding 被产出
     if result.with_legal_basis > 0 {
-        checks.push(TestCheck::pass(test_name, "legal_basis_produced",
-            &format!("{} 条 finding 包含 legal_basis", result.with_legal_basis)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "legal_basis_produced",
+            &format!("{} 条 finding 包含 legal_basis", result.with_legal_basis),
+        ));
     } else {
-        checks.push(TestCheck::skip(test_name, "legal_basis_produced",
-            "无 finding 包含 legal_basis（LLM 未引用法条，跳过验证）"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "legal_basis_produced",
+            "无 finding 包含 legal_basis（LLM 未引用法条，跳过验证）",
+        ));
     }
 
     // Check 2: LegalVerify 管线步骤被执行
     // 检查 routing_summary 中的 legal_verify_count
     let lv_count = output.routing_summary.legal_verify_count;
     if lv_count > 0 {
-        checks.push(TestCheck::pass(test_name, "legal_verify_step_executed",
-            &format!("legal_verify_count={}", lv_count)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "legal_verify_step_executed",
+            &format!("legal_verify_count={}", lv_count),
+        ));
     } else if result.with_legal_basis > 0 {
         // 有 legal_basis 但 legal_verify_count=0 → 可能全部 fallback
-        checks.push(TestCheck::skip(test_name, "legal_verify_step_executed",
-            "legal_verify_count=0，可能全部走 fallback"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "legal_verify_step_executed",
+            "legal_verify_count=0，可能全部走 fallback",
+        ));
     } else {
-        checks.push(TestCheck::skip(test_name, "legal_verify_step_executed",
-            "无 legal_basis 的 finding，LegalVerify 步骤跳过"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "legal_verify_step_executed",
+            "无 legal_basis 的 finding，LegalVerify 步骤跳过",
+        ));
     }
 
     // Check 3: 如果 LegalVerify 产出了 finding，检查合并逻辑
     if result.legal_verify_merged > 0 {
-        checks.push(TestCheck::pass(test_name, "legal_verify_merged",
-            &format!("{} 条 finding 包含 [LegalVerify] 标记", result.legal_verify_merged)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "legal_verify_merged",
+            &format!(
+                "{} 条 finding 包含 [LegalVerify] 标记",
+                result.legal_verify_merged
+            ),
+        ));
     } else {
-        checks.push(TestCheck::skip(test_name, "legal_verify_merged",
-            "无 [LegalVerify] 标记（ReAct 无产出或走 fallback）"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "legal_verify_merged",
+            "无 [LegalVerify] 标记（ReAct 无产出或走 fallback）",
+        ));
     }
 
     // Check 4: 输出结构合法
-    checks.push(TestCheck::pass(test_name, "output_valid",
-        &format!("{} findings, routing_summary 完整", output.findings.len())));
+    checks.push(TestCheck::pass(
+        test_name,
+        "output_valid",
+        &format!("{} findings, routing_summary 完整", output.findings.len()),
+    ));
 
     checks
 }
@@ -617,7 +832,10 @@ async fn test_legal(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
 // §10.6 — BLINDSPOT
 // ═══════════════════════════════════════════════════════════════════
 
-async fn test_blindspot(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option<Arc<SearchBuffer>>) -> Vec<TestCheck> {
+async fn test_blindspot(
+    ds_search: Option<Arc<DashScopeSearchBackend>>,
+    buffer: Option<Arc<SearchBuffer>>,
+) -> Vec<TestCheck> {
     let test_name = "blindspot";
     eprintln!("\n━━━━━━ §10.6 BLINDSPOT ━━━━━━");
 
@@ -632,35 +850,66 @@ async fn test_blindspot(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: 
 
     let clauses = blindspot_test_clauses();
     let (chunks, chunk_order) = build_chunk_data(&clauses);
-    let coordinator = make_coordinator(config, ds_search, buffer, bus, graph, trace, chunks, chunk_order);
+    let coordinator = make_coordinator(
+        config,
+        ds_search,
+        buffer,
+        bus,
+        graph,
+        trace,
+        chunks,
+        chunk_order,
+    );
 
-    eprintln!("  条款: {} 条 | BlindSpot 已启用 (fallback=enabled)", clauses.len());
+    eprintln!(
+        "  条款: {} 条 | BlindSpot 已启用 (fallback=enabled)",
+        clauses.len()
+    );
     let output = run_pipeline(&coordinator, &clauses).await;
     let result = analyze_output(&output);
 
     // Check 1: BlindSpot 步骤被执行（产出了 BlindSpot finding 或 fallback 标记）
     if result.blind_spot_findings > 0 {
-        checks.push(TestCheck::pass(test_name, "blindspot_executed",
-            &format!("BlindSpot 产出 {} 条 finding", result.blind_spot_findings)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "blindspot_executed",
+            &format!("BlindSpot 产出 {} 条 finding", result.blind_spot_findings),
+        ));
     } else {
         // 测试夹具包含 4 条仅被 1 个 Agent 审查的 L2+ 条款，BlindSpot 必须产出发现
-        checks.push(TestCheck::fail(test_name, "blindspot_executed",
-            "BlindSpot 无额外 finding，但测试数据包含 4 条未充分审查的 L2+ 条款"));
+        checks.push(TestCheck::fail(
+            test_name,
+            "blindspot_executed",
+            "BlindSpot 无额外 finding，但测试数据包含 4 条未充分审查的 L2+ 条款",
+        ));
     }
 
     // Check 2: GraphSnapshot 存在（BlindSpot 依赖它）
     if let Some(ref snap) = output.graph_snapshot {
-        checks.push(TestCheck::pass(test_name, "graph_snapshot_for_blindspot",
-            &format!("chunks={}, risks={}, reviewed_by={}",
-                snap.chunks.len(), snap.risks.len(), snap.reviewed_by.len())));
+        checks.push(TestCheck::pass(
+            test_name,
+            "graph_snapshot_for_blindspot",
+            &format!(
+                "chunks={}, risks={}, reviewed_by={}",
+                snap.chunks.len(),
+                snap.risks.len(),
+                snap.reviewed_by.len()
+            ),
+        ));
     } else {
-        checks.push(TestCheck::fail(test_name, "graph_snapshot_for_blindspot",
-            "graph_snapshot 为 None，BlindSpot 无法工作"));
+        checks.push(TestCheck::fail(
+            test_name,
+            "graph_snapshot_for_blindspot",
+            "graph_snapshot 为 None，BlindSpot 无法工作",
+        ));
     }
 
     // Check 3: 系统不 panic
-    checks.push(TestCheck::pass(test_name, "no_panic",
-        &format!("正常完成，{} findings", output.findings.len())));
+    checks.push(TestCheck::pass(
+        test_name,
+        "no_panic",
+        &format!("正常完成，{} findings", output.findings.len()),
+    ));
 
     checks
 }
@@ -669,7 +918,10 @@ async fn test_blindspot(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: 
 // §10.7 — DEBATE
 // ═══════════════════════════════════════════════════════════════════
 
-async fn test_debate(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option<Arc<SearchBuffer>>) -> Vec<TestCheck> {
+async fn test_debate(
+    ds_search: Option<Arc<DashScopeSearchBackend>>,
+    buffer: Option<Arc<SearchBuffer>>,
+) -> Vec<TestCheck> {
     let test_name = "debate";
     eprintln!("\n━━━━━━ §10.7 DEBATE ━━━━━━");
 
@@ -684,33 +936,60 @@ async fn test_debate(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opt
 
     let clauses = debate_test_clauses();
     let (chunks, chunk_order) = build_chunk_data(&clauses);
-    let coordinator = make_coordinator(config, ds_search, buffer, bus, graph, trace, chunks, chunk_order);
+    let coordinator = make_coordinator(
+        config,
+        ds_search,
+        buffer,
+        bus,
+        graph,
+        trace,
+        chunks,
+        chunk_order,
+    );
 
-    eprintln!("  条款: {} 条 | Debate 由 High+低置信度自动触发", clauses.len());
+    eprintln!(
+        "  条款: {} 条 | Debate 由 High+低置信度自动触发",
+        clauses.len()
+    );
     let output = run_pipeline(&coordinator, &clauses).await;
     let result = analyze_output(&output);
 
     // Check 1: 是否有 High risk finding
     if result.high_risk_count > 0 {
-        checks.push(TestCheck::pass(test_name, "high_risk_found",
-            &format!("{} 条 High risk finding", result.high_risk_count)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "high_risk_found",
+            &format!("{} 条 High risk finding", result.high_risk_count),
+        ));
     } else {
-        checks.push(TestCheck::skip(test_name, "high_risk_found",
-            "无 High risk finding，Debate 不会触发"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "high_risk_found",
+            "无 High risk finding，Debate 不会触发",
+        ));
     }
 
     // Check 2: 如果触发了 Debate，验证合并
     if result.debate_merged > 0 {
-        checks.push(TestCheck::pass(test_name, "debate_executed_and_merged",
-            &format!("{} 条 finding 包含 [Debate] 标记", result.debate_merged)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "debate_executed_and_merged",
+            &format!("{} 条 finding 包含 [Debate] 标记", result.debate_merged),
+        ));
     } else {
-        checks.push(TestCheck::skip(test_name, "debate_executed_and_merged",
-            "无 [Debate] 标记（可能 confidence 够高或 Debate 无产出）"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "debate_executed_and_merged",
+            "无 [Debate] 标记（可能 confidence 够高或 Debate 无产出）",
+        ));
     }
 
     // Check 3: 系统不 panic
-    checks.push(TestCheck::pass(test_name, "no_panic",
-        &format!("正常完成，{} findings", output.findings.len())));
+    checks.push(TestCheck::pass(
+        test_name,
+        "no_panic",
+        &format!("正常完成，{} findings", output.findings.len()),
+    ));
 
     checks
 }
@@ -719,7 +998,10 @@ async fn test_debate(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opt
 // §11 — 动态 Agent 闭环
 // ═══════════════════════════════════════════════════════════════════
 
-async fn test_dynamic(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option<Arc<SearchBuffer>>) -> Vec<TestCheck> {
+async fn test_dynamic(
+    ds_search: Option<Arc<DashScopeSearchBackend>>,
+    buffer: Option<Arc<SearchBuffer>>,
+) -> Vec<TestCheck> {
     let test_name = "dynamic";
     eprintln!("\n━━━━━━ §11 动态 Agent 闭环 ━━━━━━");
 
@@ -734,28 +1016,55 @@ async fn test_dynamic(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Op
 
     let clauses = dynamic_test_clauses();
     let (chunks, chunk_order) = build_chunk_data(&clauses);
-    let coordinator = make_coordinator(config, ds_search, buffer, bus, graph, trace, chunks, chunk_order);
+    let coordinator = make_coordinator(
+        config,
+        ds_search,
+        buffer,
+        bus,
+        graph,
+        trace,
+        chunks,
+        chunk_order,
+    );
 
-    eprintln!("  条款: {} 条 | BlindSpot 可能 suggest_agent", clauses.len());
+    eprintln!(
+        "  条款: {} 条 | BlindSpot 可能 suggest_agent",
+        clauses.len()
+    );
     let output = run_pipeline(&coordinator, &clauses).await;
     let result = analyze_output(&output);
 
     // Check 1: BlindSpot 运行了
     if result.blind_spot_findings > 0 {
-        checks.push(TestCheck::pass(test_name, "blindspot_ran",
-            &format!("BlindSpot 产出 {} 条 finding", result.blind_spot_findings)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "blindspot_ran",
+            &format!("BlindSpot 产出 {} 条 finding", result.blind_spot_findings),
+        ));
     } else {
-        checks.push(TestCheck::skip(test_name, "blindspot_ran",
-            "BlindSpot 无额外 finding"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "blindspot_ran",
+            "BlindSpot 无额外 finding",
+        ));
     }
 
     // Check 2: suggest_agent 是否被触发
     if result.suggested_agent_count > 0 {
-        checks.push(TestCheck::pass(test_name, "suggest_agent_triggered",
-            &format!("{} 条 finding 包含 suggest_agent", result.suggested_agent_count)));
+        checks.push(TestCheck::pass(
+            test_name,
+            "suggest_agent_triggered",
+            &format!(
+                "{} 条 finding 包含 suggest_agent",
+                result.suggested_agent_count
+            ),
+        ));
     } else {
-        checks.push(TestCheck::skip(test_name, "suggest_agent_triggered",
-            "BlindSpot 未 suggest_agent（当前条款可能不需要新 Agent）"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "suggest_agent_triggered",
+            "BlindSpot 未 suggest_agent（当前条款可能不需要新 Agent）",
+        ));
     }
 
     // Check 3: dynamic_agents.json 文件状态
@@ -763,34 +1072,51 @@ async fn test_dynamic(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Op
     let dynamic_file = Path::new(&dynamic_file_path);
     if dynamic_file.exists() {
         match fs::read_to_string(dynamic_file) {
-            Ok(content) => {
-                match serde_json::from_str::<DynamicAgentManifest>(&content) {
-                    Ok(manifest) => {
-                        let active_count = manifest.agents.iter().filter(|a| a.active).count();
-                        let inactive_count = manifest.agents.iter().filter(|a| !a.active).count();
-                        checks.push(TestCheck::pass(test_name, "dynamic_agents_file_valid",
-                            &format!("{} agents ({} active, {} pending approval)",
-                                manifest.agents.len(), active_count, inactive_count)));
-                    }
-                    Err(e) => {
-                        checks.push(TestCheck::fail(test_name, "dynamic_agents_file_valid",
-                            &format!("JSON 非法: {}", e)));
-                    }
+            Ok(content) => match serde_json::from_str::<DynamicAgentManifest>(&content) {
+                Ok(manifest) => {
+                    let active_count = manifest.agents.iter().filter(|a| a.active).count();
+                    let inactive_count = manifest.agents.iter().filter(|a| !a.active).count();
+                    checks.push(TestCheck::pass(
+                        test_name,
+                        "dynamic_agents_file_valid",
+                        &format!(
+                            "{} agents ({} active, {} pending approval)",
+                            manifest.agents.len(),
+                            active_count,
+                            inactive_count
+                        ),
+                    ));
                 }
-            }
+                Err(e) => {
+                    checks.push(TestCheck::fail(
+                        test_name,
+                        "dynamic_agents_file_valid",
+                        &format!("JSON 非法: {}", e),
+                    ));
+                }
+            },
             Err(e) => {
-                checks.push(TestCheck::fail(test_name, "dynamic_agents_file_valid",
-                    &format!("无法读取: {}", e)));
+                checks.push(TestCheck::fail(
+                    test_name,
+                    "dynamic_agents_file_valid",
+                    &format!("无法读取: {}", e),
+                ));
             }
         }
     } else {
-        checks.push(TestCheck::skip(test_name, "dynamic_agents_file_valid",
-            "dynamic_agents.json 不存在（首次运行正常）"));
+        checks.push(TestCheck::skip(
+            test_name,
+            "dynamic_agents_file_valid",
+            "dynamic_agents.json 不存在（首次运行正常）",
+        ));
     }
 
     // Check 4: 系统不 panic
-    checks.push(TestCheck::pass(test_name, "no_panic",
-        &format!("正常完成，{} findings", output.findings.len())));
+    checks.push(TestCheck::pass(
+        test_name,
+        "no_panic",
+        &format!("正常完成，{} findings", output.findings.len()),
+    ));
 
     checks
 }
@@ -799,7 +1125,10 @@ async fn test_dynamic(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Op
 // §12/§13 — 故障与边界
 // ═══════════════════════════════════════════════════════════════════
 
-async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Option<Arc<SearchBuffer>>) -> Vec<TestCheck> {
+async fn test_fault(
+    ds_search: Option<Arc<DashScopeSearchBackend>>,
+    buffer: Option<Arc<SearchBuffer>>,
+) -> Vec<TestCheck> {
     let test_name = "fault";
     eprintln!("\n━━━━━━ §12/§13 故障与边界 ━━━━━━");
 
@@ -815,20 +1144,38 @@ async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
 
         let clauses: Vec<ReviewClause> = vec![];
         let (chunks, chunk_order) = build_chunk_data(&clauses);
-        let coordinator = make_coordinator(config, ds_search.clone(), buffer.clone(), bus, graph, trace, chunks, chunk_order);
+        let coordinator = make_coordinator(
+            config,
+            ds_search.clone(),
+            buffer.clone(),
+            bus,
+            graph,
+            trace,
+            chunks,
+            chunk_order,
+        );
         match coordinator.review(&clauses).await {
             Ok(output) => {
                 if output.findings.is_empty() {
-                    checks.push(TestCheck::pass(test_name, "empty_clauses",
-                        "空条款列表 → 返回空 findings，不 panic"));
+                    checks.push(TestCheck::pass(
+                        test_name,
+                        "empty_clauses",
+                        "空条款列表 → 返回空 findings，不 panic",
+                    ));
                 } else {
-                    checks.push(TestCheck::fail(test_name, "empty_clauses",
-                        &format!("空输入但返回了 {} 条 finding", output.findings.len())));
+                    checks.push(TestCheck::fail(
+                        test_name,
+                        "empty_clauses",
+                        &format!("空输入但返回了 {} 条 finding", output.findings.len()),
+                    ));
                 }
             }
             Err(e) => {
-                checks.push(TestCheck::fail(test_name, "empty_clauses",
-                    &format!("空条款列表导致 Err: {}", e)));
+                checks.push(TestCheck::fail(
+                    test_name,
+                    "empty_clauses",
+                    &format!("空条款列表导致 Err: {}", e),
+                ));
             }
         }
     }
@@ -843,21 +1190,40 @@ async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
 
         let clauses = fault_test_clauses();
         // 取超长条款
-        let long_clause: Vec<ReviewClause> = clauses.into_iter()
+        let long_clause: Vec<ReviewClause> = clauses
+            .into_iter()
             .filter(|c| c.chunk_id == "ch_long")
             .collect();
         let (chunks, chunk_order) = build_chunk_data(&long_clause);
-        let coordinator = make_coordinator(config, ds_search.clone(), buffer.clone(), bus, graph, trace, chunks, chunk_order);
+        let coordinator = make_coordinator(
+            config,
+            ds_search.clone(),
+            buffer.clone(),
+            bus,
+            graph,
+            trace,
+            chunks,
+            chunk_order,
+        );
 
         match coordinator.review(&long_clause).await {
             Ok(output) => {
-                checks.push(TestCheck::pass(test_name, "long_text_no_panic",
-                    &format!("超长条款({} 字符) → 不 panic, {} findings",
-                        long_clause[0].text.chars().count(), output.findings.len())));
+                checks.push(TestCheck::pass(
+                    test_name,
+                    "long_text_no_panic",
+                    &format!(
+                        "超长条款({} 字符) → 不 panic, {} findings",
+                        long_clause[0].text.chars().count(),
+                        output.findings.len()
+                    ),
+                ));
             }
             Err(e) => {
-                checks.push(TestCheck::fail(test_name, "long_text_no_panic",
-                    &format!("超长条款导致 Err: {}", e)));
+                checks.push(TestCheck::fail(
+                    test_name,
+                    "long_text_no_panic",
+                    &format!("超长条款导致 Err: {}", e),
+                ));
             }
         }
     }
@@ -871,25 +1237,44 @@ async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
         config.blind_spot_fallback_enabled = false;
 
         let all_clauses = fault_test_clauses();
-        let special_clause: Vec<ReviewClause> = all_clauses.into_iter()
+        let special_clause: Vec<ReviewClause> = all_clauses
+            .into_iter()
             .filter(|c| c.chunk_id == "ch_special")
             .collect();
         let (chunks, chunk_order) = build_chunk_data(&special_clause);
-        let coordinator = make_coordinator(config, ds_search.clone(), buffer.clone(), bus, graph, trace, chunks, chunk_order);
+        let coordinator = make_coordinator(
+            config,
+            ds_search.clone(),
+            buffer.clone(),
+            bus,
+            graph,
+            trace,
+            chunks,
+            chunk_order,
+        );
 
         match coordinator.review(&special_clause).await {
             Ok(output) => {
                 let json_result = serde_json::to_string(&output.findings);
                 match json_result {
-                    Ok(_) => checks.push(TestCheck::pass(test_name, "special_chars_serializable",
-                        "特殊字符条款 → JSON 序列化成功")),
-                    Err(e) => checks.push(TestCheck::fail(test_name, "special_chars_serializable",
-                        &format!("JSON 序列化失败: {}", e))),
+                    Ok(_) => checks.push(TestCheck::pass(
+                        test_name,
+                        "special_chars_serializable",
+                        "特殊字符条款 → JSON 序列化成功",
+                    )),
+                    Err(e) => checks.push(TestCheck::fail(
+                        test_name,
+                        "special_chars_serializable",
+                        &format!("JSON 序列化失败: {}", e),
+                    )),
                 }
             }
             Err(e) => {
-                checks.push(TestCheck::fail(test_name, "special_chars_serializable",
-                    &format!("特殊字符条款导致 Err: {}", e)));
+                checks.push(TestCheck::fail(
+                    test_name,
+                    "special_chars_serializable",
+                    &format!("特殊字符条款导致 Err: {}", e),
+                ));
             }
         }
     }
@@ -898,7 +1283,7 @@ async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
     {
         // 备份 + 损坏 + 测试 + 恢复
         let dynamic_file_path = data_path_str("agents/dynamic_agents.json");
-    let dynamic_file = Path::new(&dynamic_file_path);
+        let dynamic_file = Path::new(&dynamic_file_path);
         let backup_file_path = data_path_str("agents/dynamic_agents.json.test_bak");
         let backup_file = Path::new(&backup_file_path);
 
@@ -918,24 +1303,37 @@ async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
         let empty_order: Arc<Vec<String>> = Arc::new(Vec::new());
         let mut coordinator = make_coordinator(
             CoordinatorConfig::default(),
-            ds_search.clone(), buffer.clone(),
-            bus, graph, trace,
-            empty_chunks, empty_order,
+            ds_search.clone(),
+            buffer.clone(),
+            bus,
+            graph,
+            trace,
+            empty_chunks,
+            empty_order,
         );
         // 手动再调一次确认
         match coordinator.load_dynamic_agents() {
             Ok(count) => {
                 if count == 0 {
-                    checks.push(TestCheck::pass(test_name, "corrupt_json_no_panic",
-                        "损坏 JSON → loaded=0，不 panic"));
+                    checks.push(TestCheck::pass(
+                        test_name,
+                        "corrupt_json_no_panic",
+                        "损坏 JSON → loaded=0，不 panic",
+                    ));
                 } else {
-                    checks.push(TestCheck::fail(test_name, "corrupt_json_no_panic",
-                        &format!("损坏 JSON 返回 loaded={}（预期 0）", count)));
+                    checks.push(TestCheck::fail(
+                        test_name,
+                        "corrupt_json_no_panic",
+                        &format!("损坏 JSON 返回 loaded={}（预期 0）", count),
+                    ));
                 }
             }
             Err(e) => {
-                checks.push(TestCheck::pass(test_name, "corrupt_json_no_panic",
-                    &format!("损坏 JSON → 返回 Err（不 panic）: {}", e)));
+                checks.push(TestCheck::pass(
+                    test_name,
+                    "corrupt_json_no_panic",
+                    &format!("损坏 JSON → 返回 Err（不 panic）: {}", e),
+                ));
             }
         }
 
@@ -951,13 +1349,19 @@ async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
         let test_dir = data_path_str("output/test_fault_output");
         let result = fs::create_dir_all(&test_dir);
         if result.is_ok() {
-            checks.push(TestCheck::pass(test_name, "output_dir_auto_create",
-                "create_dir_all 成功 — 输出目录自动创建"));
+            checks.push(TestCheck::pass(
+                test_name,
+                "output_dir_auto_create",
+                "create_dir_all 成功 — 输出目录自动创建",
+            ));
             // 清理
             fs::remove_dir_all(&test_dir).ok();
         } else {
-            checks.push(TestCheck::fail(test_name, "output_dir_auto_create",
-                &format!("create_dir_all 失败: {:?}", result.err())));
+            checks.push(TestCheck::fail(
+                test_name,
+                "output_dir_auto_create",
+                &format!("create_dir_all 失败: {:?}", result.err()),
+            ));
         }
     }
 
@@ -972,9 +1376,7 @@ async fn test_fault(ds_search: Option<Arc<DashScopeSearchBackend>>, buffer: Opti
 async fn main() {
     dotenv::dotenv().ok();
 
-    let test_filter = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "all".to_string());
+    let test_filter = std::env::args().nth(1).unwrap_or_else(|| "all".to_string());
 
     // 检查 Agent 模式
     let agent_enabled = env::var("AIBID_AGENT").unwrap_or_default() == "1";
@@ -985,8 +1387,10 @@ async fn main() {
     }
 
     eprintln!("══════════════════════════════════════════════");
-    eprintln!("  Agent 框架集成测试 (LLM: {})",
-        env::var("AIBID_LLM_PROTOCOL").unwrap_or_else(|_| "dashscope".to_string()));
+    eprintln!(
+        "  Agent 框架集成测试 (LLM: {})",
+        env::var("AIBID_LLM_PROTOCOL").unwrap_or_else(|_| "dashscope".to_string())
+    );
     eprintln!("══════════════════════════════════════════════");
 
     // 一次性初始化搜索后端（所有测试共享）
@@ -994,9 +1398,7 @@ async fn main() {
 
     let mut all_checks: Vec<TestCheck> = Vec::new();
 
-    let run_test = |name: &str| {
-        name == "all" || test_filter == name || test_filter == "all"
-    };
+    let run_test = |name: &str| name == "all" || test_filter == name || test_filter == "all";
 
     if run_test("bus") {
         let checks = test_bus(ds_search.clone(), buffer.clone()).await;
@@ -1057,15 +1459,20 @@ async fn main() {
     let summary = TestSummary::from_checks(&all_checks);
     eprintln!();
     eprintln!("══════════════════════════════════════════════");
-    eprintln!("  TOTAL: {} total | {} PASS | {} FAIL | {} SKIP | {:.0}% pass",
-        summary.total, summary.passed, summary.failed, summary.skipped, summary.pass_rate);
+    eprintln!(
+        "  TOTAL: {} total | {} PASS | {} FAIL | {} SKIP | {:.0}% pass",
+        summary.total, summary.passed, summary.failed, summary.skipped, summary.pass_rate
+    );
     eprintln!("══════════════════════════════════════════════");
 
     if summary.failed > 0 {
         eprintln!("\nFAILED CHECKS:");
         for check in &all_checks {
             if check.status == "FAIL" {
-                eprintln!("  [FAIL] {}::{} — {}", check.test, check.check, check.detail);
+                eprintln!(
+                    "  [FAIL] {}::{} — {}",
+                    check.test, check.check, check.detail
+                );
             }
         }
         std::process::exit(1);

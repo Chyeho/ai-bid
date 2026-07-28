@@ -32,6 +32,10 @@ export const getDashboardList = async (): Promise<ProjectItem[]> => {
       BaseResponse<ProjectItem[]>
    >('/api/projects');
 
+   if (res.code !== 0 && res.code !== 200) {
+      throw new Error(res.msg || '项目列表加载失败');
+   }
+
    return res.data || [];
 };
 

@@ -112,9 +112,7 @@ impl DocumentVectorIndex {
             .collect();
 
         // Top-K by partial sort
-        scored.sort_unstable_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(top_k);
 
         scored
@@ -123,11 +121,7 @@ impl DocumentVectorIndex {
                 let chunk = &self.chunks[i];
                 SearchHit {
                     chunk_id: chunk.chunk_id.clone(),
-                    title: chunk
-                        .section_path
-                        .last()
-                        .cloned()
-                        .unwrap_or_default(),
+                    title: chunk.section_path.last().cloned().unwrap_or_default(),
                     score,
                     snippet: chunk.embed_text.chars().take(500).collect(),
                     page_start: chunk.page_start,

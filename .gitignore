@@ -1,3 +1,8 @@
+# ── Claude Code / AI 工具 ──
+.claude/
+.agents/
+.agent/
+
 # ── 后端 Rust (审核引擎) ──
 backend-rust/target
 backend-rust/output
@@ -10,6 +15,8 @@ backend-java/build
 backend-java/.gradle
 backend-java/node_modules
 backend-java/logs
+backend-java/hs_err_pid*.log
+backend-java/replay_pid*.log
 
 # ── 前端 (React) ──
 frontend/node_modules
@@ -20,9 +27,31 @@ target/
 
 # ── 共享 ──
 .env
+.env.*
 
 # ── 运行时产物 ──
-output/你
-
+output/
+outputs/
 tmp/
 logs/
+.pnpm-store/
+.runtime-data/
+data/
+
+# ── 日志文件 ──
+*.log
+
+# ── OS 生成文件 ──
+Thumbs.db
+Desktop.ini
+.DS_Store
+.DS_Store?
+
+# ── IDE / 编辑器 ──
+.vscode/
+.idea/
+.cursor/
+.windsurf/
+*.swp
+*.swo
+*~

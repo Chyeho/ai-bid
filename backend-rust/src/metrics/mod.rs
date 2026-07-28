@@ -2,4 +2,4 @@ pub mod collector;
 pub mod schema;
 
 pub use collector::MetricsCollector;
-pub use schema::{RunMetrics, RunMeta, SCHEMA_VERSION, SemanticStage, StageDetail};
+pub use schema::{RunMeta, RunMetrics, SCHEMA_VERSION, SemanticStage, StageDetail};

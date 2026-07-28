@@ -16,6 +16,8 @@ public class AuditIssueVO implements Serializable {
     private Long auditId;
     private String issueNo;
     private String severity;
+    private Boolean isCritical;
+    private String criticalReason;
     private String category;
     private String description;
     private String suggestion;

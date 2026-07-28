@@ -66,8 +66,8 @@ impl EmbeddingApiClient {
             .context(
                 "远程 Embedding 模式需要 API 密钥。请设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY",
             )?;
-        let model = std::env::var("EMBED_MODEL")
-            .unwrap_or_else(|_| "text-embedding-v4".to_string());
+        let model =
+            std::env::var("EMBED_MODEL").unwrap_or_else(|_| "text-embedding-v4".to_string());
         let api_base = std::env::var("EMBED_API_BASE").unwrap_or_else(|_| {
             "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
                 .to_string()

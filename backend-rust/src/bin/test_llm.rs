@@ -9,15 +9,18 @@ async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     println!("=== 千问 LLM 连接测试 ===\n");
 
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .context("❌ OPENAI_API_KEY 未设置（检查 .env 文件）")?;
+    let api_key =
+        std::env::var("OPENAI_API_KEY").context("❌ OPENAI_API_KEY 未设置（检查 .env 文件）")?;
     let api_base = std::env::var("OPENAI_BASE_URL")
         .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string());
-    let model = std::env::var("LLM_MODEL")
-        .unwrap_or_else(|_| "qwen-max".to_string());
+    let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen-max".to_string());
 
     let key_preview = if api_key.len() > 12 {
-        format!("{}...{}", &api_key[..8], &api_key[api_key.len().saturating_sub(4)..])
+        format!(
+            "{}...{}",
+            &api_key[..8],
+            &api_key[api_key.len().saturating_sub(4)..]
+        )
     } else {
         "***".to_string()
     };
@@ -49,12 +52,14 @@ async fn main() -> Result<()> {
         .context("❌ 网络请求失败")?;
 
     let status = response.status();
-    let response_body: serde_json::Value = response.json().await
-        .context("❌ 解析响应失败")?;
+    let response_body: serde_json::Value = response.json().await.context("❌ 解析响应失败")?;
 
     if !status.is_success() {
         println!("\n❌ API 返回错误 {}:", status);
-        println!("{}", serde_json::to_string_pretty(&response_body).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response_body).unwrap_or_default()
+        );
         anyhow::bail!("API 调用失败");
     }
 
@@ -66,7 +71,8 @@ async fn main() -> Result<()> {
     println!();
     println!("✅ 连接成功！");
     println!("   回复: {}", content);
-    println!("   tokens: prompt={}, completion={}, total={}",
+    println!(
+        "   tokens: prompt={}, completion={}, total={}",
         usage["prompt_tokens"].as_u64().unwrap_or(0),
         usage["completion_tokens"].as_u64().unwrap_or(0),
         usage["total_tokens"].as_u64().unwrap_or(0),

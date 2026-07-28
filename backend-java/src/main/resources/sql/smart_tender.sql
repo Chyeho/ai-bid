@@ -33,11 +33,13 @@ CREATE TABLE `bid_document` (
   `upload_time` datetime DEFAULT NULL COMMENT '上传时间',
   `version` int(11) DEFAULT 1 COMMENT '版本号',
   `project_id` bigint(20) DEFAULT NULL COMMENT '项目ID',
+  `rust_document_id` varchar(64) DEFAULT NULL COMMENT 'Rust 审核引擎文档ID',
   PRIMARY KEY (`id`),
   KEY `idx_upload_user_id` (`upload_user_id`),
   KEY `idx_file_category` (`file_category`),
   KEY `idx_upload_time` (`upload_time`),
-  KEY `idx_project_id` (`project_id`)
+  KEY `idx_project_id` (`project_id`),
+  KEY `idx_rust_document_id` (`rust_document_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='标书文件表';
 
 DROP TABLE IF EXISTS `audit_task`;
@@ -55,6 +57,13 @@ CREATE TABLE `audit_task` (
   `end_time` datetime DEFAULT NULL COMMENT '结束时间',
   `audit_user_id` bigint(20) DEFAULT NULL COMMENT '审核人ID',
   `create_time` datetime DEFAULT NULL COMMENT '创建时间',
+  `stage` varchar(64) DEFAULT NULL COMMENT '当前审核阶段',
+  `progress` int(11) NOT NULL DEFAULT 0 COMMENT '审核进度（0-100）',
+  `enabled_checks` json DEFAULT NULL COMMENT '启用的审核项',
+  `failed_stages` json DEFAULT NULL COMMENT '失败的审核阶段',
+  `error_msg` varchar(1000) DEFAULT NULL COMMENT '失败原因',
+  `updated_at` datetime DEFAULT NULL COMMENT '更新时间',
+  `version` bigint(20) NOT NULL DEFAULT 0 COMMENT '乐观锁版本号',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_task_id` (`task_id`),
   KEY `idx_bid_id` (`bid_id`),
@@ -68,7 +77,9 @@ CREATE TABLE `audit_issue` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '问题ID',
   `audit_id` bigint(20) NOT NULL COMMENT '审核任务ID',
   `issue_no` varchar(20) DEFAULT NULL COMMENT '问题编号',
-  `severity` varchar(20) DEFAULT NULL COMMENT '严重程度（critical严重/warning一般/info提示）',
+  `severity` varchar(20) DEFAULT NULL COMMENT '四级严重程度（high/medium/low/info）',
+  `is_critical` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否重大/红线问题',
+  `critical_reason` text COMMENT '重大问题判定依据',
   `category` varchar(50) DEFAULT NULL COMMENT '问题类型（budget预算合规性/demand需求合规性/legal政策合法性）',
   `description` text COMMENT '问题描述',
   `suggestion` text COMMENT '修改建议',
@@ -80,6 +91,7 @@ CREATE TABLE `audit_issue` (
   PRIMARY KEY (`id`),
   KEY `idx_audit_id` (`audit_id`),
   KEY `idx_severity` (`severity`),
+  KEY `idx_audit_issue_critical` (`is_critical`),
   KEY `idx_category` (`category`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='审核问题表';
 

@@ -80,6 +80,16 @@ public class RustDocumentService {
         return uploadToRust(bidId, tender);
     }
 
+    /**
+     * 仅返回数据库中已缓存的 Rust 文档 ID，不验证 Rust 内存中的文档是否仍存在。
+     * 用于任务恢复：Rust 的最终结果有磁盘 fallback，即使服务重启后文档对象
+     * 尚未恢复，旧 document_id 对应的结果仍然可以读取。
+     */
+    public String getCachedDocumentId(Long bidId) {
+        Tender tender = tenderMapper.selectById(bidId);
+        return tender == null ? null : tender.getRustDocumentId();
+    }
+
     // ── 私有方法 ──────────────────────────────────────────────────
 
     private boolean verifyExists(String rustDocumentId) {

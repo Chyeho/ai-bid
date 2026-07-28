@@ -27,6 +27,9 @@ public class RustApiProperties {
     /** 异步审核等待超时（分钟），默认 30 */
     private int reviewTimeoutMinutes = 30;
 
+    /** 招标文件云端审核前脱敏模式。当前生产默认 low，可显式设为 off。 */
+    private String desensitizationMode = "low";
+
     // ── getters / setters ──────────────────────────────────────────
 
     public String getBaseUrl() {
@@ -67,6 +70,14 @@ public class RustApiProperties {
 
     public void setReviewTimeoutMinutes(int reviewTimeoutMinutes) {
         this.reviewTimeoutMinutes = reviewTimeoutMinutes;
+    }
+
+    public String getDesensitizationMode() {
+        return desensitizationMode;
+    }
+
+    public void setDesensitizationMode(String desensitizationMode) {
+        this.desensitizationMode = desensitizationMode;
     }
 
     // ── 派生方法 ──────────────────────────────────────────────────

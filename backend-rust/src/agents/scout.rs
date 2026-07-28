@@ -71,12 +71,10 @@ pub const SCOUT_SYSTEM_PROMPT: &str = r#"你是标书审查的"初筛员"（Scou
 "#;
 
 /// 创建 ScoutAgent 的 ReActLoop 实例（便捷工厂）。
-pub fn create_scout_agent(
-    llm: Box<dyn LlmClient>,
-    tools: ToolRegistry,
-) -> ReActLoop {
+pub fn create_scout_agent(llm: Box<dyn LlmClient>, tools: ToolRegistry) -> ReActLoop {
     let registry = AgentRegistry::builtin();
-    let def = registry.get(AgentId::Scout)
+    let def = registry
+        .get(AgentId::Scout)
         .expect("ScoutAgent 定义必须存在于 AgentRegistry");
     let config = def.to_agent_config();
     ReActLoop::new(config, llm, tools)

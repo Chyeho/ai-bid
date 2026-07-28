@@ -21,13 +21,14 @@ use utoipa::ToSchema;
 ///
 /// 分级通过关键词扫描实现（零 LLM 成本），在 Coordinator 路由前完成。
 /// 审查过程中支持动态升降级（turn 2 检测）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
 pub enum RiskTier {
     /// L1：低风险，纯信息/格式条款。max_turns=8，仅 FactCheckAgent。
     #[serde(rename = "L1")]
     Low,
     /// L2：中等风险，标准审查。max_turns=12，按路由矩阵分配 Agent。
     #[serde(rename = "L2")]
+    #[default]
     Medium,
     /// L3：高风险，含品牌/地域/排他性关键词。max_turns=14，深度 ReAct。
     #[serde(rename = "L3")]
@@ -53,17 +54,48 @@ impl RiskTier {
         let text_lower = text.to_lowercase();
 
         let l3_keywords = [
-            "品牌", "型号", "指定", "必须采用", "原厂", "专利", "专有技术",
-            "本地", "东莞", "深圳", "本市", "所在地", "分支机构", "常驻",
-            "唯一", "独家", "排他", "不接受替代", "原厂商授权",
-            "制造商授权函", "项目授权", "★",
+            "品牌",
+            "型号",
+            "指定",
+            "必须采用",
+            "原厂",
+            "专利",
+            "专有技术",
+            "本地",
+            "东莞",
+            "深圳",
+            "本市",
+            "所在地",
+            "分支机构",
+            "常驻",
+            "唯一",
+            "独家",
+            "排他",
+            "不接受替代",
+            "原厂商授权",
+            "制造商授权函",
+            "项目授权",
+            "★",
         ];
         let l1_keywords = [
-            "格式", "装订", "密封", "签字", "盖章", "份数", "封面",
-            "目录", "页码", "字体", "字号", "行距",
+            "格式",
+            "装订",
+            "密封",
+            "签字",
+            "盖章",
+            "份数",
+            "封面",
+            "目录",
+            "页码",
+            "字体",
+            "字号",
+            "行距",
             // 采购元数据/文件头（纯标识信息，无实质性要求）
-            "采购计划编号", "采购项目编号", "竞争性磋商文件",
-            "磋商邀请", "投标邀请函",
+            "采购计划编号",
+            "采购项目编号",
+            "竞争性磋商文件",
+            "磋商邀请",
+            "投标邀请函",
         ];
 
         for kw in &l3_keywords {
@@ -77,12 +109,6 @@ impl RiskTier {
             }
         }
         RiskTier::Medium
-    }
-}
-
-impl Default for RiskTier {
-    fn default() -> Self {
-        RiskTier::Medium // 默认值，框架会在解析后覆盖
     }
 }
 
@@ -101,7 +127,7 @@ impl std::fmt::Display for RiskTier {
 /// Coordinator 路由给 Agent 的最小审查单元。
 ///
 /// 一条 ReviewClause 对应一个 Chunk。Agent 在 ReAct 循环中审查它，
-/// 输出一个 RiskFinding。
+/// 可输出零到多条 RiskFinding。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewClause {
     /// Chunk ID（如 "ch_042"），对应原始 Chunk.chunk_id
@@ -206,8 +232,23 @@ pub struct RiskFinding {
     pub no_risk: bool,
     /// 风险严重程度
     pub severity: RiskSeverity,
+    /// 是否属于必须优先处置的重大/红线问题。
+    ///
+    /// 该字段与四级 severity 正交：重大问题仍使用 severity=high，
+    /// Critical Recall 通过此标志计算，避免引入第五套严重度枚举。
+    #[serde(default)]
+    pub is_critical: bool,
+    /// 重大问题判定依据；is_critical=false 时应为空字符串。
+    #[serde(default)]
+    pub critical_reason: String,
     /// 风险类型标签（"地域歧视" / "品牌指定" / "程序违规" / …）
     pub risk_type: String,
+    /// 稳定风险分类编码，用于同一条款内的多问题去重。
+    ///
+    /// 推荐使用大写英文编码（如 LOCAL_REGISTRATION / BRAND_LOCK）。
+    /// 旧响应未提供时保持空字符串，框架回退到 risk_type。
+    #[serde(default)]
+    pub category_code: String,
 
     // ── 证据 ──
     /// 从原文逐字摘录的违规文本（来自 read_section 返回的原始文本）
@@ -307,6 +348,34 @@ pub struct Citation {
 }
 
 impl RiskFinding {
+    /// 统一四级严重度与重大问题标志的约束。
+    ///
+    /// - 无风险结论不能标记为重大问题；
+    /// - 重大问题在四级严重度中必须是 high；
+    /// - 非重大问题不保留 critical_reason，避免下游误读。
+    pub fn normalize_criticality(&mut self) {
+        if self.no_risk {
+            self.is_critical = false;
+            self.critical_reason.clear();
+            return;
+        }
+        if self.is_critical {
+            self.severity = RiskSeverity::High;
+            if self.critical_reason.trim().is_empty() {
+                self.critical_reason =
+                    format!("{}属于重大/红线问题，需优先人工复核。", self.risk_type);
+            }
+        } else {
+            self.critical_reason.clear();
+        }
+    }
+
+    /// 下游验证或辩论将问题降级时，清除重大标志及其依据。
+    pub fn clear_criticality(&mut self) {
+        self.is_critical = false;
+        self.critical_reason.clear();
+    }
+
     /// 创建一个 "无风险" 的快捷构造。
     pub fn no_risk_finding(
         risk_id: String,
@@ -322,7 +391,10 @@ impl RiskFinding {
             agent: agent.to_string(),
             no_risk: true,
             severity: RiskSeverity::Info,
+            is_critical: false,
+            critical_reason: String::new(),
             risk_type: "无风险".to_string(),
+            category_code: String::new(),
             source_quote: String::new(),
             legal_basis: Vec::new(),
             case_refs: Vec::new(),
@@ -362,7 +434,10 @@ impl RiskFinding {
             agent: agent.to_string(),
             no_risk: true,
             severity: RiskSeverity::Info,
+            is_critical: false,
+            critical_reason: String::new(),
             risk_type: "审查截断".to_string(),
+            category_code: String::new(),
             source_quote: String::new(),
             legal_basis: Vec::new(),
             case_refs: Vec::new(),
@@ -514,28 +589,146 @@ impl LegalDomain {
     /// 纯规则匹配（零 LLM 成本）。
     /// 返回 `(主领域, 置信度)`，置信度用于决定是否走规则直通。
     pub fn classify(risk_type: &str, legal_basis: &[String]) -> (Self, f32) {
-        let combined: String = risk_type
-            .to_lowercase()
+        let combined: String = risk_type.to_lowercase()
             + " "
-            + &legal_basis.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>().join(" ");
+            + &legal_basis
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
 
         let checks: &[(LegalDomain, &[&str], f32)] = &[
             // 地域限制 — 最强信号
-            (LegalDomain::GeographicRestriction, &["地域", "本地", "所在地", "分支机构", "常驻", "排斥", "歧视", "地区", "第5条", "第二十条第七项"], 0.95),
+            (
+                LegalDomain::GeographicRestriction,
+                &[
+                    "地域",
+                    "本地",
+                    "所在地",
+                    "分支机构",
+                    "常驻",
+                    "排斥",
+                    "歧视",
+                    "地区",
+                    "第5条",
+                    "第二十条第七项",
+                ],
+                0.95,
+            ),
             // 品牌指定
-            (LegalDomain::BrandDesignation, &["品牌", "型号", "专利", "原厂", "独家", "排他", "指定", "唯一", "第二十条第二项", "第二十二条"], 0.90),
+            (
+                LegalDomain::BrandDesignation,
+                &[
+                    "品牌",
+                    "型号",
+                    "专利",
+                    "原厂",
+                    "独家",
+                    "排他",
+                    "指定",
+                    "唯一",
+                    "第二十条第二项",
+                    "第二十二条",
+                ],
+                0.90,
+            ),
             // 采购程序
-            (LegalDomain::ProcurementProcedure, &["采购方式", "公开招标", "邀请招标", "竞争性", "公告", "公示", "开标", "评标", "废标", "流标", "第二十七条", "第二十三条", "第十三条", "87号令"], 0.85),
+            (
+                LegalDomain::ProcurementProcedure,
+                &[
+                    "采购方式",
+                    "公开招标",
+                    "邀请招标",
+                    "竞争性",
+                    "公告",
+                    "公示",
+                    "开标",
+                    "评标",
+                    "废标",
+                    "流标",
+                    "第二十七条",
+                    "第二十三条",
+                    "第十三条",
+                    "87号令",
+                ],
+                0.85,
+            ),
             // 评分评审
-            (LegalDomain::ScoringEvaluation, &["评分", "分值", "权重", "价格分", "技术分", "商务分", "评审因素", "评审标准", "第三十四条", "第55条", "第64条"], 0.90),
+            (
+                LegalDomain::ScoringEvaluation,
+                &[
+                    "评分",
+                    "分值",
+                    "权重",
+                    "价格分",
+                    "技术分",
+                    "商务分",
+                    "评审因素",
+                    "评审标准",
+                    "第三十四条",
+                    "第55条",
+                    "第64条",
+                ],
+                0.90,
+            ),
             // 合同条款
-            (LegalDomain::ContractTerms, &["付款", "验收", "质保", "违约", "售后", "保修", "合同", "第43条", "第50条", "第47条", "第52条"], 0.85),
+            (
+                LegalDomain::ContractTerms,
+                &[
+                    "付款", "验收", "质保", "违约", "售后", "保修", "合同", "第43条", "第50条",
+                    "第47条", "第52条",
+                ],
+                0.85,
+            ),
             // 保证金/时限
-            (LegalDomain::BidBondTimeline, &["保证金", "截止", "期限", "工作日", "日历日", "第三十三条", "第二十九条", "第三十一条", "第20条"], 0.90),
+            (
+                LegalDomain::BidBondTimeline,
+                &[
+                    "保证金",
+                    "截止",
+                    "期限",
+                    "工作日",
+                    "日历日",
+                    "第三十三条",
+                    "第二十九条",
+                    "第三十一条",
+                    "第20条",
+                ],
+                0.90,
+            ),
             // 供应商资格
-            (LegalDomain::SupplierQualification, &["资格", "资质", "业绩", "条件", "准入", "特定", "第二十二条", "第二十三条", "第十七条", "第二十条"], 0.85),
+            (
+                LegalDomain::SupplierQualification,
+                &[
+                    "资格",
+                    "资质",
+                    "业绩",
+                    "条件",
+                    "准入",
+                    "特定",
+                    "第二十二条",
+                    "第二十三条",
+                    "第十七条",
+                    "第二十条",
+                ],
+                0.85,
+            ),
             // 技术要求
-            (LegalDomain::TechnicalRequirements, &["技术", "参数", "规格", "认证", "国产", "性能", "功能", "配置", "第二十条"], 0.80),
+            (
+                LegalDomain::TechnicalRequirements,
+                &[
+                    "技术",
+                    "参数",
+                    "规格",
+                    "认证",
+                    "国产",
+                    "性能",
+                    "功能",
+                    "配置",
+                    "第二十条",
+                ],
+                0.80,
+            ),
         ];
 
         for (domain, keywords, confidence) in checks {
@@ -661,7 +854,7 @@ impl AgentId {
     }
 
     /// 从字符串匹配 AgentId（用于 env var 等场景）。
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "factcheck" | "fact_check" | "factcheckagent" => Some(AgentId::FactCheck),
             "procedure" | "procedureagent" => Some(AgentId::Procedure),
@@ -930,7 +1123,8 @@ impl ClauseContext {
                 );
 
                 // Scout Hypothesis: 展示待验证法规作为 Phase 2 Agent 的搜索起点
-                if r.finding_role == FindingRole::Hypothesis && !r.verification_required.is_empty() {
+                if r.finding_role == FindingRole::Hypothesis && !r.verification_required.is_empty()
+                {
                     line.push_str(&format!(
                         "\n  🔍 建议搜索验证: {}",
                         r.verification_required.join(", ")
@@ -939,10 +1133,7 @@ impl ClauseContext {
 
                 // 展示法规依据（Hypothesis 是推测，Verified 是确认）
                 if !r.legal_basis.is_empty() {
-                    line.push_str(&format!(
-                        "\n  法规依据: {}",
-                        r.legal_basis.join(", ")
-                    ));
+                    line.push_str(&format!("\n  法规依据: {}", r.legal_basis.join(", ")));
                 }
                 line
             })
@@ -1284,28 +1475,28 @@ mod tests {
     #[test]
     fn test_agent_id_from_str_all_builtin() {
         // 主名
-        assert_eq!(AgentId::from_str("factcheck"), Some(AgentId::FactCheck));
-        assert_eq!(AgentId::from_str("FactCheckAgent"), Some(AgentId::FactCheck));
+        assert_eq!(AgentId::parse("factcheck"), Some(AgentId::FactCheck));
+        assert_eq!(AgentId::parse("FactCheckAgent"), Some(AgentId::FactCheck));
         // 别名
-        assert_eq!(AgentId::from_str("fact_check"), Some(AgentId::FactCheck));
-        assert_eq!(AgentId::from_str("blindspot"), Some(AgentId::BlindSpot));
-        assert_eq!(AgentId::from_str("blind_spot"), Some(AgentId::BlindSpot));
-        assert_eq!(AgentId::from_str("legalverify"), Some(AgentId::LegalVerify));
-        assert_eq!(AgentId::from_str("debate"), Some(AgentId::Debate));
+        assert_eq!(AgentId::parse("fact_check"), Some(AgentId::FactCheck));
+        assert_eq!(AgentId::parse("blindspot"), Some(AgentId::BlindSpot));
+        assert_eq!(AgentId::parse("blind_spot"), Some(AgentId::BlindSpot));
+        assert_eq!(AgentId::parse("legalverify"), Some(AgentId::LegalVerify));
+        assert_eq!(AgentId::parse("debate"), Some(AgentId::Debate));
     }
 
     #[test]
     fn test_agent_id_from_str_dynamic_prefix() {
         assert_eq!(
-            AgentId::from_str("dynamic_BrandDetector"),
+            AgentId::parse("dynamic_BrandDetector"),
             Some(AgentId::Dynamic("dynamic_BrandDetector".into()))
         );
     }
 
     #[test]
     fn test_agent_id_from_str_unknown_returns_none() {
-        assert_eq!(AgentId::from_str("nonexistent"), None);
-        assert_eq!(AgentId::from_str(""), None);
+        assert_eq!(AgentId::parse("nonexistent"), None);
+        assert_eq!(AgentId::parse(""), None);
     }
 
     #[test]
@@ -1328,7 +1519,7 @@ mod tests {
     #[test]
     fn test_agent_id_all_reviewers_count() {
         let reviewers = AgentId::all_reviewers();
-        assert_eq!(reviewers.len(), 7);
+        assert_eq!(reviewers.len(), 5);
         // BlindSpot / LegalVerify / Debate 不在 reviewers 中
         assert!(!reviewers.contains(&AgentId::BlindSpot));
         assert!(!reviewers.contains(&AgentId::LegalVerify));
@@ -1386,7 +1577,10 @@ mod tests {
             agent: "SemanticRiskAgent".into(),
             no_risk: false,
             severity: RiskSeverity::High,
+            is_critical: true,
+            critical_reason: "唯一品牌且拒绝同等产品".into(),
             risk_type: "品牌指定".into(),
+            category_code: "BRAND_LOCK".into(),
             source_quote: "须采用XX品牌".into(),
             legal_basis: vec!["《政府采购法》第5条".into()],
             case_refs: vec!["case_001".into()],
@@ -1422,9 +1616,36 @@ mod tests {
         let f2: RiskFinding = serde_json::from_str(&json).expect("反序列化失败");
         assert_eq!(f.risk_id, f2.risk_id);
         assert_eq!(f.case_refs, f2.case_refs);
+        assert!(f2.is_critical);
+        assert_eq!(f2.critical_reason, "唯一品牌且拒绝同等产品");
         assert!(f2.suggested_agent.is_some());
         assert_eq!(f2.suggested_agent.unwrap().agent_name, "测试Agent");
         assert_eq!(f2.citations.len(), 1);
+    }
+
+    #[test]
+    fn test_normalize_criticality_enforces_four_level_contract() {
+        let mut finding = RiskFinding::no_risk_finding(
+            "R_critical".into(),
+            "ch_critical".into(),
+            "RuleEngineAgent",
+            RiskTier::High,
+            RiskTier::High,
+        );
+        finding.no_risk = false;
+        finding.severity = RiskSeverity::Medium;
+        finding.is_critical = true;
+        finding.risk_type = "地域注册限制".into();
+        finding.normalize_criticality();
+
+        assert_eq!(finding.severity, RiskSeverity::High);
+        assert!(finding.is_critical);
+        assert!(!finding.critical_reason.is_empty());
+
+        finding.no_risk = true;
+        finding.normalize_criticality();
+        assert!(!finding.is_critical);
+        assert!(finding.critical_reason.is_empty());
     }
 
     // ── GraphSnapshot 新字段 ──────────────────────────────────
@@ -1493,7 +1714,11 @@ mod tests {
 
         let ctx_with_risk = ClauseContext {
             risks: vec![RiskFinding::no_risk_finding(
-                "R_001".into(), "ch_001".into(), "T", RiskTier::Medium, RiskTier::Medium,
+                "R_001".into(),
+                "ch_001".into(),
+                "T",
+                RiskTier::Medium,
+                RiskTier::Medium,
             )],
             ..ctx
         };
@@ -1546,8 +1771,8 @@ mod tests {
     #[test]
     fn test_coordinator_config_defaults() {
         let config = CoordinatorConfig::default();
-        assert_eq!(config.enabled_agents.len(), 7);
-        assert!(config.enable_legal_verify);
+        assert_eq!(config.enabled_agents.len(), 5);
+        assert!(!config.enable_legal_verify); // 成本优化：默认关闭 LLM 法条验证
         assert_eq!(config.legal_verify_max_turns, 3);
         assert_eq!(config.blind_spot_max_turns, 10);
         assert!(config.blind_spot_fallback_enabled);

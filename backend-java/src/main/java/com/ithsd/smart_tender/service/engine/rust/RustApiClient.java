@@ -72,7 +72,10 @@ public class RustApiClient {
     public RustProcessResponse uploadDocument(Path filePath, String filename) {
         try {
             byte[] fileBytes = Files.readAllBytes(filePath);
-            byte[] body = buildMultipartBody(filename, fileBytes);
+            byte[] body = buildMultipartBody(
+                    filename,
+                    fileBytes,
+                    properties.getDesensitizationMode());
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(properties.apiUrl("/api/v1/documents")))
@@ -456,10 +459,20 @@ public class RustApiClient {
     /**
      * 构建 multipart/form-data 请求体。
      */
-    private byte[] buildMultipartBody(String filename, byte[] fileBytes) throws IOException {
+    private byte[] buildMultipartBody(
+            String filename,
+            byte[] fileBytes,
+            String desensitizationMode
+    ) throws IOException {
         List<byte[]> parts = new ArrayList<>();
 
-        // Part header
+        String modePart = "--" + MULTIPART_BOUNDARY + "\r\n"
+                + "Content-Disposition: form-data; name=\"desensitize_mode\"\r\n\r\n"
+                + (desensitizationMode == null ? "low" : desensitizationMode)
+                + "\r\n";
+        parts.add(modePart.getBytes(StandardCharsets.UTF_8));
+
+        // File part
         String partHeader = "--" + MULTIPART_BOUNDARY + "\r\n"
                 + "Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"\r\n"
                 + "Content-Type: application/octet-stream\r\n\r\n";

@@ -13,7 +13,7 @@
 //! 因为 Agent 能意识到可能只是 PDF 提取的版式问题。
 
 use crate::domain::chunk::Chunk;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,11 +67,11 @@ pub struct ReadSectionTool {
 }
 
 impl ReadSectionTool {
-    pub fn new(
-        chunks: Arc<HashMap<String, Chunk>>,
-        chunk_order: Arc<Vec<String>>,
-    ) -> Self {
-        Self { chunks, chunk_order }
+    pub fn new(chunks: Arc<HashMap<String, Chunk>>, chunk_order: Arc<Vec<String>>) -> Self {
+        Self {
+            chunks,
+            chunk_order,
+        }
     }
 
     fn read_one(&self, chunk_id: &str) -> Result<SectionDetail> {
@@ -81,10 +81,7 @@ impl ReadSectionTool {
             .ok_or_else(|| anyhow!("chunk_id 不存在: {}", chunk_id))?;
 
         // 查找当前 chunk 在有序列表中的位置
-        let pos = self
-            .chunk_order
-            .iter()
-            .position(|id| id == chunk_id);
+        let pos = self.chunk_order.iter().position(|id| id == chunk_id);
 
         let (prev_chunk, next_chunk) = if let Some(idx) = pos {
             let prev = if idx > 0 {

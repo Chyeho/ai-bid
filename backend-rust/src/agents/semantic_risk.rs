@@ -19,12 +19,10 @@ use crate::agents::types::AgentId;
 pub use crate::agents::prompts::SEMANTIC_RISK_SYSTEM_PROMPT;
 
 /// 创建 SemanticRiskAgent 的 ReActLoop 实例。
-pub fn create_semantic_risk_agent(
-    llm: Box<dyn LlmClient>,
-    tools: ToolRegistry,
-) -> ReActLoop {
+pub fn create_semantic_risk_agent(llm: Box<dyn LlmClient>, tools: ToolRegistry) -> ReActLoop {
     let registry = AgentRegistry::builtin();
-    let def = registry.get(AgentId::SemanticRisk)
+    let def = registry
+        .get(AgentId::SemanticRisk)
         .expect("SemanticRiskAgent 定义必须存在于 AgentRegistry");
     let config = def.to_agent_config();
     ReActLoop::new(config, llm, tools)

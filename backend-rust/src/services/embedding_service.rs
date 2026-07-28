@@ -90,14 +90,9 @@ pub fn embed_chunks(
         let batch_n = batch_idx + 1;
         let batch_refs: Vec<&str> = chunk_batch.iter().map(|s| s.as_str()).collect();
 
-        let batch_output = model
-            .embed(batch_refs, None)
-            .with_context(|| {
-                format!(
-                    "BGE-M3 批量编码失败 (batch {}/{})",
-                    batch_n, total_batches
-                )
-            })?;
+        let batch_output = model.embed(batch_refs, None).with_context(|| {
+            format!("BGE-M3 批量编码失败 (batch {}/{})", batch_n, total_batches)
+        })?;
 
         all_dense.extend(batch_output.dense);
 
@@ -232,8 +227,7 @@ fn encode_serial_with_progress(texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let options = fastembed::Bgem3InitOptions::default()
         .with_cache_dir(std::path::PathBuf::from("models"))
         .with_show_download_progress(false);
-    let mut model =
-        fastembed::Bgem3Embedding::try_new(options).context("无法加载 BGE-M3 模型")?;
+    let mut model = fastembed::Bgem3Embedding::try_new(options).context("无法加载 BGE-M3 模型")?;
 
     const BATCH_SIZE: usize = 32;
     let total = texts.len();
@@ -312,9 +306,8 @@ fn encode_data_parallel(texts: &[String], k: usize) -> Result<Vec<Vec<f32>>> {
         let options = fastembed::Bgem3InitOptions::default()
             .with_cache_dir(std::path::PathBuf::from("models"))
             .with_show_download_progress(false);
-        let model = fastembed::Bgem3Embedding::try_new(options).with_context(|| {
-            format!("无法加载 BGE-M3 模型 (实例 {}/{})", i + 1, actual_k)
-        })?;
+        let model = fastembed::Bgem3Embedding::try_new(options)
+            .with_context(|| format!("无法加载 BGE-M3 模型 (实例 {}/{})", i + 1, actual_k))?;
         models.push(model);
         println!(
             "    [实例 {}/{}] 加载完成, 耗时 {:.1}s",
@@ -333,7 +326,7 @@ fn encode_data_parallel(texts: &[String], k: usize) -> Result<Vec<Vec<f32>>> {
     std::thread::scope(|s| -> Result<Vec<Vec<f32>>> {
         let handles: Vec<_> = partitions
             .into_iter()
-            .zip(models.into_iter())
+            .zip(models)
             .enumerate()
             .map(|(thread_idx, ((start_idx, text_batch), mut model))| {
                 s.spawn(move || -> Result<(usize, Vec<Vec<f32>>)> {
@@ -349,8 +342,7 @@ fn encode_data_parallel(texts: &[String], k: usize) -> Result<Vec<Vec<f32>>> {
                     let mut dense = Vec::with_capacity(thread_total);
 
                     for (sub_idx, sub_chunk) in text_batch.chunks(SUB_BATCH).enumerate() {
-                        let sub_refs: Vec<&str> =
-                            sub_chunk.iter().map(|s| s.as_str()).collect();
+                        let sub_refs: Vec<&str> = sub_chunk.iter().map(|s| s.as_str()).collect();
                         let sub_output = model.embed(sub_refs, None).with_context(|| {
                             format!(
                                 "BGE-M3 编码失败 (线程 {}, sub-batch {})",
@@ -395,10 +387,7 @@ fn encode_data_parallel(texts: &[String], k: usize) -> Result<Vec<Vec<f32>>> {
         }
         results.sort_by_key(|(idx, _)| *idx);
 
-        let all_dense: Vec<Vec<f32>> = results
-            .into_iter()
-            .flat_map(|(_, dense)| dense)
-            .collect();
+        let all_dense: Vec<Vec<f32>> = results.into_iter().flat_map(|(_, dense)| dense).collect();
 
         anyhow::ensure!(
             all_dense.len() == total,
@@ -428,7 +417,7 @@ fn encode_data_parallel(texts: &[String], k: usize) -> Result<Vec<Vec<f32>>> {
 pub enum EmbeddingClient {
     /// 本地 BGE-M3 ONNX 模型（fastembed-rs, Mutex 保护 &mut 访问）
     Local {
-        model: std::sync::Mutex<fastembed::Bgem3Embedding>,
+        model: Box<std::sync::Mutex<fastembed::Bgem3Embedding>>,
     },
     /// 远程 text-embedding-v4 API（DashScope）
     Remote {
@@ -453,11 +442,11 @@ impl EmbeddingClient {
                 let options = fastembed::Bgem3InitOptions::default()
                     .with_cache_dir(std::path::PathBuf::from("models"))
                     .with_show_download_progress(false);
-                let model = fastembed::Bgem3Embedding::try_new(options)
-                    .context("无法加载 BGE-M3 模型")?;
+                let model =
+                    fastembed::Bgem3Embedding::try_new(options).context("无法加载 BGE-M3 模型")?;
                 println!("  嵌入引擎: 本地 BGE-M3");
                 Ok(Self::Local {
-                    model: std::sync::Mutex::new(model),
+                    model: Box::new(std::sync::Mutex::new(model)),
                 })
             }
         }
@@ -473,10 +462,12 @@ impl EmbeddingClient {
         match self {
             Self::Local { model } => {
                 let mut model = model.lock().unwrap();
-                let output = model
-                    .embed(texts.to_vec(), None)
-                    .context("BGE-M3 查询编码失败")?;
-                Ok(output.dense.into_iter().map(l2_normalize_in_place).collect())
+                let output = model.embed(texts, None).context("BGE-M3 查询编码失败")?;
+                Ok(output
+                    .dense
+                    .into_iter()
+                    .map(l2_normalize_in_place)
+                    .collect())
             }
             Self::Remote { client } => {
                 let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
@@ -583,20 +574,19 @@ pub fn embed_chunks_remote(
 /// ```
 pub fn save_index(index: &DocumentVectorIndex, dir: &str, stem: &str) -> Result<()> {
     let index_dir = format!("{}/{}_embedding_index", dir, stem);
-    fs::create_dir_all(&index_dir)
-        .with_context(|| format!("无法创建输出目录: {}", index_dir))?;
+    fs::create_dir_all(&index_dir).with_context(|| format!("无法创建输出目录: {}", index_dir))?;
 
     // chunk_meta.json
     let meta = index.to_meta();
     let meta_path = format!("{}/chunk_meta.json", index_dir);
-    let meta_json =
-        serde_json::to_string_pretty(&meta).context("序列化 IndexMeta 失败")?;
-    fs::write(&meta_path, meta_json)
-        .with_context(|| format!("无法写入: {}", meta_path))?;
+    let meta_json = serde_json::to_string_pretty(&meta).context("序列化 IndexMeta 失败")?;
+    fs::write(&meta_path, meta_json).with_context(|| format!("无法写入: {}", meta_path))?;
 
     // vectors_1024d_f32le.bin（原始 f32 二进制，无序列化开销）
     let bin_path = format!("{}/vectors_1024d_f32le.bin", index_dir);
-    let mut buf = Vec::with_capacity(index.embeddings.len() * index.embeddings.first().map(|v| v.len()).unwrap_or(0) * 4);
+    let mut buf = Vec::with_capacity(
+        index.embeddings.len() * index.embeddings.first().map(|v| v.len()).unwrap_or(0) * 4,
+    );
     for emb in &index.embeddings {
         for &val in emb {
             buf.extend_from_slice(&val.to_le_bytes());
@@ -613,10 +603,7 @@ pub fn save_index(index: &DocumentVectorIndex, dir: &str, stem: &str) -> Result<
     println!("    chunk_meta.json          — 元数据");
     println!(
         "    vectors_1024d_f32le.bin  — {:.1} KB",
-        index.embeddings.len()
-            * index.embeddings.first().map(|v| v.len()).unwrap_or(0)
-            * 4
-            / 1024
+        index.embeddings.len() * index.embeddings.first().map(|v| v.len()).unwrap_or(0) * 4 / 1024
     );
 
     Ok(())
@@ -645,8 +632,7 @@ pub fn load_index(dir: &str, stem: &str) -> Result<DocumentVectorIndex> {
 
     // vectors_1024d_f32le.bin
     let bin_path = index_path.join("vectors_1024d_f32le.bin");
-    let bin = fs::read(&bin_path)
-        .with_context(|| format!("无法读取: {}", bin_path.display()))?;
+    let bin = fs::read(&bin_path).with_context(|| format!("无法读取: {}", bin_path.display()))?;
 
     let dim = meta.dimension;
     let count = meta.chunk_count;
@@ -667,12 +653,7 @@ pub fn load_index(dir: &str, stem: &str) -> Result<DocumentVectorIndex> {
             (0..dim)
                 .map(|j| {
                     let off = j * 4;
-                    f32::from_le_bytes([
-                        slice[off],
-                        slice[off + 1],
-                        slice[off + 2],
-                        slice[off + 3],
-                    ])
+                    f32::from_le_bytes([slice[off], slice[off + 1], slice[off + 2], slice[off + 3]])
                 })
                 .collect()
         })

@@ -1,4 +1,4 @@
-﻿//! ReAct 循环引擎 — Agent 审查的核心运行时。
+//! ReAct 循环引擎 — Agent 审查的核心运行时。
 //!
 //! 设计文档 §7.2-7.3 定义的 while 循环模式：
 //! ```text
@@ -20,13 +20,14 @@
 
 use crate::agents::bus::{AgentBus, BusMessage};
 use crate::agents::review_event::{ReviewEvent, ReviewEventBus};
+use crate::agents::risk_taxonomy;
 use crate::agents::session_graph::SessionGraph;
 use crate::agents::trace::{TraceEventType, TraceLog};
 use crate::agents::types::*;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
@@ -174,8 +175,12 @@ pub trait LlmClient: Send + Sync {
 /// ReAct 循环中使用的对话消息（与提供商无关）。
 #[derive(Debug, Clone)]
 pub enum ChatMessage {
-    System { content: String },
-    User { content: String },
+    System {
+        content: String,
+    },
+    User {
+        content: String,
+    },
     Assistant {
         content: Option<String>,
         tool_calls: Option<Vec<ToolCall>>,
@@ -184,6 +189,25 @@ pub enum ChatMessage {
         tool_call_id: String,
         content: String,
     },
+}
+
+const MAX_FINDINGS_PER_CHUNK: usize = 5;
+
+#[derive(Debug, Default)]
+struct ChunkReviewOutput {
+    findings: Vec<RiskFinding>,
+    has_more: bool,
+    coverage: Vec<String>,
+}
+
+impl ChunkReviewOutput {
+    fn single(finding: RiskFinding) -> Self {
+        Self {
+            findings: vec![finding],
+            has_more: false,
+            coverage: Vec::new(),
+        }
+    }
 }
 
 // ─── 共享 Helper ───────────────────────────────────────────────
@@ -264,23 +288,142 @@ fn summarize_tool_arg(name: &str, args: &serde_json::Value) -> String {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "?".to_string()),
         "output_finding" => {
+            if let Some(items) = args.get("findings").and_then(|v| v.as_array()) {
+                return format!("批量结论:{}条", items.len());
+            }
             let risk_type = args
                 .get("risk_type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
-            let no_risk = args.get("no_risk").and_then(|v| v.as_bool()).unwrap_or(false);
+            let no_risk = args
+                .get("no_risk")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if no_risk {
                 format!("无风险:{}", risk_type)
             } else {
-                let severity = args
-                    .get("severity")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let severity = args.get("severity").and_then(|v| v.as_str()).unwrap_or("?");
                 format!("{}:{}", severity, risk_type)
             }
         }
         _ => args.to_string(),
     }
+}
+
+fn severity_name(severity: RiskSeverity) -> &'static str {
+    match severity {
+        RiskSeverity::High => "high",
+        RiskSeverity::Medium => "medium",
+        RiskSeverity::Low => "low",
+        RiskSeverity::Info => "info",
+    }
+}
+
+/// 解析新批量信封，同时兼容迁移前的单 Finding 对象。
+///
+/// 批量模式按元素独立解析：一条格式错误不会连带丢弃其他合法发现。
+fn parse_finding_batch(
+    args: &serde_json::Value,
+) -> std::result::Result<(Vec<RiskFinding>, bool, Vec<String>), String> {
+    if let Some(items) = args.get("findings").and_then(|v| v.as_array()) {
+        let mut findings = Vec::new();
+        let mut errors = Vec::new();
+        for (idx, item) in items.iter().take(MAX_FINDINGS_PER_CHUNK).enumerate() {
+            match serde_json::from_value::<RiskFinding>(item.clone()) {
+                Ok(finding) if !finding.no_risk => findings.push(finding),
+                Ok(_) => {
+                    // 新协议用空数组表达无风险；忽略模型误放入数组的 no_risk 占位项。
+                }
+                Err(e) => errors.push(format!("findings[{}]: {}", idx, e)),
+            }
+        }
+        if findings.is_empty() && !items.is_empty() && !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        let overflowed = items.len() > MAX_FINDINGS_PER_CHUNK;
+        let has_more = args
+            .get("has_more")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            || overflowed
+            || !errors.is_empty();
+        let coverage = args
+            .get("coverage")
+            .and_then(|v| v.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Ok((findings, has_more, coverage));
+    }
+
+    // 兼容旧模型/测试桩：单对象响应继续可用。
+    let mut fixed = args.clone();
+    if let Some(cids) = fixed.get("clause_ids")
+        && let Some(raw) = cids.as_str()
+    {
+        if let Ok(parsed) = serde_json::from_str::<Vec<String>>(raw) {
+            fixed["clause_ids"] = serde_json::json!(parsed);
+        } else if let Some(object) = fixed.as_object_mut() {
+            object.remove("clause_ids");
+        }
+    }
+    serde_json::from_value::<RiskFinding>(fixed)
+        .map(|finding| {
+            if finding.no_risk {
+                (Vec::new(), false, Vec::new())
+            } else {
+                (vec![finding], false, Vec::new())
+            }
+        })
+        .map_err(|e| e.to_string())
+}
+
+fn numbered_item_count(text: &str) -> usize {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            let mut chars = trimmed.chars();
+            let Some(first) = chars.next() else {
+                return false;
+            };
+            first.is_ascii_digit() && matches!(chars.next(), Some('.' | '、' | ')' | '）'))
+        })
+        .count()
+}
+
+fn same_finding_identity(a: &RiskFinding, b: &RiskFinding) -> bool {
+    let a_category = if a.category_code.trim().is_empty() {
+        a.risk_type.trim()
+    } else {
+        a.category_code.trim()
+    };
+    let b_category = if b.category_code.trim().is_empty() {
+        b.risk_type.trim()
+    } else {
+        b.category_code.trim()
+    };
+    if canonical_category(a_category) != canonical_category(b_category) {
+        return false;
+    }
+    let aq = a.source_quote.trim();
+    let bq = b.source_quote.trim();
+    !aq.is_empty() && !bq.is_empty() && (aq == bq || aq.contains(bq) || bq.contains(aq))
+}
+
+fn canonical_category(value: &str) -> String {
+    let upper = value.trim().to_uppercase();
+    if let Some((prefix, remainder)) = upper.split_once('_')
+        && prefix.len() >= 2
+        && prefix.starts_with(|c: char| c.is_ascii_alphabetic())
+        && prefix[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        return remainder.to_string();
+    }
+    upper
 }
 
 // ─── ReActLoop ─────────────────────────────────────────────────
@@ -369,10 +512,7 @@ impl ReActLoop {
     }
 
     /// 设置指标采集器（用于记录 LLM 调用明细）。
-    pub fn with_metrics(
-        mut self,
-        collector: Arc<Mutex<crate::metrics::MetricsCollector>>,
-    ) -> Self {
+    pub fn with_metrics(mut self, collector: Arc<Mutex<crate::metrics::MetricsCollector>>) -> Self {
         self.metrics = Some(collector);
         self
     }
@@ -393,7 +533,7 @@ impl ReActLoop {
 
     /// 审查一组条款。每个条款运行独立的 ReAct 循环。
     pub async fn review(&self, clauses: &[ReviewClause]) -> Vec<RiskFinding> {
-        let mut findings = Vec::with_capacity(clauses.len());
+        let mut findings = Vec::new();
         let total = clauses.len();
 
         for (idx, clause) in clauses.iter().enumerate() {
@@ -404,8 +544,7 @@ impl ReActLoop {
                 .as_ref()
                 .map(|g| g.next_risk_id())
                 .unwrap_or_else(|| format!("R_{:03}", idx + 1));
-            let finding = self.react_loop(clause, &risk_id).await;
-            findings.push(finding);
+            findings.extend(self.review_single(clause, &risk_id).await);
 
             // 每审完一条条款后，发送 AgentProgress（SSE 实时推送）
             if let Some(ref events) = self.review_events {
@@ -428,8 +567,69 @@ impl ReActLoop {
     ///
     /// 与 `react_loop` 功能相同，但作为公开 API 暴露，
     /// 使外部并行调度器可以为每条条款创建独立 task。
-    pub async fn review_single(&self, clause: &ReviewClause, risk_id: &str) -> RiskFinding {
-        self.react_loop(clause, risk_id).await
+    pub async fn review_single(&self, clause: &ReviewClause, risk_id: &str) -> Vec<RiskFinding> {
+        let mut output = self.react_loop(clause, risk_id).await;
+        let numbered_items = numbered_item_count(&clause.text);
+        let supports_supplement = !matches!(
+            self.config.name.as_str(),
+            "LegalVerifyAgent" | "DebateAgent"
+        );
+        let should_supplement = supports_supplement
+            && (output.has_more
+                || output.findings.len() >= MAX_FINDINGS_PER_CHUNK
+                || (numbered_items >= 2
+                    && output.findings.len() < numbered_items.min(MAX_FINDINGS_PER_CHUNK)));
+
+        if should_supplement {
+            let already_found = output
+                .findings
+                .iter()
+                .map(|f| {
+                    format!(
+                        "{}：{}",
+                        if f.category_code.is_empty() {
+                            &f.risk_type
+                        } else {
+                            &f.category_code
+                        },
+                        f.source_quote
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut supplement_clause = clause.clone();
+            supplement_clause.text = format!(
+                "[自适应补充扫描]\n\
+                 第一遍已覆盖风险域：{}\n\
+                 第一遍已发现（禁止重复输出）：\n{}\n\n\
+                 请重新逐段检查下列原条款，只输出尚未覆盖的独立问题。\
+                 如果没有遗漏，返回空findings。\n\n[原条款]\n{}",
+                output.coverage.join(", "),
+                if already_found.is_empty() {
+                    "（无）"
+                } else {
+                    &already_found
+                },
+                clause.text
+            );
+            let supplement_id = self
+                .graph
+                .as_ref()
+                .map(|g| g.next_risk_id())
+                .unwrap_or_else(|| format!("{}_S", risk_id));
+            let supplement = self.react_loop(&supplement_clause, &supplement_id).await;
+            for finding in supplement.findings {
+                if !output
+                    .findings
+                    .iter()
+                    .any(|existing| same_finding_identity(existing, &finding))
+                {
+                    output.findings.push(finding);
+                }
+            }
+        }
+
+        output.findings
     }
 
     // ── 核心 ReAct 循环 ─────────────────────────────────────
@@ -445,7 +645,7 @@ impl ReActLoop {
     ///     execute tool_calls → append results
     /// max_turns exhausted → force_output
     /// ```
-    async fn react_loop(&self, clause: &ReviewClause, risk_id: &str) -> RiskFinding {
+    async fn react_loop(&self, clause: &ReviewClause, risk_id: &str) -> ChunkReviewOutput {
         let agent_name = &self.config.name;
         let initial_tier = clause.tier;
         let max_turns = clause.effective_max_turns(self.config.default_max_turns);
@@ -460,22 +660,35 @@ impl ReActLoop {
             std::collections::HashMap::new(); // chunk_id → 读取次数
         let mut found_actionable_law = false; // 是否已找到可直接支撑判断的法规
         let mut post_law_search_count = 0u32; // 找到法规后仍继续搜索的次数
-        let mut seen_law_refs: std::collections::HashSet<String> =
-            std::collections::HashSet::new(); // 已见过的法规引用（用于判断搜索是否带来新信息）
+        let mut seen_law_refs: std::collections::HashSet<String> = std::collections::HashSet::new(); // 已见过的法规引用（用于判断搜索是否带来新信息）
 
         // ── 条款头日志 ──
         let _print_lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
         let sep = "═".repeat(60);
-        eprintln!("\n{sep}\n{rid} | {cid} | tier={tier} | max_turns={max} | pages {ps}-{pe}\n{sep}",
-            sep=sep, rid=risk_id, cid=clause.chunk_id, tier=initial_tier, max=max_turns,
-            ps=clause.page_start+1, pe=clause.page_end+1);
+        eprintln!(
+            "\n{sep}\n{rid} | {cid} | tier={tier} | max_turns={max} | pages {ps}-{pe}\n{sep}",
+            sep = sep,
+            rid = risk_id,
+            cid = clause.chunk_id,
+            tier = initial_tier,
+            max = max_turns,
+            ps = clause.page_start + 1,
+            pe = clause.page_end + 1
+        );
         eprintln!("章节: {}", clause.section_path.join(" > "));
         let text_preview = if clause.text.chars().count() > 500 {
-            format!("{}…[截断]", clause.text.chars().take(500).collect::<String>())
+            format!(
+                "{}…[截断]",
+                clause.text.chars().take(500).collect::<String>()
+            )
         } else {
             clause.text.clone()
         };
-        eprintln!("条款文本 ({} 字符):\n{}\n", clause.text.chars().count(), text_preview);
+        eprintln!(
+            "条款文本 ({} 字符):\n{}\n",
+            clause.text.chars().count(),
+            text_preview
+        );
         drop(_print_lock);
 
         // 构建初始对话
@@ -483,10 +696,44 @@ impl ReActLoop {
             ChatMessage::System {
                 content: self.config.system_prompt.clone(),
             },
+            ChatMessage::System {
+                content: "【多问题输出协议】一个 chunk 可能同时包含多个相互独立的问题。\
+                    在调用 output_finding 前必须逐段复核，不得只挑最严重的一条。\
+                    使用 findings 数组逐条输出；不同事实、不同风险类别或不同修改建议应拆成不同 finding。\
+                    无风险返回 findings=[]；最多5条，仍有遗漏可能时 has_more=true。\
+                    每条必须填写稳定 category_code 和只支撑该问题的 source_quote。"
+                    .to_string(),
+            },
             ChatMessage::User {
                 content: self.format_clause_prompt(clause),
             },
         ];
+        let rule_candidates =
+            risk_taxonomy::review_candidates_for_agent(&clause.text, agent_name.as_str());
+        if !rule_candidates.is_empty() {
+            let checklist = rule_candidates
+                .iter()
+                .map(|category| {
+                    format!(
+                        "- {}（{}）",
+                        category,
+                        risk_taxonomy::display_name(category).unwrap_or("未命名风险")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            conversation.insert(
+                2,
+                ChatMessage::System {
+                    content: format!(
+                        "【规则预检候选｜责任 Agent 必查】\n{checklist}\n\
+                         这些是关键词预检候选，不等于最终定罪。你必须逐项核对原文：\
+                         成立则在 findings 中分别输出；不成立则不要输出。禁止遗漏候选，\
+                         禁止把多个候选合并成一条，source_quote 必须只引用对应问题。"
+                    ),
+                },
+            );
+        }
 
         let mut turn = 0u32;
         while turn < max_turns as u32 {
@@ -508,7 +755,8 @@ impl ReActLoop {
             if let Some(graph) = &self.graph {
                 let ctx = graph.query_clause_context(&clause.chunk_id);
                 if ctx.has_prior_risks() || !ctx.reviewed_by.is_empty() {
-                    let mut graph_msg = String::from("[Session 记忆] 以下条款已被审查或存在已知发现:\n");
+                    let mut graph_msg =
+                        String::from("[Session 记忆] 以下条款已被审查或存在已知发现:\n");
 
                     if !ctx.reviewed_by.is_empty() {
                         graph_msg.push_str(&format!(
@@ -529,10 +777,7 @@ impl ReActLoop {
                     if !ctx.linked_chunks.is_empty() {
                         graph_msg.push_str("\n关联条款:\n");
                         for lc in &ctx.linked_chunks {
-                            graph_msg.push_str(&format!(
-                                "- {} ({})\n",
-                                lc.chunk_id, lc.reason
-                            ));
+                            graph_msg.push_str(&format!("- {} ({})\n", lc.chunk_id, lc.reason));
                         }
                     }
 
@@ -546,20 +791,16 @@ impl ReActLoop {
                     if !ctx.contradictions.is_empty() {
                         graph_msg.push_str("\n⚠️ 已知条款矛盾:\n");
                         for lc in &ctx.contradictions {
-                            graph_msg.push_str(&format!(
-                                "- 与 {} 矛盾: {}\n",
-                                lc.chunk_id, lc.reason
-                            ));
+                            graph_msg
+                                .push_str(&format!("- 与 {} 矛盾: {}\n", lc.chunk_id, lc.reason));
                         }
                     }
 
-                    conversation.push(ChatMessage::System {
-                        content: graph_msg,
-                    });
+                    conversation.push(ChatMessage::System { content: graph_msg });
                 }
 
                 // 记录当前 Agent 已审查此条款
-                if let Some(agent_id) = AgentId::from_str(agent_name) {
+                if let Some(agent_id) = AgentId::parse(agent_name) {
                     graph.add_reviewed_by(&clause.chunk_id, agent_id);
                 }
             }
@@ -569,8 +810,8 @@ impl ReActLoop {
                 let mut rx_guard = rx.lock().await;
                 while let Ok(msg) = rx_guard.try_recv() {
                     // 不接收自己发送的消息
-                    let own_id = AgentId::from_str(agent_name);
-                    if own_id.map_or(true, |oid| msg.from != oid) {
+                    let own_id = AgentId::parse(agent_name);
+                    if own_id.is_none_or(|oid| msg.from != oid) {
                         // Trace: 记录接收事件
                         {
                             let mut trace = self.trace.lock().await;
@@ -578,10 +819,7 @@ impl ReActLoop {
                                 TraceEventType::AgentBusRecv,
                                 turn,
                                 Some(&clause.chunk_id),
-                                &format!(
-                                    "Received bus msg from {}: {}",
-                                    msg.from, msg.summary
-                                ),
+                                &format!("Received bus msg from {}: {}", msg.from, msg.summary),
                                 serde_json::json!({
                                     "from": msg.from.to_string(),
                                     "risk_type": msg.risk_type,
@@ -607,7 +845,9 @@ impl ReActLoop {
             let remaining = max_turns as u32 - turn;
             let tool_choice = if remaining <= 1 {
                 // 最后一轮：锁定 output_finding，引擎收回终止控制权
-                ToolChoice::Specific { name: "output_finding".to_string() }
+                ToolChoice::Specific {
+                    name: "output_finding".to_string(),
+                }
             } else if remaining == 2 {
                 // 倒数第二轮：要求必须调用工具，阻止纯文本输出
                 ToolChoice::Required
@@ -642,11 +882,7 @@ impl ReActLoop {
 
             let tool_defs = self.tools.definitions_filtered(&self.config.tool_names);
             let api_start = std::time::Instant::now();
-            let response = match self
-                .llm
-                .chat(&conversation, &tool_defs, &tool_choice)
-                .await
-            {
+            let response = match self.llm.chat(&conversation, &tool_defs, &tool_choice).await {
                 Ok(r) => {
                     let api_duration_ms = api_start.elapsed().as_millis() as u64;
 
@@ -666,20 +902,18 @@ impl ReActLoop {
                             .map(|t| t.to_string());
                         let usage = r.usage.as_ref();
                         let mut collector = metrics.lock().await;
-                        collector.record_llm_call(
-                            crate::metrics::schema::LlmCallRecord {
-                                agent_name: agent_name.clone(),
-                                turn: turn as usize,
-                                tokens_input: usage.map(|u| u.input_tokens).unwrap_or(0),
-                                tokens_output: usage.map(|u| u.output_tokens).unwrap_or(0),
-                                duration_ms: api_duration_ms,
-                                tools_called: tools_called.clone(),
-                                tool_args,
-                                thought_preview,
-                                produced_finding: r.has_output_finding(),
-                                finding_parsed_ok: false, // 由后续 output_finding 解析更新
-                            },
-                        );
+                        collector.record_llm_call(crate::metrics::schema::LlmCallRecord {
+                            agent_name: agent_name.clone(),
+                            turn: turn as usize,
+                            tokens_input: usage.map(|u| u.input_tokens).unwrap_or(0),
+                            tokens_output: usage.map(|u| u.output_tokens).unwrap_or(0),
+                            duration_ms: api_duration_ms,
+                            tools_called: tools_called.clone(),
+                            tool_args,
+                            thought_preview,
+                            produced_finding: r.has_output_finding(),
+                            finding_parsed_ok: false, // 由后续 output_finding 解析更新
+                        });
                     }
 
                     // SSE: call_log — 每次 LLM 调用的统计信息
@@ -712,8 +946,7 @@ impl ReActLoop {
                     // SSE: agent_thought — 发送完整推理内容到前端
                     if let Some(ref events) = self.review_events {
                         let full_content = r.content.clone().unwrap_or_default();
-                        let thought_summary = full_content
-                            .chars().take(200).collect::<String>();
+                        let thought_summary = full_content.chars().take(200).collect::<String>();
                         if !full_content.is_empty() {
                             events.emit(&ReviewEvent::Trace {
                                 event_type: "agent_thought".to_string(),
@@ -737,15 +970,17 @@ impl ReActLoop {
                         let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
                         eprintln!(
                             "\n── [{agent} turn {turn}/{max}] ─────────────────────────────────────────────",
-                            agent = agent_name, turn = turn, max = max_turns
+                            agent = agent_name,
+                            turn = turn,
+                            max = max_turns
                         );
                         // 完整输出 LLM 的推理内容（不截断）
-                        if let Some(ref content) = r.content {
-                            if !content.is_empty() {
-                                eprintln!("💭 推理内容 ({} 字符):", content.chars().count());
-                                for line in content.lines() {
-                                    eprintln!("   {}", line);
-                                }
+                        if let Some(ref content) = r.content
+                            && !content.is_empty()
+                        {
+                            eprintln!("💭 推理内容 ({} 字符):", content.chars().count());
+                            for line in content.lines() {
+                                eprintln!("   {}", line);
                             }
                         }
                         // 工具调用及参数
@@ -765,14 +1000,17 @@ impl ReActLoop {
                 }
                 Err(e) => {
                     // LLM 调用失败 → 输出错误 finding
-                    return RiskFinding {
+                    return ChunkReviewOutput::single(RiskFinding {
                         risk_id: risk_id.to_string(),
                         clause_ids: vec![clause.chunk_id.clone()],
                         block_ids: Vec::new(),
                         agent: agent_name.clone(),
                         no_risk: true,
                         severity: RiskSeverity::Info,
+                        is_critical: false,
+                        critical_reason: String::new(),
                         risk_type: "LLM调用失败".to_string(),
+                        category_code: "ENGINE_ERROR".to_string(),
                         source_quote: String::new(),
                         legal_basis: Vec::new(),
                         case_refs: Vec::new(),
@@ -793,7 +1031,7 @@ impl ReActLoop {
                         page_number: None,
                         section_path: None,
                         context: None,
-                    };
+                    });
                 }
             };
 
@@ -804,18 +1042,15 @@ impl ReActLoop {
             if let Some(rx) = &self.bus_rx {
                 let mut rx_guard = rx.lock().await;
                 while let Ok(msg) = rx_guard.try_recv() {
-                    let own_id = AgentId::from_str(agent_name);
-                    if own_id.map_or(true, |oid| msg.from != oid) {
+                    let own_id = AgentId::parse(agent_name);
+                    if own_id.is_none_or(|oid| msg.from != oid) {
                         {
                             let mut trace = self.trace.lock().await;
                             trace.log(
                                 TraceEventType::AgentBusRecv,
                                 turn,
                                 Some(&clause.chunk_id),
-                                &format!(
-                                    "Late bus msg from {}: {}",
-                                    msg.from, msg.summary
-                                ),
+                                &format!("Late bus msg from {}: {}", msg.from, msg.summary),
                                 serde_json::json!({
                                     "from": msg.from.to_string(),
                                     "risk_type": msg.risk_type,
@@ -837,103 +1072,77 @@ impl ReActLoop {
             }
 
             // ── Step 3: 检查 output_verification_batch（批量法条验证模式）──
-            if response.has_output_verification_batch() {
-                if let Some(args) = response.get_verification_batch() {
-                    // 将批量验证结果编码为特殊 finding，由 Coordinator 解析
-                    let raw_pretty = serde_json::to_string_pretty(args);
-                    {
-                        let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
-                        eprintln!("📤 output_verification_batch 原始参数:");
-                        eprintln!("{}", raw_pretty.as_deref().unwrap_or(&format!("{:?}", args)));
-                    }
-
-                    return RiskFinding {
-                        risk_id: risk_id.to_string(),
-                        clause_ids: vec![clause.chunk_id.clone()],
-                        block_ids: Vec::new(),
-                        agent: agent_name.clone(),
-                        no_risk: false,
-                        severity: RiskSeverity::Info,
-                        risk_type: "__BATCH_VERIFICATION__".to_string(),
-                        source_quote: serde_json::to_string(args).unwrap_or_default(),
-                        legal_basis: Vec::new(),
-                        case_refs: Vec::new(),
-                        reason: "批量法条验证结果（由 Coordinator 解析）".to_string(),
-                        suggestion: String::new(),
-                        confidence: 1.0,
-                        initial_tier,
-                        final_tier: tier,
-                        tier_escalated,
-                        truncated: false,
-                        suggested_agent: None,
-                        citations: Vec::new(),
-                        finding_role: FindingRole::default(),
-                        knowledge_source: String::new(),
-                        verification_required: Vec::new(),
-                        hypothesized_by: Vec::new(),
-                        verified_by: Vec::new(),
-                        page_number: None,
-                        section_path: None,
-                        context: None,
-                    };
+            if response.has_output_verification_batch()
+                && let Some(args) = response.get_verification_batch()
+            {
+                // 将批量验证结果编码为特殊 finding，由 Coordinator 解析
+                let raw_pretty = serde_json::to_string_pretty(args);
+                {
+                    let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
+                    eprintln!("📤 output_verification_batch 原始参数:");
+                    eprintln!(
+                        "{}",
+                        raw_pretty.as_deref().unwrap_or(&format!("{:?}", args))
+                    );
                 }
+
+                return ChunkReviewOutput::single(RiskFinding {
+                    risk_id: risk_id.to_string(),
+                    clause_ids: vec![clause.chunk_id.clone()],
+                    block_ids: Vec::new(),
+                    agent: agent_name.clone(),
+                    no_risk: false,
+                    severity: RiskSeverity::Info,
+                    is_critical: false,
+                    critical_reason: String::new(),
+                    risk_type: "__BATCH_VERIFICATION__".to_string(),
+                    category_code: "BATCH_VERIFICATION".to_string(),
+                    source_quote: serde_json::to_string(args).unwrap_or_default(),
+                    legal_basis: Vec::new(),
+                    case_refs: Vec::new(),
+                    reason: "批量法条验证结果（由 Coordinator 解析）".to_string(),
+                    suggestion: String::new(),
+                    confidence: 1.0,
+                    initial_tier,
+                    final_tier: tier,
+                    tier_escalated,
+                    truncated: false,
+                    suggested_agent: None,
+                    citations: Vec::new(),
+                    finding_role: FindingRole::default(),
+                    knowledge_source: String::new(),
+                    verification_required: Vec::new(),
+                    hypothesized_by: Vec::new(),
+                    verified_by: Vec::new(),
+                    page_number: None,
+                    section_path: None,
+                    context: None,
+                });
             }
 
             // ── Step 3: 检查 output_finding ──
-            if response.has_output_finding() {
-                if let Some(args) = response.get_finding() {
-                    // ── 始终打印 output_finding 原始参数（加锁）──
-                    let raw_pretty = serde_json::to_string_pretty(args);
-                    {
-                        let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
-                        eprintln!("📤 output_finding 原始参数:");
-                        eprintln!("{}", raw_pretty.as_deref().unwrap_or(&format!("{:?}", args)));
-                    }
+            if response.has_output_finding()
+                && let Some(args) = response.get_finding()
+            {
+                // ── 始终打印 output_finding 原始参数（加锁）──
+                let raw_pretty = serde_json::to_string_pretty(args);
+                {
+                    let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
+                    eprintln!("📤 output_finding 原始参数:");
+                    eprintln!(
+                        "{}",
+                        raw_pretty.as_deref().unwrap_or(&format!("{:?}", args))
+                    );
+                }
 
-                    // ── 预处理 args：修复 LLM 常见的 JSON 格式错误 ──
-                    let mut fixed_args = args.clone();
-                    // 修复 clause_ids: 如果是字符串 "[...]" → 尝试解析为数组
-                    if let Some(cids) = fixed_args.get("clause_ids") {
-                        if cids.is_string() {
-                            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(cids.as_str().unwrap()) {
-                                fixed_args["clause_ids"] = serde_json::json!(parsed);
-                            } else {
-                                // 无法解析，删除让 #[serde(default)] 兜底
-                                fixed_args.as_object_mut().unwrap().remove("clause_ids");
-                            }
-                        }
-                    }
-                    // 确保 clause_ids 存在（#[serde(default)] 已处理，但显式添加更安全）
-                    if !fixed_args.as_object().map(|o| o.contains_key("clause_ids")).unwrap_or(false) {
-                        fixed_args["clause_ids"] = serde_json::json!([]);
-                    }
-
-                    match serde_json::from_value::<RiskFinding>(fixed_args) {
-                        Ok(mut finding) => {
-                            finding.clause_ids = vec![clause.chunk_id.clone()];
-                            finding.agent = agent_name.clone();
-                            finding.initial_tier = initial_tier;
-                            finding.final_tier = tier;
-                            finding.tier_escalated = tier_escalated;
-                            finding.truncated = false;
-                            finding.risk_id = risk_id.to_string();
-
-                            // ── 自动填充定位字段（§6.4 框架填充约定） ──
-                            // types.rs 注释声明"框架从关联 ReviewClause 自动填充"，
-                            // 此前缺失实现 → 前端收到 page_number=null → 显示"页码待定位"。
-                            // +1: clause.page_start 是 0-based，前端 PDF 页码是 1-based
-                            // 且 JS 中 0 是 falsy 会导致 if(!page)return 短路
-                            finding.page_number = Some(clause.page_start + 1);
-                            finding.section_path = Some(clause.section_path.clone());
-                            finding.context = Some(clause.text.chars().take(500).collect());
-                            // block_ids 暂不自动填充（clause 不含 source_block_ids），
-                            // 前端会走 text-match / bbox-api fallback 路径。
-
-                            // ── 自动填充 citations：从 search_cache 提取所有搜索来源 URL ──
-                            finding.citations = self.extract_citations().await;
-                            if !finding.citations.is_empty() {
-                                let refs: Vec<String> = finding
-                                    .citations
+                match parse_finding_batch(args) {
+                    Ok((mut findings, has_more, coverage)) => {
+                        let citations = self.extract_citations().await;
+                        let citation_text = if citations.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                citations
                                     .iter()
                                     .enumerate()
                                     .map(|(i, c)| {
@@ -949,32 +1158,39 @@ impl ReActLoop {
                                             )
                                         }
                                     })
-                                    .collect();
-                                finding.reason = format!(
-                                    "{}\n\n📎 搜索来源:\n{}",
-                                    finding.reason,
-                                    refs.join("\n")
-                                );
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            )
+                        };
+
+                        for (idx, finding) in findings.iter_mut().enumerate() {
+                            finding.no_risk = false;
+                            finding.normalize_criticality();
+                            finding.clause_ids = vec![clause.chunk_id.clone()];
+                            finding.agent = agent_name.clone();
+                            finding.initial_tier = initial_tier;
+                            finding.final_tier = tier;
+                            finding.tier_escalated = tier_escalated;
+                            finding.truncated = false;
+                            finding.risk_id = if idx == 0 {
+                                risk_id.to_string()
+                            } else {
+                                self.graph
+                                    .as_ref()
+                                    .map(|g| g.next_risk_id())
+                                    .unwrap_or_else(|| format!("{}_{:02}", risk_id, idx + 1))
+                            };
+                            finding.page_number = Some(clause.page_start + 1);
+                            finding.section_path = Some(clause.section_path.clone());
+                            finding.context = Some(clause.text.chars().take(500).collect());
+                            finding.citations = citations.clone();
+                            if let Some(ref refs) = citation_text {
+                                finding.reason =
+                                    format!("{}\n\n📎 搜索来源:\n{}", finding.reason, refs);
                             }
 
-                            {
-                                let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
-                                eprintln!("✅ output_finding 解析成功，审查完成");
-                            }
-                            // 标记最近一次 LLM 调用的 finding 解析成功
-                            if let Some(ref metrics) = self.metrics {
-                                let mut collector = metrics.lock().await;
-                                collector.mark_last_finding_parsed_ok();
-                            }
-
-                            // SSE: output_finding — 发送完整发现数据到前端
                             if let Some(ref events) = self.review_events {
-                                let sev_str = match finding.severity {
-                                    RiskSeverity::High => "high",
-                                    RiskSeverity::Medium => "medium",
-                                    RiskSeverity::Low => "low",
-                                    RiskSeverity::Info => "info",
-                                };
+                                let sev_str = severity_name(finding.severity);
                                 events.emit(&ReviewEvent::Trace {
                                     event_type: "output_finding".to_string(),
                                     agent_name: agent_name.clone(),
@@ -982,9 +1198,12 @@ impl ReActLoop {
                                     clause_id: Some(clause.chunk_id.clone()),
                                     summary: format!("发现: {} ({})", finding.risk_type, sev_str),
                                     payload: Some(serde_json::json!({
-                                        "risk_id": risk_id,
+                                        "risk_id": finding.risk_id,
                                         "severity": sev_str,
+                                        "is_critical": finding.is_critical,
+                                        "critical_reason": finding.critical_reason,
                                         "risk_type": finding.risk_type,
+                                        "category_code": finding.category_code,
                                         "confidence": finding.confidence,
                                         "no_risk": finding.no_risk,
                                         "reason": finding.reason,
@@ -1003,91 +1222,86 @@ impl ReActLoop {
                                 });
                             }
 
-                            // ── 实时广播 High 风险到 AgentBus ──
-                            // 不等所有条款完成，让其他 Agent 在本轮即可感知
-                            if finding.severity == RiskSeverity::High {
-                                if let Some(bus) = &self.bus {
-                                    if let Some(agent_id) = AgentId::from_str(agent_name) {
-                                        bus.broadcast(
-                                            agent_id.clone(),
-                                            finding.severity,
-                                            &finding.reason,
-                                            &finding.clause_ids,
-                                            &finding.risk_type,
-                                        );
-                                        // Trace: 记录发送事件
-                                        {
-                                            let mut trace = self.trace.lock().await;
-                                            trace.log(
-                                                TraceEventType::AgentBusSend,
-                                                turn,
-                                                Some(&clause.chunk_id),
-                                                &format!(
-                                                    "High risk broadcast: {} ({})",
-                                                    finding.risk_type, finding.severity
-                                                ),
-                                                serde_json::json!({
-                                                    "from": agent_id.to_string(),
-                                                    "risk_type": finding.risk_type,
-                                                    "clause_ids": finding.clause_ids,
-                                                    "severity": "high",
-                                                }),
-                                            );
-                                        }
-                                        // SSE: agent_bus_send
-                                        if let Some(ref events) = self.review_events {
-                                            events.emit(&ReviewEvent::Trace {
-                                                event_type: "agent_bus_send".to_string(),
-                                                agent_name: agent_name.clone(),
-                                                turn,
-                                                clause_id: Some(clause.chunk_id.clone()),
-                                                summary: format!("High risk broadcast: {} ({})", finding.risk_type, finding.severity),
-                                                payload: Some(serde_json::json!({
-                                                    "from": agent_id.to_string(),
-                                                    "risk_type": finding.risk_type,
-                                                    "clause_ids": finding.clause_ids,
-                                                    "severity": "high",
-                                                })),
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-
-                            return finding;
-                        }
-                        Err(e) => {
-                            // ── 关键调试：打印原始 JSON + 解析错误（加锁）──
-                            let raw_json = serde_json::to_string_pretty(args)
-                                .unwrap_or_else(|_| format!("{:?}", args));
+                            if finding.severity == RiskSeverity::High
+                                && let Some(bus) = &self.bus
+                                && let Some(agent_id) = AgentId::parse(agent_name)
                             {
-                                let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
-                                eprintln!(
-                                    "⚠️  output_finding JSON 解析失败!\n\
+                                bus.broadcast(
+                                    agent_id.clone(),
+                                    finding.severity,
+                                    &finding.reason,
+                                    &finding.clause_ids,
+                                    &finding.risk_type,
+                                );
+                                let mut trace = self.trace.lock().await;
+                                trace.log(
+                                    TraceEventType::AgentBusSend,
+                                    turn,
+                                    Some(&clause.chunk_id),
+                                    &format!(
+                                        "High risk broadcast: {} ({})",
+                                        finding.risk_type, finding.severity
+                                    ),
+                                    serde_json::json!({
+                                        "from": agent_id.to_string(),
+                                        "risk_type": finding.risk_type,
+                                        "category_code": finding.category_code,
+                                        "clause_ids": finding.clause_ids,
+                                        "severity": "high",
+                                        "is_critical": finding.is_critical,
+                                    }),
+                                );
+                            }
+                        }
+
+                        {
+                            let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
+                            eprintln!(
+                                "✅ output_finding 解析成功：{} 条发现，has_more={}",
+                                findings.len(),
+                                has_more
+                            );
+                        }
+                        if let Some(ref metrics) = self.metrics {
+                            metrics.lock().await.mark_last_finding_parsed_ok();
+                        }
+
+                        return ChunkReviewOutput {
+                            findings,
+                            has_more,
+                            coverage,
+                        };
+                    }
+                    Err(e) => {
+                        // ── 关键调试：打印原始 JSON + 解析错误（加锁）──
+                        let raw_json = serde_json::to_string_pretty(args)
+                            .unwrap_or_else(|_| format!("{:?}", args));
+                        {
+                            let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
+                            eprintln!(
+                                "⚠️  output_finding JSON 解析失败!\n\
                                      ─── LLM 原始 output_finding arguments ───\n\
                                      {raw}\n\
                                      ─── END ───\n\
                                      解析错误: {err}\n\
-                                     期望 8 个必填字段: no_risk, severity, risk_type, source_quote, legal_basis, reason, suggestion, confidence",
-                                    raw = raw_json, err = e,
-                                );
-                            }
-                            // 追加详细的重试提示
-                            conversation.push(ChatMessage::Tool {
+                                     期望批量信封: findings(最多5条), has_more, coverage",
+                                raw = raw_json,
+                                err = e,
+                            );
+                        }
+                        // 追加详细的重试提示
+                        conversation.push(ChatMessage::Tool {
                                 tool_call_id: "output_finding".to_string(),
                                 content: format!(
                                     "output_finding 参数解析错误: {}\n\
-                                     请检查是否包含全部 8 个必填字段:\n\
-                                     no_risk, severity, risk_type, source_quote,\n\
-                                     legal_basis, reason, suggestion, confidence\n\
-                                     legal_basis 必须是数组（即使为空写 []）。\n\
-                                     clause_ids 必须是字符串数组，如 [\"ch_000\"]。\n\
+                                     请返回 {{\"findings\":[...],\"has_more\":false,\"coverage\":[...]}}。\n\
+                                     每条 finding 必须包含 no_risk, severity, is_critical, critical_reason,\n\
+                                     risk_type, category_code, source_quote, legal_basis, reason, suggestion, confidence。\n\
                                      请修正后重新调用 output_finding。",
                                     e
                                 ),
                             });
-                            continue;
-                        }
+                        continue;
                     }
                 }
             }
@@ -1120,24 +1334,28 @@ impl ReActLoop {
 
                 // SSE: tool_call — 发送完整工具参数到前端
                 if let Some(ref events) = self.review_events {
-                    let query = tc.arguments.get("query")
+                    let query = tc
+                        .arguments
+                        .get("query")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     let summary = if query.is_empty() {
                         format!("调用工具: {}", tool_name)
                     } else {
-                        format!("{}: {}", tool_name,
-                            query.chars().take(80).collect::<String>())
+                        format!(
+                            "{}: {}",
+                            tool_name,
+                            query.chars().take(80).collect::<String>()
+                        )
                     };
                     // 构建精简的 payload：含完整参数 + 人类可读描述
                     let mut tc_payload = tc.arguments.clone();
                     // 为 read_section 补充人类可读的 clause_id 描述
-                    if tool_name == "read_section" {
-                        if let Some(cid) = tc.arguments.get("clause_id").and_then(|v| v.as_str()) {
-                            tc_payload["_clause_label"] = serde_json::Value::String(
-                                format!("条款 {}", cid)
-                            );
-                        }
+                    if tool_name == "read_section"
+                        && let Some(cid) = tc.arguments.get("clause_id").and_then(|v| v.as_str())
+                    {
+                        tc_payload["_clause_label"] =
+                            serde_json::Value::String(format!("条款 {}", cid));
                     }
                     events.emit(&ReviewEvent::Trace {
                         event_type: "tool_call".to_string(),
@@ -1161,9 +1379,16 @@ impl ReActLoop {
                         Err(e) => serde_json::json!({ "error": format!("{}", e) }),
                     }
                 } else {
-                    let available: Vec<String> = self.tools.definitions_filtered(&self.config.tool_names)
+                    let available: Vec<String> = self
+                        .tools
+                        .definitions_filtered(&self.config.tool_names)
                         .iter()
-                        .filter_map(|d| d.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()).map(String::from))
+                        .filter_map(|d| {
+                            d.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .map(String::from)
+                        })
                         .collect();
                     serde_json::json!({
                         "error": format!("工具 '{}' 未注册。当前可用工具: {}。请只使用以上工具。", tool_name, available.join(", "))
@@ -1175,21 +1400,43 @@ impl ReActLoop {
                     let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
                     match tool_name.as_str() {
                         "read_section" => {
-                            let title = result.get("section_path")
+                            let title = result
+                                .get("section_path")
                                 .and_then(|p| p.as_array())
-                                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" > "))
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(" > ")
+                                })
                                 .unwrap_or_else(|| "(未知)".to_string());
-                            let chars = result.get("char_count")
+                            let chars = result
+                                .get("char_count")
                                 .and_then(|v| v.as_i64())
                                 .unwrap_or(0);
                             eprintln!("📖 read_section → {} ({} 字符)", title, chars);
                         }
                         "search_knowledge" | "web_search" | "search_document" => {
                             let hit_count = Self::count_search_hits(&result);
-                            let query = tc.arguments.get("query").and_then(|q| q.as_str()).unwrap_or("?");
-                            let cat = tc.arguments.get("category").and_then(|c| c.as_str()).unwrap_or("");
-                            let cat_str = if cat.is_empty() { String::new() } else { format!(" [{}]", cat) };
-                            eprintln!("🔍 {} → \"{}\"{} = {} 条结果", tool_name, query, cat_str, hit_count);
+                            let query = tc
+                                .arguments
+                                .get("query")
+                                .and_then(|q| q.as_str())
+                                .unwrap_or("?");
+                            let cat = tc
+                                .arguments
+                                .get("category")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("");
+                            let cat_str = if cat.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" [{}]", cat)
+                            };
+                            eprintln!(
+                                "🔍 {} → \"{}\"{} = {} 条结果",
+                                tool_name, query, cat_str, hit_count
+                            );
                             // 打印前几条标题（兼容 sources 和 hits 两种格式）
                             let items: Option<&Vec<serde_json::Value>> = result
                                 .get("sources")
@@ -1205,10 +1452,18 @@ impl ReActLoop {
                                         eprintln!("   #{}. {} — {}", i + 1, t, url);
                                     } else {
                                         // SearchHit 格式 (search_document): title + score + snippet
-                                        let s = h.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0);
-                                        let snip = h.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
+                                        let s =
+                                            h.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0);
+                                        let snip =
+                                            h.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
                                         let snip_short: String = snip.chars().take(200).collect();
-                                        eprintln!("   #{}. [score={:.2}] {} — {}", i + 1, s, t, snip_short);
+                                        eprintln!(
+                                            "   #{}. [score={:.2}] {} — {}",
+                                            i + 1,
+                                            s,
+                                            t,
+                                            snip_short
+                                        );
                                     }
                                 }
                             }
@@ -1223,12 +1478,19 @@ impl ReActLoop {
                         let hits = Self::count_search_hits(&result);
                         format!("{} 返回 {} 条结果", tool_name, hits)
                     } else if tool_name == "read_section" {
-                        let chars = result.get("char_count")
+                        let chars = result
+                            .get("char_count")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        let section_title = result.get("section_path")
+                        let section_title = result
+                            .get("section_path")
                             .and_then(|p| p.as_array())
-                            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" > "))
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" > ")
+                            })
                             .unwrap_or_else(|| "(未知)".to_string());
                         format!("read_section → {} ({} 字符)", section_title, chars)
                     } else {
@@ -1236,7 +1498,9 @@ impl ReActLoop {
                     };
 
                     // 构建 payload：根据工具类型提取前端需要的数据
-                    let payload = if self.is_search_tool(tool_name) || tool_name == "search_document" {
+                    let payload = if self.is_search_tool(tool_name)
+                        || tool_name == "search_document"
+                    {
                         let sources = Self::extract_search_sources_for_sse(&result, 5);
                         let items: Vec<serde_json::Value> = result
                             .get("sources")
@@ -1254,9 +1518,7 @@ impl ReActLoop {
                             }))
                         }
                     } else if tool_name == "read_section" {
-                        let text = result.get("text")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
+                        let text = result.get("text").and_then(|t| t.as_str()).unwrap_or("");
                         // 发送前 2000 字符的文本预览（足够前端判断内容）
                         let text_preview: String = text.chars().take(2000).collect();
                         Some(serde_json::json!({
@@ -1288,44 +1550,43 @@ impl ReActLoop {
                 }
 
                 // ★ read_section 重复读取检测
-                if tool_name == "read_section" {
-                    if let Some(chunk_id) = tc
+                if tool_name == "read_section"
+                    && let Some(chunk_id) = tc
                         .arguments
                         .get("chunk_id")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
-                    {
-                        let count = read_section_count.entry(chunk_id.clone()).or_insert(0);
-                        *count += 1;
-                        if *count >= 3 {
-                            // 同一 chunk 读了 3 次 → 强制停止
-                            conversation.push(ChatMessage::Tool {
-                                tool_call_id: tc.id.clone(),
-                                content: serde_json::to_string(&result).unwrap_or_default(),
-                            });
-                            conversation.push(ChatMessage::System {
+                {
+                    let count = read_section_count.entry(chunk_id.clone()).or_insert(0);
+                    *count += 1;
+                    if *count >= 3 {
+                        // 同一 chunk 读了 3 次 → 强制停止
+                        conversation.push(ChatMessage::Tool {
+                            tool_call_id: tc.id.clone(),
+                            content: serde_json::to_string(&result).unwrap_or_default(),
+                        });
+                        conversation.push(ChatMessage::System {
                                 content: format!(
                                     "🛑 你已经 {} 次读取 chunk_id={} 的原文。不要再重复读了。\n\
                                     基于已掌握的原文信息 + 搜索到的法规依据，立即调用 output_finding 输出结论。",
                                     count, chunk_id
                                 ),
                             });
-                            continue;
-                        } else if *count >= 2 {
-                            // 同一 chunk 读了 2 次 → 温和提示
-                            conversation.push(ChatMessage::Tool {
-                                tool_call_id: tc.id.clone(),
-                                content: serde_json::to_string(&result).unwrap_or_default(),
-                            });
-                            conversation.push(ChatMessage::System {
-                                content: format!(
-                                    "⚠️ 你已经 {} 次读取 chunk_id={} 的原文。\
+                        continue;
+                    } else if *count >= 2 {
+                        // 同一 chunk 读了 2 次 → 温和提示
+                        conversation.push(ChatMessage::Tool {
+                            tool_call_id: tc.id.clone(),
+                            content: serde_json::to_string(&result).unwrap_or_default(),
+                        });
+                        conversation.push(ChatMessage::System {
+                            content: format!(
+                                "⚠️ 你已经 {} 次读取 chunk_id={} 的原文。\
                                     如果原文信息已经够用，请尽快 output_finding，不要反复精读。",
-                                    count, chunk_id
-                                ),
-                            });
-                            continue;
-                        }
+                                count, chunk_id
+                            ),
+                        });
+                        continue;
                     }
                 }
 
@@ -1369,10 +1630,11 @@ impl ReActLoop {
                                 content: serde_json::to_string(&result).unwrap_or_default(),
                             });
                             conversation.push(ChatMessage::System {
-                                content: "⛔ 这是第 3 次空搜索。你的下一个动作必须是 output_finding。\n\
+                                content:
+                                    "⛔ 这是第 3 次空搜索。你的下一个动作必须是 output_finding。\n\
                                     不调用 output_finding 将导致 max_turns 耗尽、审查截断。\n\
                                     立即输出 output_finding，no_risk 设为 true 亦可。"
-                                    .to_string(),
+                                        .to_string(),
                             });
                             // 不 continue——让正常流程追加 tool result（保持对话一致性）
                         }
@@ -1445,7 +1707,7 @@ impl ReActLoop {
 
                             // ★ Tier 分级硬上限
                             let search_limit = match tier {
-                                RiskTier::Low => 1,   // L1 纯格式/信息，基本不需要搜索
+                                RiskTier::Low => 1,    // L1 纯格式/信息，基本不需要搜索
                                 RiskTier::Medium => 2, // L2 标准审查，1-2 次法规搜索够用
                                 RiskTier::High => 4,   // L3 深度审查，需要多角度搜索
                             };
@@ -1459,10 +1721,16 @@ impl ReActLoop {
                                         "此条款为 L1 格式/信息类，无需搜索。\n".to_string()
                                     }
                                     RiskTier::Medium => {
-                                        format!("你已调用 web_search {} 次，达到此级别条款的上限。\n", search_limit)
+                                        format!(
+                                            "你已调用 web_search {} 次，达到此级别条款的上限。\n",
+                                            search_limit
+                                        )
                                     }
                                     RiskTier::High => {
-                                        format!("你已调用 web_search {} 次，达到硬性上限。\n", search_limit)
+                                        format!(
+                                            "你已调用 web_search {} 次，达到硬性上限。\n",
+                                            search_limit
+                                        )
                                     }
                                 };
                                 conversation.push(ChatMessage::System {
@@ -1491,7 +1759,10 @@ impl ReActLoop {
                     self.check_tier_escalation(&conversation, initial_tier, tier_escalated);
                 if new_tier != tier {
                     let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
-                    eprintln!("🔄 分级变化: {} → {} (escalated={})", tier, new_tier, escalated);
+                    eprintln!(
+                        "🔄 分级变化: {} → {} (escalated={})",
+                        tier, new_tier, escalated
+                    );
                 }
                 tier = new_tier;
                 tier_escalated = escalated;
@@ -1507,14 +1778,14 @@ impl ReActLoop {
             let _lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
             eprintln!("⛔ max_turns 耗尽! {}", summary);
         }
-        RiskFinding::truncated_finding(
+        ChunkReviewOutput::single(RiskFinding::truncated_finding(
             risk_id.to_string(),
             clause.chunk_id.clone(),
             agent_name,
             initial_tier,
             tier,
             &summary,
-        )
+        ))
     }
 
     // ── 辅助方法 ────────────────────────────────────────────
@@ -1574,9 +1845,15 @@ impl ReActLoop {
 
     fn format_clause_prompt(&self, clause: &ReviewClause) -> String {
         let tier_hint = match clause.tier {
-            RiskTier::Low => "【L1 - 快速扫描】此条款为格式/信息类，风险极低。条款原文已在上方给出，直接分析即可——一般在 1-2 轮内输出结论（no_risk=true 或若有格式缺失则标记）。不要调用 read_section（原文已在上下文中），不要调用 web_search（没有可核查的阈值）。",
-            RiskTier::Medium => "【L2 - 标准审查】条款原文已在上方给出，请直接分析原文并搜索法规进行对照。需要关联条款时用 search_document → read_section。web_search 最多 2 次。",
-            RiskTier::High => "【L3 - 深度审查】此条款含高风险关键词（品牌/地域/排他性），请深度审查：分析原文 → web_search(法规→案例) → search_document(跨条款联动) → 需要时 read_section(精读确认关联条款) → 输出结论。web_search 最多 4 次。",
+            RiskTier::Low => {
+                "【L1 - 快速扫描】此条款为格式/信息类，风险极低。条款原文已在上方给出，直接分析即可——一般在 1-2 轮内输出结论（no_risk=true 或若有格式缺失则标记）。不要调用 read_section（原文已在上下文中），不要调用 web_search（没有可核查的阈值）。"
+            }
+            RiskTier::Medium => {
+                "【L2 - 标准审查】条款原文已在上方给出，请直接分析原文并搜索法规进行对照。需要关联条款时用 search_document → read_section。web_search 最多 2 次。"
+            }
+            RiskTier::High => {
+                "【L3 - 深度审查】此条款含高风险关键词（品牌/地域/排他性），请深度审查：分析原文 → web_search(法规→案例) → search_document(跨条款联动) → 需要时 read_section(精读确认关联条款) → 输出结论。web_search 最多 4 次。"
+            }
         };
 
         let mut prompt = format!(
@@ -1645,9 +1922,7 @@ impl ReActLoop {
                 }
 
                 if !summary_items.is_empty() {
-                    prompt.push_str(
-                        "\n\n📋 法规摘要（已预载入搜索缓存，可直接引用）:\n",
-                    );
+                    prompt.push_str("\n\n📋 法规摘要（已预载入搜索缓存，可直接引用）:\n");
                     prompt.push_str(&summary_items.join("\n"));
                     prompt.push('\n');
                 }
@@ -1674,8 +1949,15 @@ impl ReActLoop {
 
         // 拼接前 2 轮对话检查 Agent 是否表达了高风险怀疑
         let suspicious_phrases = [
-            "可能存在", "值得深挖", "需要进一步", "不排除", "疑似",
-            "涉嫌", "潜在风险", "值得关注", "需进一步核实",
+            "可能存在",
+            "值得深挖",
+            "需要进一步",
+            "不排除",
+            "疑似",
+            "涉嫌",
+            "潜在风险",
+            "值得关注",
+            "需进一步核实",
         ];
 
         let combined: String = conversation
@@ -1693,13 +1975,9 @@ impl ReActLoop {
 
         match (current_tier, has_suspicious) {
             // L1/L2 + 可疑信号 → 升级到 L3
-            (RiskTier::Low, true) | (RiskTier::Medium, true) => {
-                (RiskTier::High, true)
-            }
+            (RiskTier::Low, true) | (RiskTier::Medium, true) => (RiskTier::High, true),
             // L3 + 无信号 → 降级到 L2
-            (RiskTier::High, false) => {
-                (RiskTier::Medium, false)
-            }
+            (RiskTier::High, false) => (RiskTier::Medium, false),
             _ => (current_tier, false),
         }
     }
@@ -1783,10 +2061,10 @@ impl ReActLoop {
             // sources 为空，检查 answer 是否有实质内容
             // DashScope 可能返回详细的 AI 回答但没有显式来源 URL——
             // 此时 answer 本身就是有效搜索结果，不应触发空搜索拦截
-            if let Some(answer) = result.get("answer").and_then(|a| a.as_str()) {
-                if answer.chars().count() > 100 {
-                    return 1; // 有实质回答 → 视为 1 条有效结果
-                }
+            if let Some(answer) = result.get("answer").and_then(|a| a.as_str())
+                && answer.chars().count() > 100
+            {
+                return 1; // 有实质回答 → 视为 1 条有效结果
             }
             return 0;
         }
@@ -1818,13 +2096,17 @@ impl ReActLoop {
     }
 
     /// 从搜索结果中提取 top-N 条 {title, url}，用于 SSE 推送前端展示。
-    fn extract_search_sources_for_sse(result: &serde_json::Value, n: usize) -> Vec<serde_json::Value> {
+    fn extract_search_sources_for_sse(
+        result: &serde_json::Value,
+        n: usize,
+    ) -> Vec<serde_json::Value> {
         let mut items: Vec<serde_json::Value> = Vec::new();
         // 1) DashScope / SearXNG: sources 数组
         if let Some(arr) = result.get("sources").and_then(|s| s.as_array()) {
             for item in arr.iter().take(n) {
                 let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                let url = item.get("url")
+                let url = item
+                    .get("url")
                     .or_else(|| item.get("link"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
@@ -1834,17 +2116,17 @@ impl ReActLoop {
             }
         }
         // 2) search_document: hits 数组（没有 URL，用 score + snippet 代替）
-        if items.is_empty() {
-            if let Some(arr) = result.get("hits").and_then(|h| h.as_array()) {
-                for item in arr.iter().take(n) {
-                    let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                    let score = item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    if !title.is_empty() {
-                        items.push(serde_json::json!({
-                            "title": title,
-                            "score": format!("{:.2}", score)
-                        }));
-                    }
+        if items.is_empty()
+            && let Some(arr) = result.get("hits").and_then(|h| h.as_array())
+        {
+            for item in arr.iter().take(n) {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let score = item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if !title.is_empty() {
+                    items.push(serde_json::json!({
+                        "title": title,
+                        "score": format!("{:.2}", score)
+                    }));
                 }
             }
         }
@@ -1852,14 +2134,8 @@ impl ReActLoop {
     }
 
     /// 带缓存的 search_knowledge / web_search 调用。
-    async fn cached_search_knowledge(
-        &self,
-        args: &serde_json::Value,
-    ) -> serde_json::Value {
-        let query = args
-            .get("query")
-            .and_then(|q| q.as_str())
-            .unwrap_or("");
+    async fn cached_search_knowledge(&self, args: &serde_json::Value) -> serde_json::Value {
+        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
         let category = args
             .get("category")
             .and_then(|c| c.as_str())
@@ -1878,8 +2154,7 @@ impl ReActLoop {
             }
             // 2) 模糊 bigram Jaccard（query vs cache key），阈值 ≥ 0.25
             if !query.is_empty() && !cache.is_empty() {
-                let q_chars: Vec<char> =
-                    query.chars().filter(|c| !c.is_whitespace()).collect();
+                let q_chars: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).collect();
                 let q_bigrams: std::collections::HashSet<String> = q_chars
                     .windows(2)
                     .map(|w| w.iter().collect::<String>())
@@ -1888,8 +2163,7 @@ impl ReActLoop {
                     let mut best_score: f64 = 0.0;
                     let mut best_value: Option<&serde_json::Value> = None;
                     for ((k, _cat), v) in cache.iter() {
-                        let k_chars: Vec<char> =
-                            k.chars().filter(|c| !c.is_whitespace()).collect();
+                        let k_chars: Vec<char> = k.chars().filter(|c| !c.is_whitespace()).collect();
                         let k_bigrams: std::collections::HashSet<String> = k_chars
                             .windows(2)
                             .map(|w| w.iter().collect::<String>())
@@ -1913,7 +2187,9 @@ impl ReActLoop {
 
         // 执行实际搜索
         // 同时兼容旧名 search_knowledge 和新名 web_search
-        let result = if let Some(tool) = self.tools.get("web_search")
+        let result = if let Some(tool) = self
+            .tools
+            .get("web_search")
             .or_else(|| self.tools.get("search_knowledge"))
         {
             match tool.execute(args.clone()).await {
@@ -1932,7 +2208,6 @@ impl ReActLoop {
 
         result
     }
-
 
     /// 从 search_cache 中提取所有搜索来源 URL，去重后返回 Citation 列表。
     ///
@@ -2007,7 +2282,10 @@ pub async fn review_clauses_parallel<F>(
     agent_name: &str,
 ) -> Vec<RiskFinding>
 where
-    F: Fn(Box<dyn LlmClient>, crate::agents::tools::ToolRegistry) -> ReActLoop + Send + Sync + 'static,
+    F: Fn(Box<dyn LlmClient>, crate::agents::tools::ToolRegistry) -> ReActLoop
+        + Send
+        + Sync
+        + 'static,
 {
     if clauses.is_empty() {
         return vec![];
@@ -2037,12 +2315,11 @@ where
                 .as_ref()
                 .map(|g| g.next_risk_id())
                 .unwrap_or_else(|| format!("R_{:03}", idx + 1));
-            let finding = agent.review_single(&clause, &risk_id).await;
+            let findings = agent.review_single(&clause, &risk_id).await;
 
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-            if !finding.no_risk {
-                raw_findings_total.fetch_add(1, Ordering::Relaxed);
-            }
+            let risk_count = findings.iter().filter(|f| !f.no_risk).count();
+            raw_findings_total.fetch_add(risk_count, Ordering::Relaxed);
 
             // SSE 实时进度推送
             if let Some(ref events) = events {
@@ -2060,16 +2337,16 @@ where
                 });
             }
 
-            (idx, finding)
+            (idx, findings)
         });
     }
 
     // 收集结果，按原始顺序排列
-    let mut findings: Vec<Option<RiskFinding>> = (0..total).map(|_| None).collect();
+    let mut findings: Vec<Option<Vec<RiskFinding>>> = (0..total).map(|_| None).collect();
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok((idx, finding)) => {
-                findings[idx] = Some(finding);
+            Ok((idx, clause_findings)) => {
+                findings[idx] = Some(clause_findings);
             }
             Err(e) => {
                 // task panic — 为该 clause 生成占位 finding
@@ -2082,17 +2359,88 @@ where
     findings
         .into_iter()
         .enumerate()
-        .map(|(i, f)| {
+        .flat_map(|(i, f)| {
             f.unwrap_or_else(|| {
-                RiskFinding::truncated_finding(
+                vec![RiskFinding::truncated_finding(
                     format!("R_{:03}", i + 1),
                     clauses[i].chunk_id.clone(),
                     agent_name,
                     clauses[i].tier,
                     clauses[i].tier,
                     "并行审查 task 异常终止",
-                )
+                )]
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod multi_finding_tests {
+    use super::*;
+
+    fn finding_json(category: &str, quote: &str) -> serde_json::Value {
+        serde_json::json!({
+            "no_risk": false,
+            "severity": "high",
+            "is_critical": false,
+            "critical_reason": "",
+            "risk_type": category,
+            "category_code": category,
+            "source_quote": quote,
+            "legal_basis": [],
+            "reason": "测试理由",
+            "suggestion": "测试建议",
+            "confidence": 0.9
+        })
+    }
+
+    #[test]
+    fn parses_multiple_findings_from_one_chunk() {
+        let args = serde_json::json!({
+            "findings": [
+                finding_json("LOCAL_REGISTRATION", "须在本地注册"),
+                finding_json("EXCESSIVE_DEPOSIT", "保证金为预算的5%"),
+                finding_json("UNILATERAL_CHANGE", "采购人可单方变更")
+            ],
+            "has_more": false,
+            "coverage": ["qualification", "procedure", "contract"]
+        });
+        let (findings, has_more, coverage) = parse_finding_batch(&args).unwrap();
+        assert_eq!(findings.len(), 3);
+        assert!(!has_more);
+        assert_eq!(coverage.len(), 3);
+    }
+
+    #[test]
+    fn keeps_valid_items_when_one_item_is_invalid() {
+        let args = serde_json::json!({
+            "findings": [
+                finding_json("LOCAL_REGISTRATION", "须在本地注册"),
+                {"severity": "high"}
+            ],
+            "has_more": false,
+            "coverage": []
+        });
+        let (findings, has_more, _) = parse_finding_batch(&args).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert!(has_more, "局部解析失败应触发选择性补扫");
+    }
+
+    #[test]
+    fn empty_findings_replaces_no_risk_placeholder() {
+        let args = serde_json::json!({
+            "findings": [],
+            "has_more": false,
+            "coverage": ["procedure"]
+        });
+        let (findings, has_more, _) = parse_finding_batch(&args).unwrap();
+        assert!(findings.is_empty());
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn detects_numbered_multi_issue_chunk() {
+        let text = "1.地域注册限制\n须本地注册\n2、保证金超限\n保证金5%\n3）单方变更";
+        assert_eq!(numbered_item_count(text), 3);
+    }
 }

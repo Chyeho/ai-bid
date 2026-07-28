@@ -139,10 +139,7 @@ impl TraceLog {
             return Ok(());
         }
         fs::create_dir_all(&self.output_dir)?;
-        let path = format!(
-            "{}/{}_trace.jsonl",
-            self.output_dir, self.session_id
-        );
+        let path = format!("{}/{}_trace.jsonl", self.output_dir, self.session_id);
         let mut content = String::new();
         for event in &self.events {
             content.push_str(&serde_json::to_string(event).unwrap());

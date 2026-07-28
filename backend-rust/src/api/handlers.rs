@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use utoipa::{IntoParams, ToSchema};
@@ -24,12 +24,12 @@ use crate::agents::registry::AgentRegistry;
 use crate::agents::review_event::ReviewEventBus;
 use crate::agents::session_graph::SessionGraph;
 use crate::agents::tools::{
+    ToolRegistry,
     answer_user::AnswerUserTool,
     output_finding::OutputFindingTool,
     read_section::ReadSectionTool,
     search_document::SearchDocumentTool,
     search_knowledge::{DashScopeSearchBackend, SearchKnowledgeTool},
-    ToolRegistry,
 };
 use crate::agents::trace::TraceLog;
 use crate::agents::types::{
@@ -41,10 +41,23 @@ use crate::domain::raw_document::RawDocument;
 use crate::domain::vector_index::DocumentVectorIndex;
 use crate::paths::data_path_str;
 use crate::services::chunking_service::chunk_sections;
+use crate::services::desensitize_service::{
+    DesensitizationMode, DesensitizationSummary, RedactionVault,
+};
 use crate::services::docx_convert_service::convert_docx_to_pdf;
 use crate::services::embedding_service::EmbeddingClient;
 use crate::services::llm_client::create_llm_client;
 use crate::services::pdf_extract_service::{extract_pdf_to_raw_json, extract_with_python};
+
+/// 审核期间会产生大量 trace/finding 事件。256 容量在百页文档上很容易
+/// 让 SSE 消费者落后；默认扩大到 4096，同时允许部署环境按内存预算调整。
+fn review_event_capacity() -> usize {
+    std::env::var("AIBID_REVIEW_EVENT_CAPACITY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(4096)
+        .clamp(256, 32768)
+}
 use crate::services::sectionize_service::{self, Section};
 
 // ─── 应用状态 ───────────────────────────────────────────────────────
@@ -82,16 +95,20 @@ pub struct DocumentState {
     pub raw_doc: RawDocument,
     pub sections: Vec<Section>,
     pub chunks: Vec<Chunk>,
+    /// 仅供远程模型/工具使用的脱敏条款副本。
+    pub review_chunks: Vec<Chunk>,
     pub chunk_map: Arc<HashMap<String, Chunk>>,
+    pub review_chunk_map: Arc<HashMap<String, Chunk>>,
     pub chunk_order: Arc<Vec<String>>,
     pub doc_index: Arc<DocumentVectorIndex>,
+    pub redaction_vault: Arc<RedactionVault>,
+    pub desensitization_summary: DesensitizationSummary,
 }
 
 impl AppState {
     /// 初始化全局状态。
     pub async fn init() -> anyhow::Result<Self> {
-        let embed_engine =
-            std::env::var("EMBED_ENGINE").unwrap_or_else(|_| "local".to_string());
+        let embed_engine = std::env::var("EMBED_ENGINE").unwrap_or_else(|_| "local".to_string());
 
         let embed_client = {
             let client = EmbeddingClient::from_env()?;
@@ -170,6 +187,9 @@ pub struct ProcessResponse {
     pub avg_chunk_size: f64,
     pub vector_count: usize,
     pub vector_dimension: usize,
+    pub desensitization_mode: String,
+    pub desensitized_items: usize,
+    pub desensitization_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -179,6 +199,8 @@ pub struct DocumentInfo {
     pub total_pages: usize,
     pub total_chunks: usize,
     pub vector_count: usize,
+    pub desensitization_mode: String,
+    pub desensitized_items: usize,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -232,6 +254,24 @@ pub struct ErrorResponse {
     pub detail: String,
 }
 
+fn restore_chat_response(response: &mut ChatResponse, vault: &RedactionVault) {
+    response.answer = vault.restore(&response.answer);
+    response.reasoning = response
+        .reasoning
+        .iter()
+        .map(|text| vault.restore(text))
+        .collect();
+    for reference in &mut response.references {
+        reference.quote = vault.restore(&reference.quote);
+        reference.snippet = vault.restore(&reference.snippet);
+    }
+    response.suggested_actions = response
+        .suggested_actions
+        .iter()
+        .map(|text| vault.restore(text))
+        .collect();
+}
+
 // ─── Handlers ───────────────────────────────────────────────────────
 
 /// GET /health
@@ -265,13 +305,21 @@ pub async fn process_document(
 
     let mut file_data: Vec<u8> = Vec::new();
     let mut filename = String::from("upload.pdf");
+    let mut desensitization_mode = DesensitizationMode::Low;
 
     while let Ok(Some(field)) = multipart.next_field().await {
-        if let Some(name) = field.file_name() {
-            filename = name.to_string();
-        }
-        if let Ok(data) = field.bytes().await {
-            file_data = data.to_vec();
+        let field_name = field.name().unwrap_or_default().to_string();
+        let field_filename = field.file_name().map(str::to_string);
+        if let Some(name) = field_filename {
+            filename = name;
+            if let Ok(data) = field.bytes().await {
+                file_data = data.to_vec();
+            }
+        } else if field_name == "desensitize_mode"
+            && let Ok(value) = field.text().await
+        {
+            desensitization_mode = DesensitizationMode::parse(&value)
+                .ok_or_else(|| bad_request("desensitize_mode 仅支持 off/low"))?;
         }
     }
 
@@ -279,28 +327,26 @@ pub async fn process_document(
         return Err(bad_request("上传文件为空"));
     }
 
-    println!("[REQ] 收到文件上传: filename={}, size={} bytes", filename, file_data.len());
+    println!(
+        "[REQ] 收到文件上传: filename={}, size={} bytes",
+        filename,
+        file_data.len()
+    );
 
     let tmp_dir = data_path_str("tmp");
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
-        server_error("创建临时目录失败", e)
-    })?;
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| server_error("创建临时目录失败", e))?;
     let stem = Uuid::new_v4().to_string();
     let ext = std::path::Path::new(&filename)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("pdf");
     let tmp_path = format!("{}/{}.{}", tmp_dir, stem, ext);
-    std::fs::write(&tmp_path, &file_data).map_err(|e| {
-        server_error("写入临时文件失败", e)
-    })?;
+    std::fs::write(&tmp_path, &file_data).map_err(|e| server_error("写入临时文件失败", e))?;
 
     // DOCX → PDF 转换（对齐 CLI 行为）
     let pdf_path = if ext == "docx" || ext == "doc" {
         println!("[STAGE] DOCX → PDF 转换...");
-        convert_docx_to_pdf(&tmp_path, &tmp_dir).map_err(|e| {
-            server_error("DOCX 转 PDF 失败", e)
-        })?
+        convert_docx_to_pdf(&tmp_path, &tmp_dir).map_err(|e| server_error("DOCX 转 PDF 失败", e))?
     } else {
         std::path::PathBuf::from(&tmp_path)
     };
@@ -317,18 +363,19 @@ pub async fn process_document(
             println!("Rust pdfplumber 失败: {}", e);
             println!("切换到 Python pdfplumber 兜底提取...");
             let fallback_json = format!("{}/{}_python_fallback_raw.json", tmp_dir, stem);
-            extract_with_python(&pdf_path_str, &fallback_json).map_err(|e2| {
-                server_error("PDF 解析失败（Rust 和 Python 均失败）", e2)
-            })?;
-            let json_str = std::fs::read_to_string(&fallback_json).map_err(|e2| {
-                server_error("读取 Python 兜底 JSON 失败", e2)
-            })?;
-            serde_json::from_str(&json_str).map_err(|e2| {
-                server_error("解析 Python 兜底 JSON 失败", e2)
-            })?
+            extract_with_python(&pdf_path_str, &fallback_json)
+                .map_err(|e2| server_error("PDF 解析失败（Rust 和 Python 均失败）", e2))?;
+            let json_str = std::fs::read_to_string(&fallback_json)
+                .map_err(|e2| server_error("读取 Python 兜底 JSON 失败", e2))?;
+            serde_json::from_str(&json_str)
+                .map_err(|e2| server_error("解析 Python 兜底 JSON 失败", e2))?
         }
     };
-    println!("[STAGE] 提取完成: {} 页, {} 个文本块", raw_doc.pages.len(), raw_doc.pages.iter().map(|p| p.blocks.len()).sum::<usize>());
+    println!(
+        "[STAGE] 提取完成: {} 页, {} 个文本块",
+        raw_doc.pages.len(),
+        raw_doc.pages.iter().map(|p| p.blocks.len()).sum::<usize>()
+    );
 
     // 构建磁盘输出用的 stem：{原始文件名}_{uuid前8位}
     let file_stem = std::path::Path::new(&filename)
@@ -353,12 +400,9 @@ pub async fn process_document(
     let mut raw_doc_mut = {
         // Re-serialize and deserialize to get a mutable copy
         // (RawDocument doesn't implement Clone)
-        let json = serde_json::to_value(&raw_doc).map_err(|e| {
-            server_error("序列化 RawDocument 失败", e)
-        })?;
-        serde_json::from_value(json).map_err(|e| {
-            server_error("反序列化 RawDocument 失败", e)
-        })?
+        let json = serde_json::to_value(&raw_doc)
+            .map_err(|e| server_error("序列化 RawDocument 失败", e))?;
+        serde_json::from_value(json).map_err(|e| server_error("反序列化 RawDocument 失败", e))?
     };
     sectionize_service::detect_pipe_tables(&mut raw_doc_mut);
 
@@ -379,7 +423,7 @@ pub async fn process_document(
         let block_page: HashMap<&str, usize> = raw_doc_mut
             .pages
             .iter()
-            .flat_map(|p| p.blocks.iter().map(move |b| (b.id.as_str(), p.page_index as usize)))
+            .flat_map(|p| p.blocks.iter().map(move |b| (b.id.as_str(), p.page_index)))
             .collect();
         let mut page_to_blocks: BTreeMap<usize, Vec<&crate::domain::raw_document::RawBlock>> =
             BTreeMap::new();
@@ -451,6 +495,24 @@ pub async fn process_document(
     crate::services::chunking_service::populate_bbox_refs(&mut chunks, &raw_doc);
     println!("[STAGE] 切分完成: {} 个条款块", chunks.len());
 
+    // 原文与云端审核文本双视图。原始 chunks 只留在本地用于定位和最终展示；
+    // review_chunks、远程向量和 read_section 均只包含脱敏文本。
+    let mut redaction_vault = RedactionVault::new(desensitization_mode);
+    let mut review_chunks = chunks.clone();
+    for chunk in &mut review_chunks {
+        chunk.text = redaction_vault.redact(&chunk.text);
+        chunk.section_path = chunk
+            .section_path
+            .iter()
+            .map(|part| redaction_vault.redact(part))
+            .collect();
+    }
+    let desensitization_summary = redaction_vault.summary();
+    println!(
+        "[STAGE] 文档脱敏: mode={:?}, replacements={}",
+        desensitization_summary.mode, desensitization_summary.total_replacements
+    );
+
     // ── 写盘：chunks ──
     {
         let dir = data_path_str("output/chunks");
@@ -468,14 +530,14 @@ pub async fn process_document(
         let api_client = crate::services::embedding_api_client::EmbeddingApiClient::from_env()
             .map_err(|e| server_error("嵌入 API 客户端初始化失败", e))?;
         crate::services::embedding_service::embed_chunks_remote(
-            &chunks,
+            &review_chunks,
             &chunking_config,
             &sections_output.document_id,
             &api_client,
         )
     } else {
         crate::services::embedding_service::embed_chunks_parallel(
-            &chunks,
+            &review_chunks,
             &chunking_config,
             &sections_output.document_id,
             2,
@@ -489,7 +551,8 @@ pub async fn process_document(
     // ── 写盘：embeddings ──
     {
         let dir = data_path_str("output/embeddings");
-        if let Err(e) = crate::services::embedding_service::save_index(&doc_index, &dir, &disk_stem) {
+        if let Err(e) = crate::services::embedding_service::save_index(&doc_index, &dir, &disk_stem)
+        {
             eprintln!("[DISK] embeddings 写入失败: {}", e);
         } else {
             println!("[DISK] embeddings → {}/{}_embedding_index/", dir, disk_stem);
@@ -497,6 +560,10 @@ pub async fn process_document(
     }
 
     let chunk_map: HashMap<String, Chunk> = chunks
+        .iter()
+        .map(|c| (c.chunk_id.clone(), c.clone()))
+        .collect();
+    let review_chunk_map: HashMap<String, Chunk> = review_chunks
         .iter()
         .map(|c| (c.chunk_id.clone(), c.clone()))
         .collect();
@@ -514,16 +581,29 @@ pub async fn process_document(
         raw_doc,
         sections: all_sections,
         chunks: chunks.clone(),
+        review_chunks,
         chunk_map: Arc::new(chunk_map),
+        review_chunk_map: Arc::new(review_chunk_map),
         chunk_order: Arc::new(chunk_order),
         doc_index: Arc::new(doc_index),
+        redaction_vault: Arc::new(redaction_vault),
+        desensitization_summary: desensitization_summary.clone(),
     });
-    state.documents.write().await.insert(doc_id.clone(), doc_state);
+    state
+        .documents
+        .write()
+        .await
+        .insert(doc_id.clone(), doc_state);
 
     let _ = std::fs::remove_file(&tmp_path);
 
-    println!("[OK] 文档处理完成: doc_id={}, pages={}, chunks={}, vectors={}d",
-        doc_id, total_pages, chunks.len(), vector_dimension);
+    println!(
+        "[OK] 文档处理完成: doc_id={}, pages={}, chunks={}, vectors={}d",
+        doc_id,
+        total_pages,
+        chunks.len(),
+        vector_dimension
+    );
 
     Ok(Json(ProcessResponse {
         document_id: doc_id,
@@ -532,9 +612,16 @@ pub async fn process_document(
         total_blocks,
         total_sections: sections_output.stats.total_sections,
         total_chunks: chunks.len(),
-        avg_chunk_size: if chunks.is_empty() { 0.0 } else { total_chars as f64 / chunks.len() as f64 },
+        avg_chunk_size: if chunks.is_empty() {
+            0.0
+        } else {
+            total_chars as f64 / chunks.len() as f64
+        },
         vector_count,
         vector_dimension,
+        desensitization_mode: format!("{:?}", desensitization_summary.mode).to_ascii_lowercase(),
+        desensitized_items: desensitization_summary.total_replacements,
+        desensitization_counts: desensitization_summary.counts,
     }))
 }
 
@@ -555,15 +642,18 @@ pub async fn get_document(
     Path(doc_id): Path<String>,
 ) -> Result<Json<DocumentInfo>, (StatusCode, Json<ErrorResponse>)> {
     let docs = state.documents.read().await;
-    let doc = docs.get(&doc_id).ok_or_else(|| {
-        not_found(&format!("文档不存在: {}", doc_id))
-    })?;
+    let doc = docs
+        .get(&doc_id)
+        .ok_or_else(|| not_found(&format!("文档不存在: {}", doc_id)))?;
     Ok(Json(DocumentInfo {
         document_id: doc.id.clone(),
         filename: doc.filename.clone(),
         total_pages: doc.raw_doc.pages.len(),
         total_chunks: doc.chunks.len(),
         vector_count: doc.doc_index.len(),
+        desensitization_mode: format!("{:?}", doc.desensitization_summary.mode)
+            .to_ascii_lowercase(),
+        desensitized_items: doc.desensitization_summary.total_replacements,
     }))
 }
 
@@ -592,12 +682,16 @@ pub async fn review_document(
     Json(req): Json<ReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewAccepted>), (StatusCode, Json<ErrorResponse>)> {
     let docs = state.documents.read().await;
-    let doc = docs.get(&doc_id).ok_or_else(|| {
-        not_found(&format!("文档不存在: {}", doc_id))
-    })?.clone();
+    let doc = docs
+        .get(&doc_id)
+        .ok_or_else(|| not_found(&format!("文档不存在: {}", doc_id)))?
+        .clone();
     drop(docs);
 
-    println!("[REQ] 启动异步审核: doc_id={}, filename={}", doc_id, doc.filename);
+    println!(
+        "[REQ] 启动异步审核: doc_id={}, filename={}",
+        doc_id, doc.filename
+    );
 
     // 并发控制：检查是否已有进行中的审核（用 active_reviews 标记而非 bus 存在性）
     {
@@ -620,16 +714,44 @@ pub async fn review_document(
         let mut buses = state.review_event_buses.lock().await;
         buses
             .entry(doc_id.clone())
-            .or_insert_with(|| Arc::new(ReviewEventBus::new(256)))
+            .or_insert_with(|| Arc::new(ReviewEventBus::new(review_event_capacity())))
             .clone()
     };
 
-    // 准备 clause 列表（全量审查，不限制数量）
+    // 准备 clause 列表。
+    //
+    // chunk_ids / max_clauses 是公开 API 契约的一部分，基准测试和故障重试
+    // 都依赖它们来限定审查范围。此前这里无条件审查 doc.chunks，导致请求
+    // 参数被静默忽略，也会让小范围验收产生不必要的模型调用。
     let chunking_config = ChunkingConfig::default();
-    let review_clauses: Vec<ReviewClause> = doc
-        .chunks
+    let requested_chunk_ids: HashSet<&str> = req.chunk_ids.iter().map(String::as_str).collect();
+    let mut selected_chunks: Vec<&Chunk> = doc
+        .review_chunks
         .iter()
-        .map(|c| ReviewClause::from_chunk(c, chunking_config.embed_ctx_depth, chunking_config.embed_path_max_len))
+        .filter(|chunk| {
+            requested_chunk_ids.is_empty() || requested_chunk_ids.contains(chunk.chunk_id.as_str())
+        })
+        .collect();
+
+    if !req.chunk_ids.is_empty() && selected_chunks.is_empty() {
+        return Err(bad_request("chunk_ids 未匹配到任何文档条款"));
+    }
+    if let Some(limit) = req.max_clauses {
+        if limit == 0 {
+            return Err(bad_request("max_clauses 必须大于 0"));
+        }
+        selected_chunks.truncate(limit);
+    }
+
+    let review_clauses: Vec<ReviewClause> = selected_chunks
+        .into_iter()
+        .map(|c| {
+            ReviewClause::from_chunk(
+                c,
+                chunking_config.embed_ctx_depth,
+                chunking_config.embed_path_max_len,
+            )
+        })
         .collect();
 
     println!(
@@ -641,8 +763,10 @@ pub async fn review_document(
     // 提取后台任务所需数据（脱离 doc 引用）
     let enabled_agents = req.enabled_agents.clone();
     let chunk_map = doc.chunk_map.clone();
+    let review_chunk_map = doc.review_chunk_map.clone();
     let doc_index = doc.doc_index.clone();
     let chunk_order = doc.chunk_order.clone();
+    let redaction_vault = doc.redaction_vault.clone();
     let dashscope_search = state.dashscope_search.clone();
     let search_backend = state.search_backend.clone();
     let embed_client_for_tools = {
@@ -660,8 +784,10 @@ pub async fn review_document(
             review_clauses,
             enabled_agents,
             chunk_map,
+            review_chunk_map,
             doc_index,
             chunk_order,
+            redaction_vault,
             dashscope_search,
             search_backend,
             embed_client_for_tools,
@@ -691,8 +817,10 @@ async fn run_review_pipeline(
     review_clauses: Vec<ReviewClause>,
     enabled_agents: Option<Vec<String>>,
     chunk_map: Arc<HashMap<String, Chunk>>,
+    review_chunk_map: Arc<HashMap<String, Chunk>>,
     doc_index: Arc<DocumentVectorIndex>,
     chunk_order: Arc<Vec<String>>,
+    redaction_vault: Arc<RedactionVault>,
     dashscope_search: Option<Arc<DashScopeSearchBackend>>,
     search_backend: String,
     embed_client_for_tools: Option<Arc<EmbeddingClient>>,
@@ -704,10 +832,9 @@ async fn run_review_pipeline(
     let llm_model = std::env::var("DASHSCOPE_MODEL")
         .unwrap_or_else(|_| std::env::var("LLM_MODEL").unwrap_or_else(|_| "qwen-plus".to_string()));
     let metrics: Arc<tokio::sync::Mutex<crate::metrics::MetricsCollector>> =
-        Arc::new(tokio::sync::Mutex::new(crate::metrics::MetricsCollector::new(
-            crate::metrics::SCHEMA_VERSION,
-            &llm_model,
-        )));
+        Arc::new(tokio::sync::Mutex::new(
+            crate::metrics::MetricsCollector::new(crate::metrics::SCHEMA_VERSION, &llm_model),
+        ));
 
     let bus = Arc::new(AgentBus::new(32));
     let graph = Arc::new(SessionGraph::new());
@@ -717,14 +844,14 @@ async fn run_review_pipeline(
     if let Some(ref agent_names) = enabled_agents {
         coord_config.enabled_agents = agent_names
             .iter()
-            .filter_map(|s| AgentId::from_str(s))
+            .filter_map(|s| AgentId::parse(s))
             .collect();
     }
 
     let llm_factory = Arc::new(move || create_llm_client().expect("创建 LLM 客户端失败"));
 
     let doc_index_for_tools = doc_index.clone();
-    let chunk_map_for_tools = chunk_map.clone();
+    let chunk_map_for_tools = review_chunk_map.clone();
     let chunk_order_for_tools = chunk_order.clone();
     let ds_search = dashscope_search.clone();
     let sb = search_backend.clone();
@@ -742,10 +869,10 @@ async fn run_review_pipeline(
             chunk_map_for_tools.clone(),
             chunk_order_for_tools.clone(),
         )));
-        if sb == "dashscope" {
-            if let Some(ref ds) = ds_search {
-                registry.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
-            }
+        if sb == "dashscope"
+            && let Some(ref ds) = ds_search
+        {
+            registry.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
         }
         registry.register(Box::new(OutputFindingTool));
         registry
@@ -772,7 +899,11 @@ async fn run_review_pipeline(
     match coordinator.review(&review_clauses).await {
         Ok(mut output) => {
             let duration_secs = start_time.elapsed().as_secs_f64();
-            println!("[OK] 审核完成: {} 条风险发现, 耗时 {:.1}s", output.findings.len(), duration_secs);
+            println!(
+                "[OK] 审核完成: {} 条风险发现, 耗时 {:.1}s",
+                output.findings.len(),
+                duration_secs
+            );
 
             // ★ BlindSpot: 后台异步执行（不阻塞 HTTP 响应）
             let coord_bg = coordinator.clone();
@@ -780,20 +911,36 @@ async fn run_review_pipeline(
                 coord_bg.run_blind_spot().await;
             });
 
-            // 填充 location 字段 + block_ids（用于前端 bbox-based PDF 高亮）
+            // 模型只接触脱敏文本。结果回到本地后恢复原文展示，再填充原始定位。
             for finding in &mut output.findings {
-                if let Some(first_clause_id) = finding.clause_ids.first() {
-                    if let Some(chunk) = chunk_map.get(first_clause_id) {
-                        finding.page_number = Some(chunk.page_start);
-                        finding.section_path = Some(chunk.section_path.clone());
-                        finding.context = Some(chunk.text.chars().take(500).collect());
-                        finding.block_ids = chunk.source_block_ids.clone();
-                    }
+                finding.source_quote = redaction_vault.restore(&finding.source_quote);
+                finding.reason = redaction_vault.restore(&finding.reason);
+                finding.suggestion = redaction_vault.restore(&finding.suggestion);
+                finding.critical_reason = redaction_vault.restore(&finding.critical_reason);
+                finding.legal_basis = finding
+                    .legal_basis
+                    .iter()
+                    .map(|item| redaction_vault.restore(item))
+                    .collect();
+                if let Some(first_clause_id) = finding.clause_ids.first()
+                    && let Some(chunk) = chunk_map.get(first_clause_id)
+                {
+                    finding.page_number = Some(chunk.page_start + 1);
+                    finding.section_path = Some(chunk.section_path.clone());
+                    finding.context = Some(chunk.text.chars().take(500).collect());
+                    finding.block_ids = chunk.source_block_ids.clone();
                 }
             }
-            let findings_with_blocks = output.findings.iter().filter(|f| !f.block_ids.is_empty()).count();
-            println!("[OK] block_ids 已填充: {}/{} 条 finding 携带 block 引用",
-                findings_with_blocks, output.findings.len());
+            let findings_with_blocks = output
+                .findings
+                .iter()
+                .filter(|f| !f.block_ids.is_empty())
+                .count();
+            println!(
+                "[OK] block_ids 已填充: {}/{} 条 finding 携带 block 引用",
+                findings_with_blocks,
+                output.findings.len()
+            );
 
             let high_risk_count = output
                 .findings
@@ -967,7 +1114,9 @@ async fn run_review_pipeline(
 pub async fn stream_review_events(
     State(state): State<AppState>,
     Path(doc_id): Path<String>,
-) -> axum::response::Sse<impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+) -> axum::response::Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     use axum::response::sse::Event;
 
     // 创建或获取 ReviewEventBus（如果 POST /review 尚未创建）
@@ -975,7 +1124,7 @@ pub async fn stream_review_events(
         let mut buses = state.review_event_buses.lock().await;
         buses
             .entry(doc_id.clone())
-            .or_insert_with(|| Arc::new(ReviewEventBus::new(256)))
+            .or_insert_with(|| Arc::new(ReviewEventBus::new(review_event_capacity())))
             .clone()
     };
 
@@ -1024,10 +1173,14 @@ pub async fn stream_review_events(
                         .data(final_data));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    let _ = n;
+                    // 丢失的是实时展示事件，不代表审核失败。最终结果仍由
+                    // GET /review/:doc_id/result 提供，因此发送非致命通知。
                     yield Ok(Event::default()
-                        .event("error")
-                        .data(r#"{"message":"SSE lagged, some events were dropped"}"#));
+                        .event("stream_lagged")
+                        .data(serde_json::json!({
+                            "message": "SSE consumer lagged; progress events were dropped",
+                            "dropped": n
+                        }).to_string()));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     break;
@@ -1102,18 +1255,15 @@ pub async fn get_review_result(
     {
         let dir = data_path_str("output/findings");
         let result_path = format!("{}/{}_result.json", dir, doc_id);
-        if let Ok(json) = std::fs::read_to_string(&result_path) {
-            if let Ok(result) = serde_json::from_str::<ReviewResultResponse>(&json) {
-                println!("[DISK] result loaded from disk: {}", result_path);
-                return Ok(Json(result));
-            }
+        if let Ok(json) = std::fs::read_to_string(&result_path)
+            && let Ok(result) = serde_json::from_str::<ReviewResultResponse>(&json)
+        {
+            println!("[DISK] result loaded from disk: {}", result_path);
+            return Ok(Json(result));
         }
     }
 
-    Err(not_found(&format!(
-        "审查结果不存在: {}",
-        doc_id
-    )))
+    Err(not_found(&format!("审查结果不存在: {}", doc_id)))
 }
 
 /// POST /api/v1/documents/:id/chat
@@ -1136,13 +1286,14 @@ pub async fn chat_with_document(
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, (StatusCode, Json<ErrorResponse>)> {
     let docs = state.documents.read().await;
-    let doc = docs.get(&doc_id).ok_or_else(|| {
-        not_found(&format!("文档不存在: {}", doc_id))
-    })?.clone();
+    let doc = docs
+        .get(&doc_id)
+        .ok_or_else(|| not_found(&format!("文档不存在: {}", doc_id)))?
+        .clone();
     drop(docs);
 
-    let llm: Arc<dyn LlmClient> = Arc::from(create_llm_client()
-        .map_err(|e| server_error("创建 Chat LLM 客户端失败", e))?);
+    let llm: Arc<dyn LlmClient> =
+        Arc::from(create_llm_client().map_err(|e| server_error("创建 Chat LLM 客户端失败", e))?);
 
     let embed_client = {
         let ec = state.embed_client.lock().unwrap();
@@ -1157,7 +1308,7 @@ pub async fn chat_with_document(
         )));
     }
     chat_tools.register(Box::new(ReadSectionTool::new(
-        doc.chunk_map.clone(),
+        doc.review_chunk_map.clone(),
         doc.chunk_order.clone(),
     )));
     if let Some(ref ds) = state.dashscope_search {
@@ -1172,29 +1323,39 @@ pub async fn chat_with_document(
         chat_tools,
         Some(doc.doc_index.clone()),
         embed_client,
-        Some(doc.chunk_map.clone()),
-    ).map_err(|e| server_error("创建 ChatAgent 失败", e))?;
+        Some(doc.review_chunk_map.clone()),
+    )
+    .map_err(|e| server_error("创建 ChatAgent 失败", e))?;
 
     // DTO history → ChatMessage
+    let mut chat_vault = (*doc.redaction_vault).clone();
+    let selection = req.selection.map(|mut selection| {
+        selection.text = chat_vault.redact(&selection.text);
+        selection
+    });
+    let user_input = chat_vault.redact(&req.user_input);
     let history = req.history.map(|h| {
-        h.into_iter().map(|m| {
-            match m.role.as_str() {
+        h.into_iter()
+            .map(|m| match m.role.as_str() {
                 "system" => ChatMessage::System {
-                    content: m.content.unwrap_or_default(),
+                    content: chat_vault.redact(&m.content.unwrap_or_default()),
                 },
                 "assistant" => ChatMessage::Assistant {
-                    content: m.content,
+                    content: m.content.map(|content| chat_vault.redact(&content)),
                     tool_calls: None,
                 },
                 _ => ChatMessage::User {
-                    content: m.content.unwrap_or_default(),
+                    content: chat_vault.redact(&m.content.unwrap_or_default()),
                 },
-            }
-        }).collect()
+            })
+            .collect()
     });
 
-    let response = chat_agent.chat(req.selection, &req.user_input, history).await
+    let mut response = chat_agent
+        .chat(selection, &user_input, history)
+        .await
         .map_err(|e| server_error("对话执行失败", e))?;
+    restore_chat_response(&mut response, &chat_vault);
 
     Ok(Json(response))
 }
@@ -1217,7 +1378,9 @@ pub async fn chat_with_document_stream(
     State(state): State<AppState>,
     Path(doc_id): Path<String>,
     Json(req): Json<ChatRequest>,
-) -> axum::response::Sse<impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+) -> axum::response::Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     use axum::response::sse::Event;
 
     // All setup + streaming in a single async_stream block
@@ -1259,7 +1422,7 @@ pub async fn chat_with_document_stream(
             )));
         }
         chat_tools.register(Box::new(ReadSectionTool::new(
-            doc.chunk_map.clone(),
+            doc.review_chunk_map.clone(),
             doc.chunk_order.clone(),
         )));
         if let Some(ref ds) = state.dashscope_search {
@@ -1274,7 +1437,7 @@ pub async fn chat_with_document_stream(
             chat_tools,
             Some(doc.doc_index.clone()),
             embed_client,
-            Some(doc.chunk_map.clone()),
+            Some(doc.review_chunk_map.clone()),
         ) {
             Ok(agent) => agent,
             Err(e) => {
@@ -1285,17 +1448,23 @@ pub async fn chat_with_document_stream(
             }
         };
 
+        let mut chat_vault = (*doc.redaction_vault).clone();
+        let selection = req.selection.map(|mut selection| {
+            selection.text = chat_vault.redact(&selection.text);
+            selection
+        });
+        let user_input = chat_vault.redact(&req.user_input);
         let history = req.history.map(|h| {
             h.into_iter().map(|m| match m.role.as_str() {
                 "system" => ChatMessage::System {
-                    content: m.content.unwrap_or_default(),
+                    content: chat_vault.redact(&m.content.unwrap_or_default()),
                 },
                 "assistant" => ChatMessage::Assistant {
-                    content: m.content,
+                    content: m.content.map(|content| chat_vault.redact(&content)),
                     tool_calls: None,
                 },
                 _ => ChatMessage::User {
-                    content: m.content.unwrap_or_default(),
+                    content: chat_vault.redact(&m.content.unwrap_or_default()),
                 },
             }).collect()
         });
@@ -1304,7 +1473,7 @@ pub async fn chat_with_document_stream(
 
         // Spawn ChatAgent in background
         tokio::spawn(async move {
-            let _ = chat_agent.chat_stream(req.selection, &req.user_input, history, tx).await;
+            let _ = chat_agent.chat_stream(selection, &user_input, history, tx).await;
         });
 
         // ── Relay events from agent ──
@@ -1314,10 +1483,16 @@ pub async fn chat_with_document_stream(
                     ("thinking", format!(r#"{{"message":"{}"}}"#, message)),
                 ChatStreamEvent::ToolCall { name, args } =>
                     ("tool_call", format!(r#"{{"name":"{}","args":"{}"}}"#, name, args)),
-                ChatStreamEvent::Answer(resp) =>
-                    ("answer", serde_json::to_string(resp).unwrap_or_default()),
-                ChatStreamEvent::Done(resp) =>
-                    ("done", serde_json::to_string(resp).unwrap_or_default()),
+                ChatStreamEvent::Answer(resp) => {
+                    let mut restored = resp.clone();
+                    restore_chat_response(&mut restored, &chat_vault);
+                    ("answer", serde_json::to_string(&restored).unwrap_or_default())
+                },
+                ChatStreamEvent::Done(resp) => {
+                    let mut restored = resp.clone();
+                    restore_chat_response(&mut restored, &chat_vault);
+                    ("done", serde_json::to_string(&restored).unwrap_or_default())
+                },
                 ChatStreamEvent::Error(msg) =>
                     ("error", format!(r#"{{"message":"{}"}}"#, msg)),
             };
@@ -1352,9 +1527,10 @@ pub async fn search_document(
     Json(req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
     let docs = state.documents.read().await;
-    let doc = docs.get(&doc_id).ok_or_else(|| {
-        not_found(&format!("文档不存在: {}", doc_id))
-    })?.clone();
+    let doc = docs
+        .get(&doc_id)
+        .ok_or_else(|| not_found(&format!("文档不存在: {}", doc_id)))?
+        .clone();
     drop(docs);
 
     let embed_client = {
@@ -1362,9 +1538,16 @@ pub async fn search_document(
         ec.clone()
     };
 
-    let query_texts: Vec<&str> = req.queries.iter().map(|s| s.as_str()).collect();
+    let mut search_vault = (*doc.redaction_vault).clone();
+    let redacted_queries: Vec<String> = req
+        .queries
+        .iter()
+        .map(|query| search_vault.redact(query))
+        .collect();
+    let query_texts: Vec<&str> = redacted_queries.iter().map(|s| s.as_str()).collect();
     let query_embs = if let Some(ref ec) = embed_client {
-        ec.encode_queries(&query_texts).map_err(|e| server_error("查询编码失败", e))?
+        ec.encode_queries(&query_texts)
+            .map_err(|e| server_error("查询编码失败", e))?
     } else {
         return Err(server_error_fmt("嵌入客户端未初始化"));
     };
@@ -1373,13 +1556,16 @@ pub async fn search_document(
     let mut results = Vec::new();
     for (i, query) in req.queries.iter().enumerate() {
         let hits = doc.doc_index.search(&query_embs[i], top_k);
-        let hit_dtos: Vec<SearchHitDto> = hits.iter().map(|h| SearchHitDto {
-            chunk_id: h.chunk_id.clone(),
-            title: h.title.clone(),
-            score: h.score,
-            snippet: h.snippet.chars().take(200).collect(),
-            page_start: h.page_start,
-        }).collect();
+        let hit_dtos: Vec<SearchHitDto> = hits
+            .iter()
+            .map(|h| SearchHitDto {
+                chunk_id: h.chunk_id.clone(),
+                title: search_vault.restore(&h.title),
+                score: h.score,
+                snippet: search_vault.restore(&h.snippet.chars().take(200).collect::<String>()),
+                page_start: h.page_start,
+            })
+            .collect();
         results.push(SearchResultGroup {
             query: query.clone(),
             hits: hit_dtos,
@@ -1444,7 +1630,10 @@ pub async fn get_block_bboxes(
         .ok_or_else(|| not_found(&format!("文档不存在: {}", doc_id)))?;
 
     let requested_ids: Vec<&str> = params.ids.split(',').map(|s| s.trim()).collect();
-    println!("[BLOCKS] 查询 block BBox: doc={}, ids={:?}", doc_id, requested_ids);
+    println!(
+        "[BLOCKS] 查询 block BBox: doc={}, ids={:?}",
+        doc_id, requested_ids
+    );
     let mut results: Vec<BlockBBoxResponse> = Vec::new();
 
     for page in &doc.raw_doc.pages {
@@ -1465,7 +1654,11 @@ pub async fn get_block_bboxes(
         }
     }
 
-    println!("[BLOCKS] 返回 {} 条 BBox 坐标 (请求 {} 个 block)", results.len(), requested_ids.len());
+    println!(
+        "[BLOCKS] 返回 {} 条 BBox 坐标 (请求 {} 个 block)",
+        results.len(),
+        requested_ids.len()
+    );
     Ok(Json(results))
 }
 
@@ -1545,11 +1738,7 @@ fn scan_dir(
                 .and_then(|n| n.to_str())
                 .unwrap_or("?")
                 .to_string();
-            let _ = scan_dir(
-                &path.to_string_lossy(),
-                Some(group_name),
-                out,
-            );
+            let _ = scan_dir(&path.to_string_lossy(), Some(group_name), out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
             out.push((experiment_group.clone(), path));
         }
@@ -1559,16 +1748,10 @@ fn scan_dir(
 
 /// 根据 run_id 查找文件路径（递归搜索子目录）。
 fn find_run_path(run_id: &str) -> Option<std::path::PathBuf> {
-    for (_, path) in list_run_files() {
-        if path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            == Some(run_id)
-        {
-            return Some(path);
-        }
-    }
-    None
+    list_run_files()
+        .into_iter()
+        .map(|(_, path)| path)
+        .find(|path| path.file_stem().and_then(|s| s.to_str()) == Some(run_id))
 }
 
 /// 列出所有实验组名称。
@@ -1577,10 +1760,10 @@ fn list_experiment_groups() -> Vec<String> {
     let mut groups = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&base) {
         for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    groups.push(name.to_string());
-                }
+            if entry.path().is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                groups.push(name.to_string());
             }
         }
     }
@@ -1628,40 +1811,54 @@ pub async fn list_metric_runs() -> (StatusCode, Json<serde_json::Value>) {
     let mut summaries: Vec<MetricRunSummary> = Vec::new();
 
     for (experiment_group, path) in list_run_files() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                let meta = &val["meta"];
-                    let latency = &val["latency"];
-                    let llm = &val["llm_efficiency"];
-                    let quality = &val["review_quality"];
-                    let _resources = &val["resources"];
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+        {
+            let meta = &val["meta"];
+            let latency = &val["latency"];
+            let llm = &val["llm_efficiency"];
+            let quality = &val["review_quality"];
+            let _resources = &val["resources"];
 
-                    summaries.push(MetricRunSummary {
-                        run_id: meta["run_id"].as_str().unwrap_or("?").to_string(),
-                        title: meta["title"].as_str().map(|s| s.to_string()),
-                        notes: meta["notes"].as_str().map(|s| s.to_string()),
-                        timestamp: meta["timestamp"].as_str().unwrap_or("?").to_string(),
-                        tags: meta["tags"]
-                            .as_array()
-                            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                            .unwrap_or_default(),
-                        description: meta["description"].as_str().unwrap_or("").to_string(),
-                        document_name: meta["document"]["name"].as_str().unwrap_or("?").to_string(),
-                        total_secs: latency["total_wall_clock_secs"].as_f64().unwrap_or(0.0),
-                        llm_calls: llm["totals"]["llm_calls"].as_u64().unwrap_or(0) as usize,
-                        tokens_input: llm["totals"]["tokens_input"].as_u64().unwrap_or(0),
-                        tokens_output: llm["totals"]["tokens_output"].as_u64().unwrap_or(0),
-                        cost_cny: llm["totals"]["cost_cny"].as_f64().unwrap_or(0.0),
-                        total_findings: quality["findings"]["after_dedup"].as_u64().unwrap_or(0) as usize,
-                        high_findings: quality["findings"]["by_severity"]["high"].as_u64().unwrap_or(0) as usize,
-                        coordinator_enabled: meta["config"]["coordinator_enabled"].as_bool().unwrap_or(false),
-                        llm_model: meta["config"]["llm_model"].as_str().unwrap_or("?").to_string(),
-                        embed_engine: meta["config"]["embed_engine"].as_str().unwrap_or("?").to_string(),
-                        experiment_group: experiment_group.clone(),
-                    });
-                }
-            }
+            summaries.push(MetricRunSummary {
+                run_id: meta["run_id"].as_str().unwrap_or("?").to_string(),
+                title: meta["title"].as_str().map(|s| s.to_string()),
+                notes: meta["notes"].as_str().map(|s| s.to_string()),
+                timestamp: meta["timestamp"].as_str().unwrap_or("?").to_string(),
+                tags: meta["tags"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                description: meta["description"].as_str().unwrap_or("").to_string(),
+                document_name: meta["document"]["name"].as_str().unwrap_or("?").to_string(),
+                total_secs: latency["total_wall_clock_secs"].as_f64().unwrap_or(0.0),
+                llm_calls: llm["totals"]["llm_calls"].as_u64().unwrap_or(0) as usize,
+                tokens_input: llm["totals"]["tokens_input"].as_u64().unwrap_or(0),
+                tokens_output: llm["totals"]["tokens_output"].as_u64().unwrap_or(0),
+                cost_cny: llm["totals"]["cost_cny"].as_f64().unwrap_or(0.0),
+                total_findings: quality["findings"]["after_dedup"].as_u64().unwrap_or(0) as usize,
+                high_findings: quality["findings"]["by_severity"]["high"]
+                    .as_u64()
+                    .unwrap_or(0) as usize,
+                coordinator_enabled: meta["config"]["coordinator_enabled"]
+                    .as_bool()
+                    .unwrap_or(false),
+                llm_model: meta["config"]["llm_model"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string(),
+                embed_engine: meta["config"]["embed_engine"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string(),
+                experiment_group: experiment_group.clone(),
+            });
         }
+    }
 
     // 按时间倒序
     summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -1676,7 +1873,12 @@ pub async fn list_metric_runs() -> (StatusCode, Json<serde_json::Value>) {
 pub async fn get_metric_run(Path(run_id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
     let path = match find_run_path(&run_id) {
         Some(p) => p,
-        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error":"不存在"})),
+            );
+        }
     };
     match std::fs::read_to_string(&path) {
         Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
@@ -1700,11 +1902,21 @@ pub async fn update_metric_tags(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let path = match find_run_path(&run_id) {
         Some(p) => p,
-        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error":"不存在"})),
+            );
+        }
     };
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"读取失败"}))),
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error":"读取失败"})),
+            );
+        }
     };
     let mut val: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
@@ -1712,11 +1924,14 @@ pub async fn update_metric_tags(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": format!("JSON 解析失败: {}", e) })),
-            )
+            );
         }
     };
     val["meta"]["tags"] = serde_json::json!(body.tags);
-    if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&val).unwrap_or_default()) {
+    if let Err(e) = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&val).unwrap_or_default(),
+    ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("写入失败: {}", e) })),
@@ -1740,15 +1955,34 @@ pub async fn update_metric_title(
     );
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error":"不存在"})),
+            );
+        }
     };
     let mut val: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)}))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":format!("{}",e)})),
+            );
+        }
     };
-    val["meta"]["title"] = body.get("title").cloned().unwrap_or(serde_json::Value::Null);
-    if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&val).unwrap_or_default()) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)})));
+    val["meta"]["title"] = body
+        .get("title")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if let Err(e) = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&val).unwrap_or_default(),
+    ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":format!("{}",e)})),
+        );
     }
     (StatusCode::OK, Json(serde_json::json!({"ok":true})))
 }
@@ -1758,18 +1992,41 @@ pub async fn update_metric_notes(
     Path(run_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let path = format!("{}/{}.json", crate::paths::data_path_str("output/runs"), run_id);
+    let path = format!(
+        "{}/{}.json",
+        crate::paths::data_path_str("output/runs"),
+        run_id
+    );
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error":"不存在"})),
+            );
+        }
     };
     let mut val: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)}))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":format!("{}",e)})),
+            );
+        }
     };
-    val["meta"]["notes"] = body.get("notes").cloned().unwrap_or(serde_json::Value::Null);
-    if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&val).unwrap_or_default()) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)})));
+    val["meta"]["notes"] = body
+        .get("notes")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if let Err(e) = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&val).unwrap_or_default(),
+    ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":format!("{}",e)})),
+        );
     }
     (StatusCode::OK, Json(serde_json::json!({"ok":true})))
 }
@@ -1781,12 +2038,24 @@ pub async fn move_metric_experiment_group(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let old_path = match find_run_path(&run_id) {
         Some(p) => p,
-        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error":"不存在"})),
+            );
+        }
     };
-    let group = body.get("experiment_group").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let group = body
+        .get("experiment_group")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let base = crate::paths::data_path_str("output/runs");
     let new_dir = if let Some(ref g) = group {
-        if g.is_empty() { base.clone() } else { format!("{}/{}", base, g) }
+        if g.is_empty() {
+            base.clone()
+        } else {
+            format!("{}/{}", base, g)
+        }
     } else {
         base.clone()
     };
@@ -1794,21 +2063,32 @@ pub async fn move_metric_experiment_group(
     let fname = old_path.file_name().unwrap();
     let new_path = std::path::Path::new(&new_dir).join(fname);
     if let Err(e) = std::fs::rename(&old_path, &new_path) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("{}",e)})));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":format!("{}",e)})),
+        );
     }
     // Update experiment_group field in JSON
-    if let Ok(content) = std::fs::read_to_string(&new_path) {
-        if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
-            val["meta"]["experiment_group"] = group.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null);
-            let _ = std::fs::write(&new_path, serde_json::to_string_pretty(&val).unwrap_or_default());
-        }
+    if let Ok(content) = std::fs::read_to_string(&new_path)
+        && let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        val["meta"]["experiment_group"] = group
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null);
+        let _ = std::fs::write(
+            &new_path,
+            serde_json::to_string_pretty(&val).unwrap_or_default(),
+        );
     }
     (StatusCode::OK, Json(serde_json::json!({"ok":true})))
 }
 
 /// GET /api/v1/metrics/experiment-groups — 列出所有实验组。
 pub async fn list_metric_experiment_groups() -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::OK, Json(serde_json::json!({"experiment_groups": list_experiment_groups()})))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"experiment_groups": list_experiment_groups()})),
+    )
 }
 
 /// DELETE /api/v1/metrics/runs/:run_id — 删除实验记录。
@@ -1817,10 +2097,18 @@ pub async fn delete_metric_run(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let path = match find_run_path(&run_id) {
         Some(p) => p,
-        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"不存在"}))),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error":"不存在"})),
+            );
+        }
     };
     match std::fs::remove_file(&path) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok":true}))),
-        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":format!("{}",e)}))),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":format!("{}",e)})),
+        ),
     }
 }

@@ -15,8 +15,8 @@
 
 use crate::agents::bus::AgentBus;
 use crate::agents::prompts;
-use crate::agents::scout::SCOUT_SYSTEM_PROMPT;
 use crate::agents::react_loop::{LlmClient, ReActLoop};
+use crate::agents::scout::SCOUT_SYSTEM_PROMPT;
 use crate::agents::session_graph::SessionGraph;
 use crate::agents::tools::ToolRegistry;
 use crate::agents::trace::TraceLog;
@@ -44,7 +44,9 @@ impl AgentRegistry {
                 system_prompt: prompts::FACT_CHECK_SYSTEM_PROMPT,
                 default_max_turns: 10,
                 complexity: AgentComplexity::Medium,
-                section_keywords: &["时限", "金额", "预算", "截止", "格式", "装订", "密封", "盖章"],
+                section_keywords: &[
+                    "时限", "金额", "预算", "截止", "格式", "装订", "密封", "盖章",
+                ],
                 tool_names: &[
                     "web_search",
                     "search_document",
@@ -63,7 +65,14 @@ impl AgentRegistry {
                 default_max_turns: 12,
                 complexity: AgentComplexity::Medium,
                 section_keywords: &[
-                    "采购方式", "公告", "保证金", "评审", "废标", "流标", "开标", "评标",
+                    "采购方式",
+                    "公告",
+                    "保证金",
+                    "评审",
+                    "废标",
+                    "流标",
+                    "开标",
+                    "评标",
                 ],
                 tool_names: &[
                     "web_search",
@@ -82,9 +91,7 @@ impl AgentRegistry {
                 system_prompt: prompts::RULE_ENGINE_SYSTEM_PROMPT,
                 default_max_turns: 14,
                 complexity: AgentComplexity::Low,
-                section_keywords: &[
-                    "必须", "不得", "禁止", "应", "不应", "资格条件", "实质性",
-                ],
+                section_keywords: &["必须", "不得", "禁止", "应", "不应", "资格条件", "实质性"],
                 tool_names: &[
                     "web_search",
                     "search_document",
@@ -136,7 +143,13 @@ impl AgentRegistry {
                 default_max_turns: 10,
                 complexity: AgentComplexity::Medium,
                 section_keywords: &[
-                    "评分", "评审因素", "分值", "价格分", "技术分", "商务分", "权重",
+                    "评分",
+                    "评审因素",
+                    "分值",
+                    "价格分",
+                    "技术分",
+                    "商务分",
+                    "权重",
                 ],
                 tool_names: &[
                     "web_search",
@@ -175,9 +188,7 @@ impl AgentRegistry {
                 system_prompt: prompts::CONTRACT_SYSTEM_PROMPT,
                 default_max_turns: 12,
                 complexity: AgentComplexity::Medium,
-                section_keywords: &[
-                    "合同", "付款", "验收", "质保", "违约", "售后", "保修",
-                ],
+                section_keywords: &["合同", "付款", "验收", "质保", "违约", "售后", "保修"],
                 tool_names: &[
                     "web_search",
                     "search_document",
@@ -209,7 +220,12 @@ impl AgentRegistry {
                 default_max_turns: 8,
                 complexity: AgentComplexity::High,
                 section_keywords: &[], // Coordinator 按需调用
-                tool_names: &["web_search", "search_document", "read_section", "output_finding"],
+                tool_names: &[
+                    "web_search",
+                    "search_document",
+                    "read_section",
+                    "output_finding",
+                ],
             },
         );
 
@@ -261,19 +277,25 @@ impl AgentRegistry {
         // AgentDefinition 的 system_prompt 字段留空（由 ReActLoop 构造时按分支处理）
         let definition = AgentDefinition {
             id: agent_id.clone(),
-            display_name: "", // 运行时从 DynamicAgentDefinition 取
+            display_name: "",  // 运行时从 DynamicAgentDefinition 取
             system_prompt: "", // 运行时从 DynamicAgentDefinition 取
             default_max_turns: def.default_max_turns,
             complexity: def.complexity,
             section_keywords: &[], // 动态 Agent 的关键词从 DynamicAgentDefinition 取
-            tool_names: &["web_search", "search_document", "read_section", "output_finding"],
+            tool_names: &[
+                "web_search",
+                "search_document",
+                "read_section",
+                "output_finding",
+            ],
         };
         self.definitions.insert(agent_id, definition);
     }
 
     /// 检查是否已注册指定 ID 的动态 Agent。
     pub fn has_dynamic(&self, id: &str) -> bool {
-        self.definitions.contains_key(&AgentId::Dynamic(id.to_string()))
+        self.definitions
+            .contains_key(&AgentId::Dynamic(id.to_string()))
     }
 
     /// Builder: AgentDefinition + 工厂注入 → ReActLoop。
@@ -360,15 +382,9 @@ mod tests {
 
     #[test]
     fn test_agent_id_from_str() {
-        assert_eq!(
-            AgentId::from_str("factcheck"),
-            Some(AgentId::FactCheck)
-        );
-        assert_eq!(
-            AgentId::from_str("FactCheckAgent"),
-            Some(AgentId::FactCheck)
-        );
-        assert_eq!(AgentId::from_str("unknown"), None);
+        assert_eq!(AgentId::parse("factcheck"), Some(AgentId::FactCheck));
+        assert_eq!(AgentId::parse("FactCheckAgent"), Some(AgentId::FactCheck));
+        assert_eq!(AgentId::parse("unknown"), None);
     }
 
     // ── 动态 Agent 注册 ──────────────────────────────────────

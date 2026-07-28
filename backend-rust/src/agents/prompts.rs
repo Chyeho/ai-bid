@@ -84,8 +84,7 @@ pub const FACT_CHECK_SYSTEM_PROMPT: &str = r#"你是 FactCheckAgent——政府�
    - 对照法规摘要 + 条款原文 + 已知法规常识 → 直接判断
    - 信息不足时调用 web_search（缓存命中即时返回，无需等待联网搜索）
    - 缓存未命中或信息不足 → web_search 自动联网补充（最多 3 次）
-3. 确认无风险 → output_finding(no_risk=true,
-   reason="条款内容不涉及本 Agent 审查范围")
+3. 确认无风险 → output_finding(findings=[], has_more=false, coverage=["fact_check"])
 4. 所有判断必须基于法规原文或搜索缓存，不得凭空猜测。
 "#;
 
@@ -148,8 +147,7 @@ pub const PROCEDURE_SYSTEM_PROMPT: &str = r#"你是 ProcedureAgent——政府�
    - 对照法规摘要 + 条款原文 + 已知法规常识 → 直接判断
    - 信息不足时调用 web_search（缓存命中即时返回，无需等待联网搜索）
    - 缓存未命中或信息不足 → web_search 自动联网补充（最多 3 次）
-3. 确认无风险 → output_finding(no_risk=true,
-   reason="条款内容不涉及本 Agent 审查范围")
+3. 确认无风险 → output_finding(findings=[], has_more=false, coverage=["procedure"])
 4. 所有判断必须基于法规原文或搜索缓存，不得凭空猜测。
 "#;
 
@@ -206,8 +204,7 @@ pub const RULE_ENGINE_SYSTEM_PROMPT: &str = r#"你是 RuleEngineAgent——招�
    - 对照法规摘要 + 条款原文 + 已知法规常识 → 直接判断
    - 信息不足时调用 web_search（缓存命中即时返回，无需等待联网搜索）
    - 缓存未命中或信息不足 → web_search 自动联网补充（最多 3 次）
-3. 确认无风险 → output_finding(no_risk=true,
-   reason="条款内容不涉及本 Agent 审查范围")
+3. 确认无风险 → output_finding(findings=[], has_more=false, coverage=["hard_rule"])
 4. 所有判断必须基于法规原文或搜索缓存，不得凭空猜测。
 "#;
 
@@ -277,8 +274,7 @@ pub const SEMANTIC_RISK_SYSTEM_PROMPT: &str = r#"你是 SemanticRiskAgent——�
    - 对照法规摘要 + 条款原文 + 已知法规常识 → 直接判断
    - 信息不足时调用 web_search（缓存命中即时返回，无需等待联网搜索）
    - 缓存未命中或信息不足 → web_search 自动联网补充（最多 3 次）
-3. 确认无风险 → output_finding(no_risk=true,
-   reason="条款内容不涉及本 Agent 审查范围")
+3. 确认无风险 → output_finding(findings=[], has_more=false, coverage=["semantic_risk"])
 4. 所有判断必须基于法规原文或搜索缓存，不得凭空猜测。
 "#;
 
@@ -337,8 +333,7 @@ pub const SCORING_SYSTEM_PROMPT: &str = r#"你是 ScoringAgent——招标文件
    - 对照法规摘要 + 条款原文 + 已知法规常识 → 直接判断
    - 信息不足时调用 web_search（缓存命中即时返回，无需等待联网搜索）
    - 缓存未命中或信息不足 → web_search 自动联网补充（最多 3 次）
-3. 确认无风险 → output_finding(no_risk=true,
-   reason="条款内容不涉及本 Agent 审查范围")
+3. 确认无风险 → output_finding(findings=[], has_more=false, coverage=["scoring"])
 4. 所有判断必须基于法规原文或搜索缓存，不得凭空猜测。
 "#;
 
@@ -398,8 +393,7 @@ pub const DEMAND_SYSTEM_PROMPT: &str = r#"你是 DemandAgent——招标文件�
    - 对照法规摘要 + 条款原文 + 已知法规常识 → 直接判断
    - 信息不足时调用 web_search（缓存命中即时返回，无需等待联网搜索）
    - 缓存未命中或信息不足 → web_search 自动联网补充（最多 3 次）
-3. 确认无风险 → output_finding(no_risk=true,
-   reason="条款内容不涉及本 Agent 审查范围")
+3. 确认无风险 → output_finding(findings=[], has_more=false, coverage=["demand"])
 4. 所有判断必须基于法规原文或搜索缓存，不得凭空猜测。
 "#;
 
@@ -459,8 +453,7 @@ pub const CONTRACT_SYSTEM_PROMPT: &str = r#"你是 ContractAgent——政府采�
    - 对照法规摘要 + 条款原文 + 已知法规常识 → 直接判断
    - 信息不足时调用 web_search（缓存命中即时返回，无需等待联网搜索）
    - 缓存未命中或信息不足 → web_search 自动联网补充（最多 3 次）
-3. 确认无风险 → output_finding(no_risk=true,
-   reason="条款内容不涉及本 Agent 审查范围")
+3. 确认无风险 → output_finding(findings=[], has_more=false, coverage=["contract"])
 4. 所有判断必须基于法规原文或搜索缓存，不得凭空猜测。
 "#;
 

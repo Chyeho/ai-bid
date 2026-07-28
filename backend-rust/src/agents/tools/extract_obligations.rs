@@ -81,51 +81,103 @@ pub struct ExtractObligationsTool {
 }
 
 impl ExtractObligationsTool {
-    pub fn new(
-        chunks: Arc<HashMap<String, Chunk>>,
-        chunk_order: Arc<Vec<String>>,
-    ) -> Self {
-        Self { chunks, chunk_order }
+    pub fn new(chunks: Arc<HashMap<String, Chunk>>, chunk_order: Arc<Vec<String>>) -> Self {
+        Self {
+            chunks,
+            chunk_order,
+        }
     }
 
     /// 义务类型关键词映射。
     fn obligation_keywords(ob_type: &str) -> Vec<&str> {
         match ob_type {
             "资质" => vec![
-                "资质", "证书", "许可证", "资格", "等级", "备案",
-                "注册", "认定", "核准",
+                "资质",
+                "证书",
+                "许可证",
+                "资格",
+                "等级",
+                "备案",
+                "注册",
+                "认定",
+                "核准",
             ],
             "业绩" => vec![
-                "业绩", "合同", "项目经验", "案例", "成功案例",
-                "同类项目", "类似项目", "承担过",
+                "业绩",
+                "合同",
+                "项目经验",
+                "案例",
+                "成功案例",
+                "同类项目",
+                "类似项目",
+                "承担过",
             ],
             "人员" => vec![
-                "人员", "项目经理", "技术负责人", "工程师", "注册",
-                "持证", "职称", "学历", "专业", "从业",
+                "人员",
+                "项目经理",
+                "技术负责人",
+                "工程师",
+                "注册",
+                "持证",
+                "职称",
+                "学历",
+                "专业",
+                "从业",
             ],
             "设备" => vec![
-                "设备", "仪器", "工具", "车辆", "机械", "生产",
-                "检测", "实验室", "车间",
+                "设备",
+                "仪器",
+                "工具",
+                "车辆",
+                "机械",
+                "生产",
+                "检测",
+                "实验室",
+                "车间",
             ],
             "工期" => vec![
-                "工期", "交付", "完成", "期限", "日历日", "工作日",
-                "进度", "节点", "里程碑",
+                "工期",
+                "交付",
+                "完成",
+                "期限",
+                "日历日",
+                "工作日",
+                "进度",
+                "节点",
+                "里程碑",
             ],
             "付款条件" => vec![
-                "付款", "预付款", "进度款", "结算", "质保金", "支付",
-                "合同金额", "报价",
+                "付款",
+                "预付款",
+                "进度款",
+                "结算",
+                "质保金",
+                "支付",
+                "合同金额",
+                "报价",
             ],
             "售后" => vec![
-                "售后", "保修", "维护", "服务", "技术支持", "培训",
-                "响应", "到场", "7×24", "驻场",
+                "售后",
+                "保修",
+                "维护",
+                "服务",
+                "技术支持",
+                "培训",
+                "响应",
+                "到场",
+                "7×24",
+                "驻场",
             ],
             "保密" => vec![
-                "保密", "信息安全", "数据", "隐私", "商业秘密",
-                "敏感", "加密",
+                "保密",
+                "信息安全",
+                "数据",
+                "隐私",
+                "商业秘密",
+                "敏感",
+                "加密",
             ],
-            "保险" => vec![
-                "保险", "担保", "保函", "保证金", "履约", "投标",
-            ],
+            "保险" => vec!["保险", "担保", "保函", "保证金", "履约", "投标"],
             _ => vec!["必须", "须", "应", "不得", "禁止", "需", "要求"],
         }
     }
@@ -133,8 +185,16 @@ impl ExtractObligationsTool {
     /// 所有义务类型。
     fn all_types() -> Vec<&'static str> {
         vec![
-            "资质", "业绩", "人员", "设备", "工期", "付款条件",
-            "售后", "保密", "保险", "其他",
+            "资质",
+            "业绩",
+            "人员",
+            "设备",
+            "工期",
+            "付款条件",
+            "售后",
+            "保密",
+            "保险",
+            "其他",
         ]
     }
 
@@ -158,9 +218,7 @@ impl ExtractObligationsTool {
             for kw in &keywords {
                 if text.contains(kw) {
                     // 提取包含关键词的句子（以句号/分号/换行为界）
-                    let sentences: Vec<&str> = text
-                        .split(|c: char| c == '。' || c == '；' || c == '\n' || c == '!')
-                        .collect();
+                    let sentences: Vec<&str> = text.split(['。', '；', '\n', '!']).collect();
 
                     for sent in &sentences {
                         if sent.contains(kw) && sent.trim().len() > 10 {
@@ -176,7 +234,10 @@ impl ExtractObligationsTool {
                                 } else {
                                     None
                                 }
-                            } else if sent.contains("取消") || sent.contains("废标") || sent.contains("无效") {
+                            } else if sent.contains("取消")
+                                || sent.contains("废标")
+                                || sent.contains("无效")
+                            {
                                 Some("可能导致投标无效或被取消资格".to_string())
                             } else {
                                 None
@@ -207,12 +268,12 @@ impl ExtractObligationsTool {
         // 兜底：检查强制性语言但未被上述类型覆盖的
         if types.is_empty() || types.contains(&"其他".to_string()) {
             let mandatory_markers = ["必须", "须 ", "不得", "禁止", "强制性"];
-            for sent in text.split(|c: char| c == '。' || c == '；' || c == '\n') {
-                if mandatory_markers.iter().any(|m| sent.contains(m))
-                    && sent.trim().len() > 10
-                {
+            for sent in text.split(['。', '；', '\n']) {
+                if mandatory_markers.iter().any(|m| sent.contains(m)) && sent.trim().len() > 10 {
                     // 检查是否已被其他类型覆盖
-                    let already_covered = obligations.iter().any(|o: &Obligation| o.text.contains(sent.trim()));
+                    let already_covered = obligations
+                        .iter()
+                        .any(|o: &Obligation| o.text.contains(sent.trim()));
                     if !already_covered {
                         obligations.push(Obligation {
                             obligation_type: "其他".to_string(),
@@ -266,13 +327,14 @@ impl ExtractObligationsTool {
         }
 
         // 品牌/型号指定 + 资质要求 = 萝卜标嫌疑
-        let has_brand = obligations.iter().any(|o| {
-            o.text.contains("品牌") || o.text.contains("型号") || o.text.contains("指定")
-        });
+        let has_brand = obligations
+            .iter()
+            .any(|o| o.text.contains("品牌") || o.text.contains("型号") || o.text.contains("指定"));
         let has_qual = !qual_chunks.is_empty();
         if has_brand && has_qual {
             signals.push(
-                "⚠️ 萝卜标嫌疑：同时存在品牌/型号指定和特定资质要求，可能为特定供应商量身定制".into()
+                "⚠️ 萝卜标嫌疑：同时存在品牌/型号指定和特定资质要求，可能为特定供应商量身定制"
+                    .into(),
             );
         }
 
@@ -429,19 +491,25 @@ mod tests {
         let mut chunks = HashMap::new();
         let chunk_order = vec!["ch_001".to_string(), "ch_002".to_string()];
 
-        chunks.insert("ch_001".to_string(), make_chunk(
-            "ch_001",
-            "投标人须具备建筑工程施工总承包一级及以上资质。\
+        chunks.insert(
+            "ch_001".to_string(),
+            make_chunk(
+                "ch_001",
+                "投标人须具备建筑工程施工总承包一级及以上资质。\
              项目经理须持有建筑工程专业一级注册建造师证书，\
              且具有5年以上同类项目管理经验。\
              ★ 核心设备须为自有，提供购置发票。",
-        ));
-        chunks.insert("ch_002".to_string(), make_chunk(
-            "ch_002",
-            "付款方式：合同签订后支付30%预付款，\
+            ),
+        );
+        chunks.insert(
+            "ch_002".to_string(),
+            make_chunk(
+                "ch_002",
+                "付款方式：合同签订后支付30%预付款，\
              验收合格后支付至合同金额的95%，\
              剩余5%作为质保金，质保期满后30日内无息退还。",
-        ));
+            ),
+        );
 
         ExtractObligationsTool {
             chunks: Arc::new(chunks),
