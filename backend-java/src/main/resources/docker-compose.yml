@@ -123,6 +123,25 @@ services:
     networks:
       - milvus-network
 
+  # Neo4j 图数据库（与本地 my-neo4j 容器配置一致）
+  neo4j:
+    container_name: my-neo4j
+    image: neo4j:5.21
+    environment:
+      NEO4J_AUTH: neo4j/b1234567
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - D:/neo4j/data:/data
+      - D:/neo4j/logs:/logs
+      - D:/neo4j/plugins:/plugins
+    networks:
+      - milvus-network
+
 # 自定义网络（避免端口冲突）
 networks:
   milvus-network:
