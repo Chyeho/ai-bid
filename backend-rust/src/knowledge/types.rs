@@ -68,6 +68,9 @@ pub struct EntityDecision {
     pub decision: Decision,
     pub risk: RiskEntity,
     pub laws: Vec<LawArticleEntity>,
+    /// 证据摘录（组员 B 从 Candidate.source_quote 填入；写库时存到 Risk 节点，查询展示用）。
+    #[serde(default)]
+    pub snippet: String,
 }
 
 
