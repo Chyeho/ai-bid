@@ -25,3 +25,4 @@ tokio-stream = "0.1"
 async-stream = "0.3"
 futures-core = "0.3"
 utoipa = { version = "4", features = ["axum_extras", "chrono"] }
+neo4rs = "0.8.0"
