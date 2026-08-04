@@ -28,6 +28,10 @@ pub struct CheckCrossReferenceArgs {
     /// 引用类型
     #[serde(default)]
     pub reference_type: Option<String>,
+    /// 引用方声称的关键词列表（用于验证内容是否匹配）
+    /// 如"详见附件三 技术参数表" → claims=["技术参数", "参数表"]
+    #[serde(default)]
+    pub reference_claims: Vec<String>,
 }
 
 /// 交叉引用检查结果。
@@ -55,7 +59,6 @@ enum RefStatus {
     Valid,
     Dangling,
     Ambiguous,
-    #[allow(dead_code)]
     ContentMismatch,
 }
 
@@ -262,6 +265,11 @@ impl AgentTool for CheckCrossReferenceTool {
                             "type": "string",
                             "enum": ["attachment", "section", "clause", "table", "appendix"],
                             "description": "引用类型，可选。不提供则自动推断。"
+                        },
+                        "reference_claims": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "引用方声称的内容关键词列表，用于验证目标内容是否匹配。如'详见附件3 技术参数表' → [\"技术参数\", \"参数表\"]"
                         }
                     },
                     "required": ["source_chunk", "reference_expression"]
@@ -295,7 +303,7 @@ impl AgentTool for CheckCrossReferenceTool {
                 )),
             )
         } else if candidates.len() == 1 {
-            // 唯一候选 → valid，但还需检查 source_chunk 是否存在
+            // 唯一候选 → 先检查 source_chunk 是否存在
             if !self.chunks.contains_key(&parsed.source_chunk) {
                 (
                     RefStatus::Dangling,
@@ -303,6 +311,56 @@ impl AgentTool for CheckCrossReferenceTool {
                     None,
                     Some(format!("源 chunk '{}' 不存在", parsed.source_chunk)),
                 )
+            } else if !parsed.reference_claims.is_empty() {
+                // ★ ContentMismatch 检测：有唯一候选目标，但内容是否匹配引用方声称的关键词？
+                let c = &candidates[0];
+                let target_text = self
+                    .chunks
+                    .get(&c.chunk_id)
+                    .map(|ch| &ch.text)
+                    .unwrap_or(&c.text_preview);
+
+                let mut matched_claims = Vec::new();
+                let mut unmatched_claims = Vec::new();
+                for claim in &parsed.reference_claims {
+                    if target_text.contains(claim.as_str()) {
+                        matched_claims.push(claim.clone());
+                    } else {
+                        unmatched_claims.push(claim.clone());
+                    }
+                }
+
+                if unmatched_claims.is_empty() {
+                    // 所有声称关键词都匹配 → Valid
+                    (
+                        RefStatus::Valid,
+                        Some(c.chunk_id.clone()),
+                        Some(c.section_path.clone()),
+                        None,
+                    )
+                } else {
+                    // 部分／全部关键词不匹配 → ContentMismatch
+                    let detail = if matched_claims.is_empty() {
+                        format!(
+                            "引用声称的内容（{}）在目标中均未找到。目标实际标题为 '{}'，内容摘要：'{}'",
+                            unmatched_claims.join("、"),
+                            c.section_path.join(" > "),
+                            c.text_preview
+                        )
+                    } else {
+                        format!(
+                            "部分声称匹配({})，但以下关键词未找到：{}。请确认引用目标是否正确。",
+                            matched_claims.join("、"),
+                            unmatched_claims.join("、")
+                        )
+                    };
+                    (
+                        RefStatus::ContentMismatch,
+                        Some(c.chunk_id.clone()),
+                        Some(c.section_path.clone()),
+                        Some(detail),
+                    )
+                }
             } else {
                 let c = &candidates[0];
                 (
@@ -465,5 +523,23 @@ mod tests {
         let candidates =
             tool.search_targets("附件五 供应商声明", "attachment", &["附件五".to_string()]);
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_content_mismatch_detection() {
+        let tool = make_tool();
+        let (ref_type, keywords) =
+            CheckCrossReferenceTool::parse_reference("附件三", Some("attachment"));
+        let candidates = tool.search_targets("附件三", &ref_type, &keywords);
+        assert!(!candidates.is_empty(), "应找到附件三");
+
+        // 验证 ContentMismatch 逻辑：附件三的实际内容是"资格证明文件清单"
+        // 如果引用方声称它包含"技术参数表"，应当检测为不匹配
+        let target_text = tool.chunks.get(&candidates[0].chunk_id).unwrap();
+        let has_tech_param = target_text.text.contains("技术参数");
+        // 附件三是资格证明，不应该包含"技术参数"
+        assert!(!has_tech_param, "附件三不应包含'技术参数'");
+        // 但确认附件三确实存在且包含"资格证明"
+        assert!(target_text.text.contains("资格证明"));
     }
 }

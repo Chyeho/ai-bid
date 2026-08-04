@@ -19,9 +19,23 @@
 //! - [`search_contradiction`] — 矛盾检测（隐性升级/悬空引用/数据矛盾/逻辑冲突）
 //! - [`extract_obligations`] — 投标人义务聚合（发现分散排斥）
 //!
-//! ### V2+（待实现）
-//! - `compare_versions` — 标书版本 Diff
-//! - `detect_boilerplate` — 模板残骸识别
+//! ## V2+（已实现）
+//! - [`compare_versions`] — 标书版本 Diff（LCS 文本差异 + 高风险变更标记）
+//! - [`detect_boilerplate`] — 模板残骸识别（悬空引用 + 异常实体 + 多余章节）
+//!
+//! ## V3 合规审查（4 个 — 已实现）
+//! - [`verify_procurement_method`] — 采购方式适用条件校验（法定门槛表 + 合规判定）
+//! - [`verify_bid_deposit`] — 保证金合规校验（投标/履约保证金比例 + 上限 + 形式 + 退还时限）
+//! - [`verify_announcement_period`] — 公告期限校验（等标期 + 文件发售期 + 日期差计算）
+//! - [`verify_bid_preparation_period`] — 投标准备期校验（投诉第一高发事由 + 风险等级评估）
+//!
+//! ## V4 评审标准审查（4 个 — 本次新增）
+//! - [`validate_scoring_formula`] — 价格分公式校验（权重 + 公式类型 + 基准价操纵风险）
+//! - [`validate_weight_distribution`] — 权重分配合规检查（求和验证 + 价格分范围 + 缺失维度）
+//! - [`detect_subjective_scoring`] — 主观评分检测（关键词 + 区间跨度 + 量化细则）
+//! - [`check_scoring_completeness`] — 评分标准完整性检查（分值闭合 + 维度完整 + 细则覆盖率）
+//! - [`check_imported_products`] — 进口产品管理检查（关键词检测 + 进口审批 + 标准引用区分）
+//! - [`verify_consortium_rules`] — 联合体投标规则检查（允许性 + 资质叠加 + 牵头方 + 协议 + 矛盾检测）
 //!
 //! ## 架构
 //!
@@ -33,9 +47,12 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 pub mod answer_user;
+pub mod bid_evaluation_test;
 pub mod calculate_timeline;
 pub mod check_cross_reference;
+pub mod compare_versions;
 pub mod compare_with_template;
+pub mod detect_boilerplate;
 pub mod extract_obligations;
 pub mod output_finding;
 pub mod output_verification_batch;
@@ -44,6 +61,16 @@ pub mod search_contradiction;
 pub mod search_document;
 pub mod search_knowledge;
 pub mod validate_calculation;
+pub mod verify_announcement_period;
+pub mod verify_bid_deposit;
+pub mod verify_bid_preparation_period;
+pub mod verify_procurement_method;
+pub mod check_imported_products;
+pub mod check_scoring_completeness;
+pub mod detect_subjective_scoring;
+pub mod validate_scoring_formula;
+pub mod validate_weight_distribution;
+pub mod verify_consortium_rules;
 
 // ─── AgentTool trait ──────────────────────────────────────────
 
