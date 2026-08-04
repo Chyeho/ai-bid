@@ -27,6 +27,21 @@ use ai_bid::agents::tools::search_document::SearchDocumentTool;
 use ai_bid::agents::tools::search_knowledge::{
     DashScopeSearchBackend, SearchBuffer, SearchKnowledgeTool,
 };
+// V2+ 工具
+use ai_bid::agents::tools::compare_versions::CompareVersionsTool;
+use ai_bid::agents::tools::detect_boilerplate::DetectBoilerplateTool;
+// V3 采购程序合规审查
+use ai_bid::agents::tools::verify_procurement_method::VerifyProcurementMethodTool;
+use ai_bid::agents::tools::verify_bid_deposit::VerifyBidDepositTool;
+use ai_bid::agents::tools::verify_announcement_period::VerifyAnnouncementPeriodTool;
+use ai_bid::agents::tools::verify_bid_preparation_period::VerifyBidPreparationPeriodTool;
+// V4 评审标准审查
+use ai_bid::agents::tools::validate_scoring_formula::ValidateScoringFormulaTool;
+use ai_bid::agents::tools::validate_weight_distribution::ValidateWeightDistributionTool;
+use ai_bid::agents::tools::detect_subjective_scoring::DetectSubjectiveScoringTool;
+use ai_bid::agents::tools::check_scoring_completeness::CheckScoringCompletenessTool;
+use ai_bid::agents::tools::check_imported_products::CheckImportedProductsTool;
+use ai_bid::agents::tools::verify_consortium_rules::VerifyConsortiumRulesTool;
 use ai_bid::agents::trace::TraceLog;
 use ai_bid::agents::types::{ChatAgentConfig, CoordinatorConfig, CoordinatorOutput, ReviewClause};
 use ai_bid::services::llm_client::create_llm_client;
@@ -853,6 +868,21 @@ async fn main() -> Result<()> {
                 panic!("搜索后端未初始化");
             }
             registry.register(Box::new(OutputFindingTool));
+            // V2+ 工具
+            registry.register(Box::new(CompareVersionsTool));
+            registry.register(Box::new(DetectBoilerplateTool));
+            // V3 采购程序合规审查
+            registry.register(Box::new(VerifyProcurementMethodTool));
+            registry.register(Box::new(VerifyBidDepositTool));
+            registry.register(Box::new(VerifyAnnouncementPeriodTool));
+            registry.register(Box::new(VerifyBidPreparationPeriodTool));
+            // V4 评审标准审查
+            registry.register(Box::new(ValidateScoringFormulaTool));
+            registry.register(Box::new(ValidateWeightDistributionTool));
+            registry.register(Box::new(DetectSubjectiveScoringTool));
+            registry.register(Box::new(CheckScoringCompletenessTool));
+            registry.register(Box::new(CheckImportedProductsTool));
+            registry.register(Box::new(VerifyConsortiumRulesTool));
             registry
         }
     };

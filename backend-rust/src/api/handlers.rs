@@ -30,6 +30,21 @@ use crate::agents::tools::{
     read_section::ReadSectionTool,
     search_document::SearchDocumentTool,
     search_knowledge::{DashScopeSearchBackend, SearchKnowledgeTool},
+    // V2+ 工具
+    compare_versions::CompareVersionsTool,
+    detect_boilerplate::DetectBoilerplateTool,
+    // V3 采购程序合规审查
+    verify_procurement_method::VerifyProcurementMethodTool,
+    verify_bid_deposit::VerifyBidDepositTool,
+    verify_announcement_period::VerifyAnnouncementPeriodTool,
+    verify_bid_preparation_period::VerifyBidPreparationPeriodTool,
+    // V4 评审标准审查
+    validate_scoring_formula::ValidateScoringFormulaTool,
+    validate_weight_distribution::ValidateWeightDistributionTool,
+    detect_subjective_scoring::DetectSubjectiveScoringTool,
+    check_scoring_completeness::CheckScoringCompletenessTool,
+    check_imported_products::CheckImportedProductsTool,
+    verify_consortium_rules::VerifyConsortiumRulesTool,
 };
 use crate::agents::trace::TraceLog;
 use crate::agents::types::{
@@ -875,6 +890,21 @@ async fn run_review_pipeline(
             registry.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
         }
         registry.register(Box::new(OutputFindingTool));
+        // V2+ 工具
+        registry.register(Box::new(CompareVersionsTool));
+        registry.register(Box::new(DetectBoilerplateTool));
+        // V3 采购程序合规审查
+        registry.register(Box::new(VerifyProcurementMethodTool));
+        registry.register(Box::new(VerifyBidDepositTool));
+        registry.register(Box::new(VerifyAnnouncementPeriodTool));
+        registry.register(Box::new(VerifyBidPreparationPeriodTool));
+        // V4 评审标准审查
+        registry.register(Box::new(ValidateScoringFormulaTool));
+        registry.register(Box::new(ValidateWeightDistributionTool));
+        registry.register(Box::new(DetectSubjectiveScoringTool));
+        registry.register(Box::new(CheckScoringCompletenessTool));
+        registry.register(Box::new(CheckImportedProductsTool));
+        registry.register(Box::new(VerifyConsortiumRulesTool));
         registry
     });
 

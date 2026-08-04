@@ -79,6 +79,11 @@ impl AgentRegistry {
                     "search_document",
                     "read_section",
                     "output_finding",
+                    // V3 采购程序合规审查工具
+                    "verify_procurement_method",
+                    "verify_bid_deposit",
+                    "verify_announcement_period",
+                    "verify_bid_preparation_period",
                 ],
             },
         );
@@ -156,6 +161,12 @@ impl AgentRegistry {
                     "search_document",
                     "read_section",
                     "output_finding",
+                    // V4 评审标准审查工具
+                    "validate_scoring_formula",
+                    "validate_weight_distribution",
+                    "detect_subjective_scoring",
+                    "check_scoring_completeness",
+                    "verify_consortium_rules",
                 ],
             },
         );
@@ -176,6 +187,8 @@ impl AgentRegistry {
                     "search_document",
                     "read_section",
                     "output_finding",
+                    // V4 进口产品 + 联合体审查
+                    "check_imported_products",
                 ],
             },
         );
