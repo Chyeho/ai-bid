@@ -1,0 +1,14 @@
+# ── 生产环境配置覆盖 ──
+server:
+  port: 8086
+
+file:
+  storage:
+    path: /opt/smart-tender/data/uploads
+
+preview:
+  cache:
+    path: /opt/smart-tender/data/preview-cache
+
+rag:
+  base-url: http://127.0.0.1:8000

@@ -1,0 +1,39 @@
+* {
+   box-sizing: border-box;
+}
+
+html,
+body {
+   padding: 0;
+   margin: 0;
+   font-size: 62.5%;
+}
+
+@media print {
+   /* 【新增】强制全局基底允许跨页打印 */
+   html,
+   body {
+      height: auto !important;
+      min-height: 100% !important;
+      overflow: visible !important;
+   }
+
+   /* 原有的隐藏侧边栏等代码保留... */
+   .ant-layout-sider,
+   .ant-layout-header,
+   .ant-breadcrumb,
+   .global-sidebar,
+   .global-navbar {
+      display: none !important;
+   }
+
+   .ant-layout,
+   .ant-layout-content {
+      background: #ffffff !important;
+      padding: 0 !important;
+      margin: 0 !important;
+      overflow: visible !important;
+      height: auto !important; /* 加上高度 auto */
+      min-height: auto !important;
+   }
+}

@@ -1,0 +1,123 @@
+# Milvus 2.6.11 单机版 Compose 配置（适配国内镜像源）
+services:
+  mysql:
+    container_name: ${ST_MYSQL_CONTAINER:-smart-mysql}
+    image: ${ST_MYSQL_IMAGE:-mysql:8.0}
+    command: --default-authentication-plugin=mysql_native_password
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${ST_MYSQL_ROOT_PASSWORD:-1234}
+      MYSQL_DATABASE: ${ST_MYSQL_DATABASE:-smart_tender_system}
+      TZ: Asia/Shanghai
+    ports:
+      - "${ST_DB_PORT:-3306}:3306"
+    volumes:
+      - ${ST_DATA_ROOT:-/opt/smart-tender/data}/mysql:/var/lib/mysql
+    networks:
+      - milvus-network
+  #Etcd 配置中心（国内镜像源可加速拉取）
+  etcd:
+    container_name: milvus-etcd
+    image: milvusdb/etcd:3.5.5-r2
+    volumes:
+      - ${ST_DATA_ROOT:-/opt/smart-tender/data}/milvus/etcd:/etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - milvus-network
+  # MinIO 存储服务
+  minio:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    volumes:
+      - ${ST_DATA_ROOT:-/opt/smart-tender/data}/milvus/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - milvus-network
+  #Milvus 核心服务
+  milvus-standalone:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.6.11
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - ${ST_DATA_ROOT:-/opt/smart-tender/data}/milvus/data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      mysql:
+        condition: service_started
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - milvus-network
+  #Attu 可视化控制台（Milvus Web UI）
+  attu:
+    container_name: milvus-attu
+    image: zilliz/attu:v2.3.8
+    ports:
+     - "3000:3000"
+    environment:
+      # Attu 连接的 Milvus 地址，使用 Docker 内部服务名
+     MILVUS_URL: milvus-standalone:19530
+     MILVUS_USERNAME: ""
+     MILVUS_PASSWORD: ""
+    depends_on:
+     milvus-standalone:
+       condition: service_started
+    networks:
+     - milvus-network
+  # Redis（供 Spring Boot 使用）
+  redis:
+    container_name: smart-redis
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ${ST_DATA_ROOT:-/opt/smart-tender/data}/redis:/data
+    networks:
+      - milvus-network
+  # 文档转换服务（JODConverter + LibreOffice）
+  doc-converter:
+    container_name: doc-converter
+    image: ghcr.io/jodconverter/jodconverter-examples:rest
+    ports:
+     - "8088:8080"
+    environment:
+     SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE: 50MB
+     SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE: 50MB
+    networks:
+      - milvus-network
+# 自定义网络（避免端口冲突）
+networks:
+  milvus-network:
+    name: milvus-network
+    driver: bridge

@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- 控制台输出：只显示关键业务日志 + 错误 -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %highlight(%-5level) [%thread] %cyan(%logger{36}) - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 文件输出：完整日志（需要时查阅） -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/smart-tender.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>logs/smart-tender.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 审核链路关键日志 → 醒目标记 ★ -->
+    <appender name="AUDIT_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} ★ %highlight(%-5level) [%thread] %cyan(%logger{36}) - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- ====== 日志级别配置 ====== -->
+
+    <!-- ★ 审核链路核心：INFO 级别，醒目输出 -->
+    <logger name="com.ithsd.smart_tender.service.impl.AuditEngineServiceImpl" level="INFO" additivity="false">
+        <appender-ref ref="AUDIT_CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </logger>
+
+    <!-- Rust API 客户端：DEBUG 可看到 HTTP 请求/响应 -->
+    <logger name="com.ithsd.smart_tender.service.rust" level="INFO"/>
+
+    <!-- 审核任务调度 -->
+    <logger name="com.ithsd.smart_tender.service.queue" level="INFO"/>
+
+    <!-- SSE 推送 -->
+    <logger name="com.ithsd.smart_tender.sse" level="WARN"/>
+
+    <!-- 业务 Service 层 -->
+    <logger name="com.ithsd.smart_tender.service" level="INFO"/>
+
+    <!-- Controller 层（请求日志） -->
+    <logger name="com.ithsd.smart_tender.controller" level="INFO"/>
+
+    <!-- ====== 关闭噪音源 ====== -->
+
+    <!-- MyBatis SQL 日志：关掉 stdout 轰炸 -->
+    <logger name="org.mybatis" level="WARN"/>
+    <logger name="org.apache.ibatis" level="WARN"/>
+    <logger name="com.baomidou.mybatisplus" level="WARN"/>
+    <!-- 如果用 Slf4jImpl，mapper 日志走这里；设 DEBUG 可临时开启 SQL -->
+    <logger name="com.ithsd.smart_tender.mapper" level="WARN"/>
+
+    <!-- Spring 框架：只显示 WARN+ -->
+    <logger name="org.springframework" level="WARN"/>
+    <logger name="org.springframework.web" level="INFO"/>
+    <logger name="org.springframework.boot" level="INFO"/>
+
+    <!-- Hibernate / JPA -->
+    <logger name="org.hibernate" level="WARN"/>
+    <logger name="org.hibernate.SQL" level="WARN"/>
+    <logger name="org.hibernate.type.descriptor.sql" level="WARN"/>
+
+    <!-- 数据库连接池 -->
+    <logger name="com.zaxxer.hikari" level="WARN"/>
+    <logger name="com.alibaba.druid" level="WARN"/>
+
+    <!-- 其他常见噪音 -->
+    <logger name="org.apache" level="WARN"/>
+    <logger name="io.lettuce" level="WARN"/>
+    <logger name="io.netty" level="WARN"/>
+    <logger name="reactor" level="WARN"/>
+
+    <!-- 开发时可改 DEBUG 查看完整 SQL -->
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+</configuration>

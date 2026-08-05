@@ -1,0 +1,86 @@
+function DocumentIllustration({ tokenTheme }: { tokenTheme: any }) {
+   return (
+      <svg
+         width='200'
+         height='200'
+         viewBox='0 0 200 200'
+         fill='none'
+         xmlns='http://www.w3.org/2000/svg'
+      >
+         <rect
+            x='40'
+            y='30'
+            width='120'
+            height='140'
+            rx='8'
+            fill={tokenTheme.colorBgContainer}
+            stroke={tokenTheme.colorBorder}
+            strokeWidth='2'
+         />
+         <rect
+            x='55'
+            y='50'
+            width='90'
+            height='8'
+            rx='2'
+            fill={tokenTheme.colorPrimaryBg}
+         />
+         <rect
+            x='55'
+            y='68'
+            width='70'
+            height='6'
+            rx='2'
+            fill={tokenTheme.colorBorderSecondary}
+         />
+         <rect
+            x='55'
+            y='85'
+            width='90'
+            height='6'
+            rx='2'
+            fill={tokenTheme.colorBorderSecondary}
+         />
+         <rect
+            x='55'
+            y='100'
+            width='80'
+            height='6'
+            rx='2'
+            fill={tokenTheme.colorBorderSecondary}
+         />
+         <rect
+            x='55'
+            y='115'
+            width='90'
+            height='6'
+            rx='2'
+            fill={tokenTheme.colorBorderSecondary}
+         />
+         <rect
+            x='55'
+            y='130'
+            width='60'
+            height='6'
+            rx='2'
+            fill={tokenTheme.colorBorderSecondary}
+         />
+         <circle
+            cx='140'
+            cy='60'
+            r='15'
+            fill={tokenTheme.colorPrimary}
+            opacity='0.1'
+         />
+         <path
+            d='M133 60L138 65L148 55'
+            stroke={tokenTheme.colorPrimary}
+            strokeWidth='2'
+            strokeLinecap='round'
+            strokeLinejoin='round'
+         />
+      </svg>
+   );
+}
+
+export { DocumentIllustration };
