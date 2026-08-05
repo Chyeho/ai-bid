@@ -18,7 +18,7 @@ export default defineConfig({
       proxy: {
          // SSE 端点 — 优先匹配，禁用缓冲确保事件实时推送
          '/api/chat/stream': {
-            target: 'http://127.0.0.1:8086',
+            target: 'http://127.0.0.1:3000',
             changeOrigin: true,
             selfHandleResponse: true,
             configure: (proxy) => {
@@ -52,7 +52,7 @@ export default defineConfig({
             },
          },
          '/api': {
-            target: 'http://127.0.0.1:8086',
+            target: 'http://127.0.0.1:3000',
             changeOrigin: true,
          },
       },

@@ -1059,7 +1059,7 @@ mod tests {
                     .flat_map(|p| p.tables.iter())
                     .filter(|t| t.bbox.is_some())
                     .count();
-                let _headings: usize = doc
+                let headings: usize = doc
                     .pages
                     .iter()
                     .flat_map(|p| p.blocks.iter())
@@ -1095,7 +1095,7 @@ mod tests {
                 total_chars: 0,
                 total_words: 0,
                 total_blocks: 0,
-                _headings: 0,
+                headings: 0,
                 total_tables: 0,
                 tables_with_bbox: 0,
                 max_page_chars: 0,
@@ -1112,10 +1112,10 @@ mod tests {
         total_chars: usize,
         total_words: usize,
         total_blocks: usize,
-        __headings: usize,
+        headings: usize,
         total_tables: usize,
         tables_with_bbox: usize,
-        _max_page_chars: usize,
+        max_page_chars: usize,
         error: String,
     }
 
@@ -1262,7 +1262,7 @@ mod tests {
             let doc = extract_pdf_to_raw_json(pdf)
                 .unwrap_or_else(|e| panic!("解析失败 {}: {}", pdf, e));
 
-            let _headings: Vec<&RawBlock> = doc
+            let headings: Vec<&RawBlock> = doc
                 .pages
                 .iter()
                 .flat_map(|p| p.blocks.iter())

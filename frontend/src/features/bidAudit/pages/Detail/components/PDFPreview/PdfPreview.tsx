@@ -841,16 +841,34 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
                if (renderedWidth <= 0) return;
 
                // 3. 将 PDF points → DOM 像素 (scale = renderedPx / originalPt)
-               const highlightBoxes: HighlightBox[] = bboxes.map((b, idx) => {
-                  const scaleFactor = renderedWidth / (b.pageWidth || 595);
-                  return {
-                     left: b.x0 * scaleFactor,
-                     top: b.top * scaleFactor,
-                     width: Math.max(1, (b.x1 - b.x0) * scaleFactor),
-                     height: Math.max(1, (b.bottom - b.top) * scaleFactor),
-                     primary: idx === 0,
-                  };
+               const renderedHeight = pageEl.clientHeight;
+               const scaleFactor = renderedWidth / (bboxes[0]?.pageWidth || 595);
+               const pageArea = renderedWidth * renderedHeight;
+
+               // 过滤占位 bbox（来自 blocks_from_text 降级路径，特征是 x0==0 && x1==400 且高度极小）
+               // 以及覆盖面积 >60% 页面的异常大 bbox
+               const MAX_BBOX_AREA_RATIO = 0.6;
+               const validBboxes = bboxes.filter((b) => {
+                  const w = Math.max(1, (b.x1 - b.x0) * scaleFactor);
+                  const h = Math.max(1, (b.bottom - b.top) * scaleFactor);
+                  const area = w * h;
+                  const isPlaceholder =
+                     b.x0 === 0 && b.x1 === 400 && (b.bottom - b.top) <= 20.1;
+                  const isTooLarge = pageArea > 0 && area / pageArea > MAX_BBOX_AREA_RATIO;
+                  return !isPlaceholder && !isTooLarge;
                });
+
+               // 限制高亮框数量（最多 5 个），避免一页所有 block 都被点亮
+               const MAX_BBOXES = 5;
+               const limited = validBboxes.slice(0, MAX_BBOXES);
+
+               const highlightBoxes: HighlightBox[] = limited.map((b, idx) => ({
+                  left: b.x0 * scaleFactor,
+                  top: b.top * scaleFactor,
+                  width: Math.max(1, (b.x1 - b.x0) * scaleFactor),
+                  height: Math.max(1, (b.bottom - b.top) * scaleFactor),
+                  primary: idx === 0,
+               }));
 
                setHighlightBoxesByPage((prev) => ({
                   ...prev,
@@ -858,10 +876,9 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
                }));
                setHighlightStatus('exact_hit');
                console.info(
-                  '[pdf-highlight] engine=bbox page=%s boxes=%s scale=%.3f',
-                  page, highlightBoxes.length, highlightBoxes.length > 0
-                     ? (renderedWidth / (bboxes[0].pageWidth || 595))
-                     : 0
+                  '[pdf-highlight] engine=bbox page=%s boxes=%s/%s scale=%.3f',
+                  page, highlightBoxes.length, bboxes.length,
+                  scaleFactor
                );
 
                // 4. 滚动到第一个高亮区域
