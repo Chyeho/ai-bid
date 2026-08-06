@@ -149,8 +149,8 @@ mod tests {
         assert_eq!(formula_ok["status"], "compliant");
 
         // ── P6: 权重分配合规检查 ──
-        // 价格分 70% + 技术分 20% + 商务分 10% = 100%
-        // 货物价格分 70% > 60% → violation，且权重和不等于 100
+        // 价格分 20% + 技术分 70% + 商务分 10% = 100%
+        // 货物价格分 20% < 30%(最低) → violation
         let weight_tool = ValidateWeightDistributionTool;
         let weight_result = weight_tool
             .execute(serde_json::json!({

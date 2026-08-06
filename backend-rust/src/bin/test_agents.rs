@@ -50,6 +50,11 @@ use ai_bid::agents::tools::detect_subjective_scoring::DetectSubjectiveScoringToo
 use ai_bid::agents::tools::check_scoring_completeness::CheckScoringCompletenessTool;
 use ai_bid::agents::tools::check_imported_products::CheckImportedProductsTool;
 use ai_bid::agents::tools::verify_consortium_rules::VerifyConsortiumRulesTool;
+// 零依赖计算工具
+use ai_bid::agents::tools::calculate_timeline::CalculateTimelineTool;
+// 依赖 chunk 数据的工具
+use ai_bid::agents::tools::check_cross_reference::CheckCrossReferenceTool;
+use ai_bid::agents::tools::extract_obligations::ExtractObligationsTool;
 use ai_bid::agents::trace::TraceLog;
 use ai_bid::agents::types::*;
 use ai_bid::domain::chunk::{Chunk, ChunkType};
@@ -184,6 +189,17 @@ fn make_tools_factory(
         registry.register(Box::new(CheckScoringCompletenessTool));
         registry.register(Box::new(CheckImportedProductsTool));
         registry.register(Box::new(VerifyConsortiumRulesTool));
+        // 零依赖计算工具
+        registry.register(Box::new(CalculateTimelineTool));
+        // 依赖 chunk 数据的工具（测试环境有 chunks + chunk_order）
+        registry.register(Box::new(CheckCrossReferenceTool::new(
+            chunks.clone(),
+            chunk_order.clone(),
+        )));
+        registry.register(Box::new(ExtractObligationsTool::new(
+            chunks.clone(),
+            chunk_order.clone(),
+        )));
         eprintln!(
             "[test_agents] ── 测试工具集注册完成: 共 {} 个工具 ──",
             registry.len()

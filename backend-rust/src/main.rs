@@ -30,6 +30,11 @@ use ai_bid::agents::tools::search_knowledge::{
 // V2+ 工具
 use ai_bid::agents::tools::compare_versions::CompareVersionsTool;
 use ai_bid::agents::tools::detect_boilerplate::DetectBoilerplateTool;
+// 零依赖计算/检查工具
+use ai_bid::agents::tools::calculate_timeline::CalculateTimelineTool;
+// 依赖 chunk 数据的工具
+use ai_bid::agents::tools::check_cross_reference::CheckCrossReferenceTool;
+use ai_bid::agents::tools::extract_obligations::ExtractObligationsTool;
 // V3 采购程序合规审查
 use ai_bid::agents::tools::verify_procurement_method::VerifyProcurementMethodTool;
 use ai_bid::agents::tools::verify_bid_deposit::VerifyBidDepositTool;
@@ -884,6 +889,17 @@ async fn main() -> Result<()> {
             registry.register(Box::new(CheckScoringCompletenessTool));
             registry.register(Box::new(CheckImportedProductsTool));
             registry.register(Box::new(VerifyConsortiumRulesTool));
+            // 零依赖计算工具
+            registry.register(Box::new(CalculateTimelineTool));
+            // 依赖 chunk 数据的工具
+            registry.register(Box::new(CheckCrossReferenceTool::new(
+                chunk_map.clone(),
+                chunk_order.clone(),
+            )));
+            registry.register(Box::new(ExtractObligationsTool::new(
+                chunk_map.clone(),
+                chunk_order.clone(),
+            )));
             eprintln!(
                 "[main] ── 工具集注册完成: 共 {} 个工具 ──",
                 registry.len()

@@ -430,17 +430,17 @@ impl AgentTool for CompareVersionsTool {
         }
 
         // 2. 遍历新版 chunks，查找未匹配的（新增）
-        for prev in &parsed.current_chunks {
-            if !current_matched.contains_key(&prev.chunk_id) {
+        for curr in &parsed.current_chunks {
+            if !current_matched.contains_key(&curr.chunk_id) {
                 // 还要检查是否作为 modified 出现了
                 let is_modified_target = modified
                     .iter()
-                    .any(|m| m.curr_chunk_id == prev.chunk_id);
+                    .any(|m| m.curr_chunk_id == curr.chunk_id);
                 if !is_modified_target {
                     added.push(DiffItem {
-                        chunk_id: prev.chunk_id.clone(),
-                        section_path: prev.section_path.clone(),
-                        text_preview: prev.text.chars().take(200).collect(),
+                        chunk_id: curr.chunk_id.clone(),
+                        section_path: curr.section_path.clone(),
+                        text_preview: curr.text.chars().take(200).collect(),
                         page_location: String::new(),
                     });
                 }

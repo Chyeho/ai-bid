@@ -196,7 +196,17 @@ impl ValidateWeightDistributionTool {
             || !price_range_ok
             || !missing_dimensions.is_empty();
 
-        let status = if has_violation { "violation" } else { "compliant" };
+        let has_risk = !has_violation
+            && (!price_range_ok || args.technical_weight > 0.0
+                && (args.technical_weight < 20.0 || args.technical_weight > 60.0));
+
+        let status = if has_violation {
+            "violation"
+        } else if has_risk {
+            "risk"
+        } else {
+            "compliant"
+        };
 
         // ── 6. 综合摘要 ──
         let mut summary_parts: Vec<String> = Vec::new();

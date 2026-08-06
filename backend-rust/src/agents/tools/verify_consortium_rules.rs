@@ -312,10 +312,12 @@ impl VerifyConsortiumRulesTool {
             "violation".to_string()
         } else if !risks.is_empty() {
             "risk".to_string()
-        } else if qualification_rule_ok.unwrap_or(false) || consortium_allowed.is_some() {
+        } else if qualification_rule_ok == Some(true) || consortium_allowed == Some(true) {
             "compliant".to_string()
-        } else {
+        } else if consortium_allowed.is_none() && qualification_rule_ok.is_none() {
             "clean".to_string()
+        } else {
+            "compliant".to_string()
         };
 
         let mut suggestion_parts: Vec<String> = Vec::new();

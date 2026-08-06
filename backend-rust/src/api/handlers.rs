@@ -45,6 +45,11 @@ use crate::agents::tools::{
     check_scoring_completeness::CheckScoringCompletenessTool,
     check_imported_products::CheckImportedProductsTool,
     verify_consortium_rules::VerifyConsortiumRulesTool,
+    // 零依赖计算/检查工具
+    calculate_timeline::CalculateTimelineTool,
+    // 依赖 chunk 数据的工具
+    check_cross_reference::CheckCrossReferenceTool,
+    extract_obligations::ExtractObligationsTool,
 };
 use crate::agents::trace::TraceLog;
 use crate::agents::types::{
@@ -906,6 +911,17 @@ async fn run_review_pipeline(
         registry.register(Box::new(CheckScoringCompletenessTool));
         registry.register(Box::new(CheckImportedProductsTool));
         registry.register(Box::new(VerifyConsortiumRulesTool));
+        // 零依赖计算工具
+        registry.register(Box::new(CalculateTimelineTool));
+        // 依赖 chunk 数据的工具
+        registry.register(Box::new(CheckCrossReferenceTool::new(
+            chunk_map_for_tools.clone(),
+            chunk_order_for_tools.clone(),
+        )));
+        registry.register(Box::new(ExtractObligationsTool::new(
+            chunk_map_for_tools.clone(),
+            chunk_order_for_tools.clone(),
+        )));
         eprintln!(
             "[handlers] ── 工具集注册完成: 共 {} 个工具 ──",
             registry.len()

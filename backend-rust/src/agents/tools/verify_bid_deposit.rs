@@ -34,7 +34,8 @@ const PERFORMANCE_DEPOSIT_RATE_MAX: f64 = 0.10;
 /// 投标保证金退还时限：5 个工作日
 const BID_DEPOSIT_RETURN_DAYS_MAX: i64 = 5;
 /// 接受的保证金形式
-const VALID_DEPOSIT_FORMS: &[&str] = &["现金", "保函", "保证保险"];
+/// 《政府采购法实施条例》第33条：投标保证金应当以非现金形式提交。
+const VALID_DEPOSIT_FORMS: &[&str] = &["保函", "保证保险"];
 
 // ─── 参数 ──────────────────────────────────────────────────────
 
@@ -47,14 +48,17 @@ pub struct VerifyBidDepositArgs {
     /// 合同金额（万元）。校验保证金比例时必填
     #[serde(default)]
     pub contract_amount: Option<f64>,
-    /// 保证金形式：现金/保函/保证保险
+    /// 保证金形式：保函/保证保险（非现金形式）
     #[serde(default)]
     pub deposit_form: Option<String>,
-    /// 退还时限（工作日）
+    /// 退还时限（工作日），如为负数额外告警
     #[serde(default)]
     pub return_deadline_days: Option<i64>,
     /// 保证金类型：bid（投标保证金）或 performance（履约保证金）
     pub deposit_type: String,
+    /// 采购品类：货物/工程/服务，用于区分数额上限（工程 80 万，货物+服务 50 万）
+    #[serde(default)]
+    pub procurement_category: Option<String>,
 }
 
 // ─── 输出 ──────────────────────────────────────────────────────
@@ -177,8 +181,12 @@ impl VerifyBidDepositTool {
             // ② 金额上限检查（货物/服务 50万，工程 80万）
             if let Some(deposit) = args.deposit_amount {
                 has_data = true;
-                // 默认按货物/服务 50 万为最严格上限
-                let cap = BID_DEPOSIT_CAP_GOODS_SERVICE;
+                let cat = args.procurement_category.as_deref().unwrap_or("货物");
+                let cap = if cat == "工程" {
+                    BID_DEPOSIT_CAP_CONSTRUCTION
+                } else {
+                    BID_DEPOSIT_CAP_GOODS_SERVICE
+                };
                 if deposit > cap {
                     has_violation = true;
                     checks.push(DepositCheck {

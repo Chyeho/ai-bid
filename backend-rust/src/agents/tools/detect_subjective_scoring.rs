@@ -212,8 +212,9 @@ impl DetectSubjectiveScoringTool {
         quantification_issues.extend(qual_issues);
 
         // ── 4. 综合判定 ──
-        let (status, risk_level, suggestion) = if has_strong_subjective || !quantification_issues.is_empty() && range_too_wide && range_span > RANGE_SPAN_SEVERE {
-            // 强主观关键词 或 区间严重过宽+有量化问题 → violation
+        // 注意: && 优先级高于 ||, 需加括号明确语义
+        let (status, risk_level, suggestion) = if (has_strong_subjective || !quantification_issues.is_empty()) && range_too_wide && range_span > RANGE_SPAN_SEVERE {
+            // 强主观关键词 或 有量化问题 + 区间严重过宽 → violation
             let s = "violation";
             let rl = "high";
             let mut sugg = String::new();

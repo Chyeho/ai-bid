@@ -27,15 +27,29 @@ use super::AgentTool;
 
 /// 进口产品采购相关关键词（命中即需审批）。
 const IMPORT_PURCHASE_KEYWORDS: &[&str] = &[
-    "进口",
+    "采购进口",
+    "采购原装进口",
+    "进口设备",
+    "进口产品",
+    "境外采购",
+    "境外提供",
+];
+
+/// 弱进口信号（需结合上下文判断，避免误报）。
+/// 这些词本身可能只是背景描述（如"海外项目经验"），必须结合周边判断。
+const IMPORT_WEAK_KEYWORDS: &[&str] = &[
     "原装进口",
     "海外",
     "国际品牌",
-    "境外采购",
-    "境外提供",
     "CE认证",
     "FDA认证",
     "UL认证",
+];
+
+/// 排除上下文 — 包含这些短语时弱信号不应触发。
+const IMPORT_EXCLUDE_CONTEXT: &[&str] = &[
+    "不接受", "禁止", "不得采购", "不得使用", "未经审批",
+    "海外项目", "海外市场", "国际品牌不", "不接受国际",
 ];
 
 /// 仅表示参考国际标准的关键词（不视为进口产品采购）。
@@ -128,6 +142,19 @@ impl CheckImportedProductsTool {
             if text.contains(kw) {
                 detected_keywords.push(kw.to_string());
                 has_import_purchase = true;
+            }
+        }
+
+        // 弱信号检测（需排除上下文）
+        for kw in IMPORT_WEAK_KEYWORDS {
+            if text.contains(kw) {
+                let window_start = text.find(kw).unwrap_or(0).saturating_sub(20);
+                let context = &text[window_start..(window_start + kw.len() + 20).min(text.len())];
+                let is_excluded = IMPORT_EXCLUDE_CONTEXT.iter().any(|ex| context.contains(ex));
+                if !is_excluded {
+                    detected_keywords.push(kw.to_string());
+                    has_import_purchase = true;
+                }
             }
         }
 

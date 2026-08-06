@@ -52,6 +52,8 @@ impl AgentRegistry {
                     "search_document",
                     "read_section",
                     "output_finding",
+                    // 交叉引用完整性检查
+                    "check_cross_reference",
                 ],
             },
         );
@@ -84,6 +86,8 @@ impl AgentRegistry {
                     "verify_bid_deposit",
                     "verify_announcement_period",
                     "verify_bid_preparation_period",
+                    // 零依赖计算工具
+                    "calculate_timeline",
                 ],
             },
         );
@@ -102,6 +106,9 @@ impl AgentRegistry {
                     "search_document",
                     "read_section",
                     "output_finding",
+                    // 义务提取与排斥检测
+                    "extract_obligations",
+                    "check_cross_reference",
                 ],
             },
         );

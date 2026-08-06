@@ -271,14 +271,39 @@ impl DetectBoilerplateTool {
 
                 // 模式 1：内容极短（< 30 字）且不是 frontmatter → 空壳章节
                 if text_len < 30 && !chunk.section_path.is_empty() {
-                    // 排除纯标题或真正的简短条款
-                    let is_title_only = chunk.text.trim().chars().all(|c| {
-                        c == '。' || c == '：'
-                            || c == '、'
-                            || c.is_whitespace()
-                            || !c.is_ascii_punctuation()
+                    // 检测是否为仅含标题性字符的"空壳章节"
+                    // 合法标题内容: 中文汉字、数字、空格、中文标点、常见连接符
+                    let has_substance = chunk.text.trim().chars().any(|c| {
+                        c.is_alphanumeric()
+                            && !c.is_ascii_digit()
+                            && !c.is_whitespace()
+                            && c != '、'
+                            && c != '：'
+                            && c != '。'
+                            && c != '（'
+                            && c != '）'
+                            && c != '第'
+                            && c != '条'
+                            && c != '章'
+                            && c != '节'
+                            && c != '附'
+                            && c != '录'
+                            && c != '一'
+                            && c != '二'
+                            && c != '三'
+                            && c != '四'
+                            && c != '五'
+                            && c != '六'
+                            && c != '七'
+                            && c != '八'
+                            && c != '九'
+                            && c != '十'
                     });
-                    if !is_title_only {
+                    // 检测章节编号模式(如 "第六章"、"1.2.3"、"四、")
+                    let has_section_pattern = chunk.text.trim().len() < 15
+                        || (chunk.text.contains("项目") && chunk.text.trim().len() < 25);
+                    let is_empty_shell = (!has_substance || has_section_pattern) && text_len < 30;
+                    if is_empty_shell {
                         superfluous.push(SuperfluousSection {
                             chunk_id: chunk_id.clone(),
                             section_path: chunk.section_path.clone(),
