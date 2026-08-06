@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -304,7 +305,7 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
             throw resourceNotFound();
         }
         knowledgeFile.setStatus(2); // 2表示已删除
-        this.updateById(knowledgeFile);
+        requireScopedUpdate(knowledgeFile, currentContext().tenantId());
     }
     
     @Override
@@ -314,14 +315,14 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
         // 获取旧文件信息
         KnowledgeFile oldFile = getVisibleById(fileId);
         if (oldFile == null) {
-            throw new RuntimeException("文件不存在");
+            throw resourceNotFound();
         }
         
         // 判断是否上传了新文件
         if (file != null && !file.isEmpty()) {
             // 将旧文件标记为历史版本（状态设置为 0）
             oldFile.setStatus(0);
-            this.updateById(oldFile);
+            requireScopedUpdate(oldFile, context.tenantId());
             
             // 生成新版本号
             int newVersion = oldFile.getVersion() + 1;
@@ -401,18 +402,20 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
             if (status != null) {
                 oldFile.setStatus(status);
             }
-            this.updateById(oldFile);
+            requireScopedUpdate(oldFile, context.tenantId());
         }
     }
 
     @Override
     public void updateKnowledgeFileStatus(Long fileId, int status) {
         KnowledgeFile knowledgeFile = getVisibleById(fileId);
-        if (knowledgeFile != null) {
-            knowledgeFile.setStatus(status);
-            knowledgeFile.setUpdateTime(LocalDateTime.now());
-            this.updateById(knowledgeFile);
+        if (knowledgeFile == null) {
+            throw resourceNotFound();
         }
+        KnowledgeFile update = new KnowledgeFile();
+        update.setStatus(status);
+        update.setUpdateTime(LocalDateTime.now());
+        requireScopedUpdate(update, currentContext().tenantId(), fileId);
     }
 
     private TenantRequestContext currentContext() {
@@ -426,6 +429,20 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
                 "Knowledge file not found",
                 currentContext().requestId()
         );
+    }
+
+    private void requireScopedUpdate(KnowledgeFile entity, Long tenantId) {
+        requireScopedUpdate(entity, tenantId, entity.getId());
+    }
+
+    private void requireScopedUpdate(KnowledgeFile entity, Long tenantId, Long fileId) {
+        LambdaUpdateWrapper<KnowledgeFile> update = new LambdaUpdateWrapper<>();
+        update.eq(KnowledgeFile::getId, fileId)
+                .eq(KnowledgeFile::getTenantId, tenantId);
+        int affectedRows = knowledgeMapper.update(entity, update);
+        if (affectedRows != 1) {
+            throw resourceNotFound();
+        }
     }
 
 }

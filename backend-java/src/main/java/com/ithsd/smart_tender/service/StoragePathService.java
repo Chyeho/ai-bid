@@ -58,9 +58,7 @@ public class StoragePathService {
 
     public Path previewCachePath() {
         if (StringUtils.hasText(previewCacheDir)) {
-            Path configured = Paths.get(previewCacheDir).toAbsolutePath().normalize();
-            ensureWithinRoot(configured);
-            return configured;
+            return Paths.get(previewCacheDir).normalize();
         }
         return rootPath().resolve("preview-cache").normalize();
     }

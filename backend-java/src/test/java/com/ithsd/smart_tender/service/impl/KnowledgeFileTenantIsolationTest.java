@@ -52,4 +52,28 @@ class KnowledgeFileTenantIsolationTest {
                 .findByIdAndTenantId(9002L, 2001L);
         verify(knowledgeMapper, never()).updateById(any(KnowledgeFile.class));
     }
+
+    @Test
+    void tenantA_cannotUpdateOrChangeStatusOfTenantBFile() {
+        TenantRequestContext tenantA = new TenantRequestContext(1001L, 2001L, "OWNER", 1L, "request-a");
+        when(authorization.requireCurrentTenant()).thenReturn(tenantA);
+        when(knowledgeMapper.findByIdAndTenantId(any(), any())).thenReturn(null);
+
+        assertThatThrownBy(() -> knowledgeFileService.updateKnowledgeFile(
+                        9002L, null, "renamed.pdf", "general", null, null, null, null))
+                .isInstanceOfSatisfying(TenantAuthException.class, ex -> {
+                    assertThat(ex.getStatus()).isEqualTo(404);
+                    assertThat(ex.getErrorCode()).isEqualTo("RESOURCE_NOT_FOUND");
+                });
+        assertThatThrownBy(() -> knowledgeFileService.updateKnowledgeFileStatus(9002L, 2))
+                .isInstanceOfSatisfying(TenantAuthException.class, ex -> {
+                    assertThat(ex.getStatus()).isEqualTo(404);
+                    assertThat(ex.getErrorCode()).isEqualTo("RESOURCE_NOT_FOUND");
+                });
+
+        verify(knowledgeMapper, org.mockito.Mockito.times(2))
+                .findByIdAndTenantId(9002L, 2001L);
+        verify(knowledgeMapper, never()).update(any(KnowledgeFile.class), any());
+        verify(knowledgeMapper, never()).updateById(any(KnowledgeFile.class));
+    }
 }

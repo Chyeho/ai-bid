@@ -37,6 +37,10 @@ class StoragePathServiceTest {
                         .toAbsolutePath().normalize())).isTrue();
         assertThat(service.toStoredPath(path)).startsWith("tenant/2001/");
 
+        Path externalPreviewCache = root.getParent().resolve("preview-cache-outside-root");
+        ReflectionTestUtils.setField(service, "previewCacheDir", externalPreviewCache.toString());
+        assertThat(service.previewCachePath()).isEqualTo(externalPreviewCache.normalize());
+
         assertThatThrownBy(() -> service.resolveStoredPath("../outside.pdf"))
                 .isInstanceOf(SecurityException.class);
         assertThatThrownBy(() -> service.resolveStoredPath("tenant/2002/knowledge/uploads/file.pdf"))
