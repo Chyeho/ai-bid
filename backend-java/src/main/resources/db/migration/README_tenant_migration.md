@@ -44,6 +44,10 @@ before Contract.
   Resource updates target the source row's primary key and require `tenant_id IS NULL`.
   Re-running V6 therefore does not duplicate tenants, members, or assignments and does
   not overwrite an existing assignment.
+- Optional Trace backfill in V6 uses top-level conditional `PREPARE`/`EXECUTE` statements,
+  keeps the parent-first chain and `tenant_id IS NULL` guards, and is safe to rerun without
+  routine DDL. MySQL DDL is not transactional, so an interrupted V5 run or rollback can
+  leave a partially expanded schema; use backup evidence and change control.
 - `project.user_id` is the strongest V1 owner signal.
 - `bid_document.upload_user_id` wins when it agrees with the resolved project owner;
   a missing uploader may inherit a resolved project owner. A conflict is left NULL.
@@ -81,6 +85,12 @@ Review all result sets. In particular, before Enforce/Contract:
 - null `tenant_id` rows are either zero or explicitly listed as unresolved;
 - parent/child tenant mismatch results are empty;
 - tenant-visible counts match the saved pre-migration evidence.
+
+The validation script is read-only: it uses no routine DDL, creates no routines or other
+database objects, and uses only top-level information_schema conditions plus prepared
+SELECT statements. When Trace tables or their `tenant_id` columns are absent, the optional
+result sets identify the condition as `skipped/absent` instead of referencing a missing
+table.
 
 ## Rollback and application flags
 

@@ -99,6 +99,56 @@ BEGIN
       SET MESSAGE_TEXT = 'Rollback is disabled. Set @tenant_expand_rollback_confirmed = YES after the pre-backfill checks.';
   END IF;
 
+  IF (
+    SELECT COUNT(*)
+      FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_type = 'BASE TABLE'
+       AND table_name IN (
+         'tenant', 'tenant_member', 'tenant_invitation', 'tenant_audit_log'
+       )
+  ) <> 4 THEN
+    SIGNAL SQLSTATE '45000'
+      SET MESSAGE_TEXT = 'Rollback schema preflight failed: tenant tables are missing.';
+  END IF;
+
+  IF (
+    SELECT COUNT(DISTINCT c.table_name)
+      FROM information_schema.columns AS c
+     WHERE c.table_schema = DATABASE()
+       AND c.column_name = 'tenant_id'
+       AND c.table_name IN (
+         'project', 'bid_document', 'audit_task', 'audit_issue', 'audit_report',
+         'audit_task_event', 'knowledge_file', 'knowledge_chunk', 'chat_message',
+         'document_parse_job', 'rag_trigger_outbox'
+       )
+  ) <> 11 THEN
+    SIGNAL SQLSTATE '45000'
+      SET MESSAGE_TEXT = 'Rollback schema preflight failed: required tenant_id columns are missing.';
+  END IF;
+
+  IF (
+    SELECT COUNT(DISTINCT CONCAT(s.table_name, ':', s.index_name))
+      FROM information_schema.statistics AS s
+     WHERE s.table_schema = DATABASE()
+       AND (
+         (s.table_name = 'project' AND s.index_name = 'idx_project_tenant_id_user_id')
+         OR (s.table_name = 'bid_document' AND s.index_name = 'idx_bid_document_tenant_id_project_id')
+         OR (s.table_name = 'audit_task' AND s.index_name = 'idx_audit_task_tenant_id_bid_id')
+         OR (s.table_name = 'audit_issue' AND s.index_name = 'idx_audit_issue_tenant_id_audit_id')
+         OR (s.table_name = 'audit_report' AND s.index_name = 'idx_audit_report_tenant_id_audit_id')
+         OR (s.table_name = 'audit_task_event' AND s.index_name = 'idx_audit_task_event_tenant_id_task_id_id')
+         OR (s.table_name = 'knowledge_file' AND s.index_name = 'idx_knowledge_file_tenant_id_upload_time_id')
+         OR (s.table_name = 'knowledge_chunk' AND s.index_name = 'idx_knowledge_chunk_tenant_id_file_id_id')
+         OR (s.table_name = 'chat_message' AND s.index_name = 'idx_chat_message_tenant_id_project_id_id')
+         OR (s.table_name = 'document_parse_job' AND s.index_name = 'idx_document_parse_job_tenant_id_file_id_id')
+         OR (s.table_name = 'rag_trigger_outbox' AND s.index_name = 'idx_rag_trigger_outbox_tenant_id_file_id_id')
+       )
+  ) <> 11 THEN
+    SIGNAL SQLSTATE '45000'
+      SET MESSAGE_TEXT = 'Rollback schema preflight failed: required tenant indexes are missing.';
+  END IF;
+
   IF EXISTS (SELECT 1 FROM `tenant` LIMIT 1)
      OR EXISTS (SELECT 1 FROM `tenant_member` LIMIT 1)
      OR EXISTS (SELECT 1 FROM `tenant_invitation` LIMIT 1)

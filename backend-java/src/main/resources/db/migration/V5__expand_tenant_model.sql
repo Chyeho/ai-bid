@@ -89,6 +89,17 @@ BEGIN
     PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
     EXECUTE tenant_migration_stmt;
     DEALLOCATE PREPARE tenant_migration_stmt;
+  ELSEIF NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = p_table_name
+       AND column_name = 'tenant_id'
+       AND data_type = 'bigint'
+       AND is_nullable = 'YES'
+  ) THEN
+    SIGNAL SQLSTATE '45000'
+      SET MESSAGE_TEXT = 'Existing tenant_id must be nullable BIGINT.';
   END IF;
 END$$
 
@@ -99,6 +110,9 @@ CREATE PROCEDURE `tenant_migration_ensure_index`(
   IN p_index_columns VARCHAR(255)
 )
 BEGIN
+  DECLARE v_index_column_count BIGINT DEFAULT 0;
+  DECLARE v_index_columns VARCHAR(255) DEFAULT NULL;
+
   IF NOT EXISTS (
     SELECT 1
       FROM information_schema.statistics
@@ -114,6 +128,29 @@ BEGIN
     PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
     EXECUTE tenant_migration_stmt;
     DEALLOCATE PREPARE tenant_migration_stmt;
+  ELSE
+    SELECT
+      COUNT(*),
+      GROUP_CONCAT(
+        CONCAT('`', s.column_name, '`')
+        ORDER BY s.seq_in_index
+        SEPARATOR ', '
+      )
+    INTO v_index_column_count, v_index_columns
+    FROM information_schema.statistics AS s
+    WHERE s.table_schema = DATABASE()
+      AND s.table_name = p_table_name
+      AND s.index_name = p_index_name;
+
+    IF v_index_column_count <> (
+         LENGTH(p_index_columns)
+         - LENGTH(REPLACE(p_index_columns, ',', ''))
+         + 1
+       )
+       OR COALESCE(v_index_columns, '') <> p_index_columns THEN
+      SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Existing tenant index has unexpected columns.';
+    END IF;
   END IF;
 END$$
 

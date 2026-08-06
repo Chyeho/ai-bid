@@ -189,96 +189,105 @@ WHERE o.`tenant_id` IS NULL
     OR (j.`tenant_id` IS NULL AND b.`tenant_id` IS NOT NULL)
   );
 
--- Trace schema is optional. Build the statements dynamically so V6 is safe when
--- any trace table is absent, or when it exists without the V5 tenant column.
-DELIMITER $$
-
-DROP PROCEDURE IF EXISTS `tenant_migration_backfill_optional_trace`$$
-CREATE PROCEDURE `tenant_migration_backfill_optional_trace`()
-BEGIN
-  IF EXISTS (
-    SELECT 1
-      FROM information_schema.tables
+-- Trace schema is optional. Each top-level prepared statement falls back to a
+-- harmless SELECT when the child, parent, or required tenant_id/key column is
+-- absent. No routine DDL is used, so the core DML is not followed by an
+-- implicit-commit routine schema change.
+SET @sql = IF(
+  EXISTS (
+    SELECT 1 FROM information_schema.tables
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_sessions'
        AND table_type = 'BASE TABLE'
   ) AND EXISTS (
-    SELECT 1
-      FROM information_schema.columns
+    SELECT 1 FROM information_schema.columns
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_sessions'
-       AND column_name = 'tenant_id'
-  ) THEN
-    SET @tenant_migration_ddl = 'UPDATE `trace_sessions` AS s JOIN `audit_task` AS a ON a.`task_id` = s.`task_id` SET s.`tenant_id` = a.`tenant_id` WHERE s.`tenant_id` IS NULL AND a.`tenant_id` IS NOT NULL';
-    PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
-    EXECUTE tenant_migration_stmt;
-    DEALLOCATE PREPARE tenant_migration_stmt;
-  END IF;
+       AND column_name IN ('tenant_id', 'task_id')
+     GROUP BY table_name
+    HAVING COUNT(DISTINCT column_name) = 2
+  ) AND EXISTS (
+    SELECT 1 FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_name = 'audit_task'
+       AND table_type = 'BASE TABLE'
+  ) AND EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = 'audit_task'
+       AND column_name IN ('tenant_id', 'task_id')
+     GROUP BY table_name
+    HAVING COUNT(DISTINCT column_name) = 2
+  ),
+  'UPDATE `trace_sessions` AS s JOIN `audit_task` AS a ON a.`task_id` = s.`task_id` SET s.`tenant_id` = a.`tenant_id` WHERE s.`tenant_id` IS NULL AND a.`tenant_id` IS NOT NULL',
+  'SELECT 1'
+);
+PREPARE tenant_migration_stmt FROM @sql;
+EXECUTE tenant_migration_stmt;
+DEALLOCATE PREPARE tenant_migration_stmt;
 
-  IF EXISTS (
-    SELECT 1
-      FROM information_schema.tables
+SET @sql = IF(
+  EXISTS (
+    SELECT 1 FROM information_schema.tables
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_events'
        AND table_type = 'BASE TABLE'
   ) AND EXISTS (
-    SELECT 1
-      FROM information_schema.columns
+    SELECT 1 FROM information_schema.columns
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_events'
-       AND column_name = 'tenant_id'
+       AND column_name IN ('tenant_id', 'session_id')
+     GROUP BY table_name
+    HAVING COUNT(DISTINCT column_name) = 2
   ) AND EXISTS (
-    SELECT 1
-      FROM information_schema.tables
+    SELECT 1 FROM information_schema.tables
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_sessions'
        AND table_type = 'BASE TABLE'
   ) AND EXISTS (
-    SELECT 1
-      FROM information_schema.columns
+    SELECT 1 FROM information_schema.columns
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_sessions'
-       AND column_name = 'tenant_id'
-  ) THEN
-    SET @tenant_migration_ddl = 'UPDATE `trace_events` AS e JOIN `trace_sessions` AS s ON s.`id` = e.`session_id` SET e.`tenant_id` = s.`tenant_id` WHERE e.`tenant_id` IS NULL AND s.`tenant_id` IS NOT NULL';
-    PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
-    EXECUTE tenant_migration_stmt;
-    DEALLOCATE PREPARE tenant_migration_stmt;
-  END IF;
+       AND column_name IN ('tenant_id', 'id')
+     GROUP BY table_name
+    HAVING COUNT(DISTINCT column_name) = 2
+  ),
+  'UPDATE `trace_events` AS e JOIN `trace_sessions` AS s ON s.`id` = e.`session_id` SET e.`tenant_id` = s.`tenant_id` WHERE e.`tenant_id` IS NULL AND s.`tenant_id` IS NOT NULL',
+  'SELECT 1'
+);
+PREPARE tenant_migration_stmt FROM @sql;
+EXECUTE tenant_migration_stmt;
+DEALLOCATE PREPARE tenant_migration_stmt;
 
-  IF EXISTS (
-    SELECT 1
-      FROM information_schema.tables
+SET @sql = IF(
+  EXISTS (
+    SELECT 1 FROM information_schema.tables
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_event_blocks'
        AND table_type = 'BASE TABLE'
   ) AND EXISTS (
-    SELECT 1
-      FROM information_schema.columns
+    SELECT 1 FROM information_schema.columns
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_event_blocks'
-       AND column_name = 'tenant_id'
+       AND column_name IN ('tenant_id', 'event_id')
+     GROUP BY table_name
+    HAVING COUNT(DISTINCT column_name) = 2
   ) AND EXISTS (
-    SELECT 1
-      FROM information_schema.tables
+    SELECT 1 FROM information_schema.tables
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_events'
        AND table_type = 'BASE TABLE'
   ) AND EXISTS (
-    SELECT 1
-      FROM information_schema.columns
+    SELECT 1 FROM information_schema.columns
      WHERE table_schema = DATABASE()
        AND table_name = 'trace_events'
-       AND column_name = 'tenant_id'
-  ) THEN
-    SET @tenant_migration_ddl = 'UPDATE `trace_event_blocks` AS b JOIN `trace_events` AS e ON e.`event_id` = b.`event_id` SET b.`tenant_id` = e.`tenant_id` WHERE b.`tenant_id` IS NULL AND e.`tenant_id` IS NOT NULL';
-    PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
-    EXECUTE tenant_migration_stmt;
-    DEALLOCATE PREPARE tenant_migration_stmt;
-  END IF;
-END$$
-
-CALL `tenant_migration_backfill_optional_trace`()$$
-DROP PROCEDURE IF EXISTS `tenant_migration_backfill_optional_trace`$$
-
-DELIMITER ;
+       AND column_name IN ('tenant_id', 'event_id')
+     GROUP BY table_name
+    HAVING COUNT(DISTINCT column_name) = 2
+  ),
+  'UPDATE `trace_event_blocks` AS b JOIN `trace_events` AS e ON e.`event_id` = b.`event_id` SET b.`tenant_id` = e.`tenant_id` WHERE b.`tenant_id` IS NULL AND e.`tenant_id` IS NOT NULL',
+  'SELECT 1'
+);
+PREPARE tenant_migration_stmt FROM @sql;
+EXECUTE tenant_migration_stmt;
+DEALLOCATE PREPARE tenant_migration_stmt;
