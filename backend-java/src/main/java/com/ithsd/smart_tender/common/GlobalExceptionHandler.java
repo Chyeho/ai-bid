@@ -12,6 +12,8 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.util.stream.Collectors;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
@@ -39,6 +41,19 @@ public class GlobalExceptionHandler {
     public Result<Void> handleBizException(BizException ex) {
         log.warn("业务异常: {}", ex.getMessage());
         return Result.error(ex.getCode(), ex.getMessage());
+    }
+
+    @ExceptionHandler(TenantAuthException.class)
+    public Result<Map<String, Object>> handleTenantAuthException(TenantAuthException ex) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("error_code", ex.getErrorCode());
+        data.put("request_id", ex.getRequestId());
+        if (!ex.getDetails().isEmpty()) {
+            data.put("details", ex.getDetails());
+        }
+        Result<Map<String, Object>> result = Result.error(ex.getStatus(), ex.getMessage());
+        result.setData(data);
+        return result;
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
