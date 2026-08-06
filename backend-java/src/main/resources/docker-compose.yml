@@ -87,7 +87,7 @@ services:
     container_name: milvus-attu
     image: zilliz/attu:v2.3.8
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
       # Attu 连接的 Milvus 地址，使用 Docker 内部服务名
       MILVUS_URL: milvus-standalone:19530

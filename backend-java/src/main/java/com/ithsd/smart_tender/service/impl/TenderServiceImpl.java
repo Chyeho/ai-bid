@@ -204,7 +204,9 @@ public class TenderServiceImpl implements TenderService {
                .like(StringUtils.hasText(dto.getBidName()), Project::getProjectName, dto.getBidName())
                .ge(dto.getUploadStartTime() != null, Project::getCreateTime, dto.getUploadStartTime() != null ? dto.getUploadStartTime().atStartOfDay() : null)
                .le(dto.getUploadEndTime() != null, Project::getCreateTime, dto.getUploadEndTime() != null ? dto.getUploadEndTime().atTime(java.time.LocalTime.MAX) : null)
-               .orderByDesc(Project::getCreateTime);
+               // 按「改动时间」(updateTime) 倒序：每次上传新版本标书都会刷新 Project.updateTime，
+               // 因此刚上传完标书的项目会排在列表最前，便于在审核列表里快速定位。
+               .orderByDesc(Project::getUpdateTime);
 
         Page<Project> p = projectMapper.selectPage(pageInfo, wrapper);
 

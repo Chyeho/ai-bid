@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef, useEffect } from 'react';
 import { Segmented, Typography, Tag, Space, Progress, Alert } from 'antd';
 import { useStyles } from '../../style';
 import type { AuditIssue } from '../../types';
@@ -570,6 +570,7 @@ async function fetchBlockBboxes(taskId: string, blockIds: string[]): Promise<BBo
     x1: item.bbox?.x1 ?? 0,
     bottom: item.bbox?.bottom ?? 0,
     pageWidth: item.page_width ?? 595,
+    page: (item.page ?? 0) + 1,            // ← 新增：把后端返回的 page 带出来
   }));
 }
 
@@ -602,9 +603,15 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
          if (currentTab === 'info')
             return visibleIssues.filter((i) => i?.severity === 'info');
          return visibleIssues;
-      }, [visibleIssues, currentTab]);
+  }, [visibleIssues, currentTab]);
 
-      const canonicalPageByAnchor = useMemo(() => {
+  // 批次错峰入场：记录上一次渲染时的可见条数，新追加的发现卡据此计算逐条延迟
+  const prevFilteredLenRef = useRef(filteredIssues.length);
+  useEffect(() => {
+    prevFilteredLenRef.current = filteredIssues.length;
+  }, [filteredIssues.length]);
+
+  const canonicalPageByAnchor = useMemo(() => {
          const pageVotes = new Map<string, Map<number, number>>();
          visibleIssues.forEach((issue) => {
             const page =
@@ -645,8 +652,11 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
 
       const renderedIssueCards = useMemo(() => {
          return filteredIssues
-            .map((issue, issueIndex) => {
-               const parsed = parseIssueText(issue.description);
+      .map((issue, issueIndex) => {
+        const parsed = parseIssueText(issue.description);
+        const base = prevFilteredLenRef.current;
+        const isNew = issueIndex >= base;
+        const stepDelay = isNew ? Math.min(issueIndex - base, 20) * 80 : 0;
                const rawDescription = sanitizeDisplayText(issue.description);
                const title = issue.category || '审查问题';
                const rationaleBody = buildIssueExplanation(
@@ -671,18 +681,68 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
                   : null;
                const issueRenderKey = `${issue.issueNo || 'issue'}-${rawPageNo}-${issueIndex}`;
 
+               const handleLocate = () => {
+                  const page =
+                     canonicalPage ??
+                     parsePageNumber(issue.anchorPage) ??
+                     parsePageNumber(issue.location?.pageNumber);
+                  if (page == null) return;
+                  const normalizedPage = normalizeLocatePage(page, sourceInfo.fileName);
+
+                  // ── BBox 优先路径 ──
+                  const useBbox =
+                     HIGHLIGHT_MODE !== 'text' &&
+                     issue.blockIds &&
+                     issue.blockIds.length > 0 &&
+                     taskId &&
+                     onLocateBboxes;
+                  if (useBbox) {
+                     fetchBlockBboxes(taskId!, issue.blockIds!)
+                        .then((bboxes) => {
+                           if (bboxes.length > 0) {
+                              onLocateBboxes!(normalizedPage, bboxes);
+                           } else if (HIGHLIGHT_MODE === 'auto') {
+                              fallbackToTextMatch();
+                           }
+                        })
+                        .catch(() => {
+                           if (HIGHLIGHT_MODE === 'auto') {
+                              fallbackToTextMatch();
+                           }
+                        });
+                     return;
+                  }
+
+                  // ── 文本匹配路径（fallback） ──
+                  fallbackToTextMatch();
+
+                  function fallbackToTextMatch() {
+                     const highlightText = buildHighlightText(issue, rationale, title);
+                     const fallbackTokens = Array.isArray(issue.anchorTokens)
+                        ? issue.anchorTokens
+                             .map((item) => String(item || '').trim())
+                             .filter(Boolean)
+                             .slice(0, 5)
+                        : [];
+                     onLocateIssuePage(normalizedPage, highlightText, fallbackTokens);
+                  }
+               };
+
                return (
                   <div
                      key={issueRenderKey}
-                     onClick={() => onIssueClick?.(issue)}
-                     style={{
-                        padding: '14px 16px 10px',
-                        border: `1px solid ${theme.colorBorderSecondary}`,
-                        borderRadius: 8,
-                        cursor: onIssueClick ? 'pointer' : undefined,
-                        background: theme.colorBgContainer,
-                        transition: 'box-shadow 0.2s',
-                     }}
+                     onClick={() => { onIssueClick?.(issue); handleLocate(); }}
+                  style={{
+                    padding: '14px 16px 10px',
+                    border: `1px solid ${theme.colorBorderSecondary}`,
+                    borderRadius: 8,
+                    cursor: onIssueClick ? 'pointer' : undefined,
+                    background: theme.colorBgContainer,
+                    transition: 'box-shadow 0.2s',
+                    ...(isNew
+                      ? { animation: 'issueCardIn 0.32s ease-out both', animationDelay: `${stepDelay}ms` }
+                      : {}),
+                  }}
                      onMouseEnter={(e) => {
                         e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.06)';
                      }}
@@ -699,60 +759,7 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
                               <span
                                  onClick={(e) => {
                                     e.stopPropagation();
-                                    const page =
-                                       canonicalPage ??
-                                       parsePageNumber(issue.anchorPage) ??
-                                       parsePageNumber(issue.location?.pageNumber);
-                                    if (page == null) return;
-
-                                    const normalizedPage = normalizeLocatePage(page, sourceInfo.fileName);
-
-                                    // ── BBox 优先路径 ──
-                                    const useBbox =
-                                       HIGHLIGHT_MODE !== 'text' &&
-                                       issue.blockIds &&
-                                       issue.blockIds.length > 0 &&
-                                       taskId &&
-                                       onLocateBboxes;
-                                    if (useBbox) {
-                                       fetchBlockBboxes(taskId, issue.blockIds!)
-                                          .then((bboxes) => {
-                                             if (bboxes.length > 0) {
-                                                onLocateBboxes(normalizedPage, bboxes);
-                                             } else if (HIGHLIGHT_MODE === 'auto') {
-                                                // Fallback to text matching
-                                                fallbackToTextMatch();
-                                             }
-                                          })
-                                          .catch(() => {
-                                             if (HIGHLIGHT_MODE === 'auto') {
-                                                fallbackToTextMatch();
-                                             }
-                                          });
-                                       return;
-                                    }
-
-                                    // ── 文本匹配路径（现有逻辑） ──
-                                    fallbackToTextMatch();
-
-                                    function fallbackToTextMatch() {
-                                       const highlightText = buildHighlightText(
-                                          issue,
-                                          rationale,
-                                          title
-                                       );
-                                       const fallbackTokens = Array.isArray(issue.anchorTokens)
-                                          ? issue.anchorTokens
-                                               .map((item) => String(item || '').trim())
-                                               .filter(Boolean)
-                                               .slice(0, 5)
-                                          : [];
-                                       onLocateIssuePage(
-                                          normalizedPage,
-                                          highlightText,
-                                          fallbackTokens
-                                       );
-                                    }
+                                    handleLocate();
                                  }}
                                  style={{ cursor: pageNo ? 'pointer' : 'default' }}
                               >
@@ -838,17 +845,23 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
                );
             })
             .filter(Boolean);
-      }, [filteredIssues, theme, onLocateIssuePage, currentFileName, currentFileId, canonicalPageByAnchor, onIssueClick]);
+      }, [filteredIssues, theme, onLocateIssuePage, currentFileName, currentFileId, canonicalPageByAnchor, onIssueClick, taskId, onLocateBboxes]);
 
       return (
-         <div
-            style={{
-               flex: 1,
-               display: 'flex',
-               flexDirection: 'column',
-            }}
-         >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 6px 6px', flexShrink: 0 }}>
+        <div
+          style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <style>{`
+            @keyframes issueCardIn {
+              from { opacity: 0; transform: translateY(10px); }
+              to { opacity: 1; transform: translateY(0); }
+            }
+          `}</style>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 6px 6px', flexShrink: 0 }}>
                <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 }}>风险等级</Text>
                <div style={{ flex: 1, minWidth: 0 }} className={styles.severityFilter}>
                   <Segmented
