@@ -28,4 +28,12 @@ public interface TenantMemberMapper extends BaseMapper<TenantMember> {
             @Param("userId") Long userId,
             @Param("tenantId") Long tenantId
     );
+
+    @Select("""
+            SELECT id, tenant_id, user_id, role, status, joined_at, invited_by, last_seen_at
+              FROM tenant_member
+             WHERE tenant_id = #{tenantId}
+             ORDER BY joined_at ASC, id ASC
+            """)
+    List<TenantMember> findByTenantId(@Param("tenantId") Long tenantId);
 }
