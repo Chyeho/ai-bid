@@ -1,0 +1,11 @@
+{
+  "total_clauses": 5,
+  "agent_clause_counts": {
+    "RuleEngineAgent": 1,
+    "ProcedureAgent": 1,
+    "FactCheckAgent": 4
+  },
+  "high_risk_count": 0,
+  "legal_verify_count": 0,
+  "blind_spot_findings": 10
+}

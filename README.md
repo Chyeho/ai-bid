@@ -99,8 +99,8 @@ AIBID_LLM_PROTOCOL=dashscope
 # ==== 搜索后端（dashscope / searxng）====
 AIBID_SEARCH_BACKEND=dashscope
 
-# ==== 嵌入引擎（local / remote）====
-EMBED_ENGINE=local
+# ==== 嵌入引擎：推荐 remote（无需下载模型），local 需要 544MB ONNX 模型 ====
+EMBED_ENGINE=remote
 
 # ==== Multi-Agent 审核 ====
 AIBID_AGENT=1
@@ -117,10 +117,21 @@ AIBID_COORDINATOR=1
 | `DASHSCOPE_API_KEY` | — | 阿里云 DashScope API 密钥（**必填**） |
 | `AIBID_LLM_PROTOCOL` | `dashscope` | LLM 协议：`dashscope` 或 `openai_compatible` |
 | `AIBID_SEARCH_BACKEND` | `dashscope` | 搜索后端：`dashscope`（联网搜索）或 `searxng`（自托管） |
-| `EMBED_ENGINE` | `local` | 嵌入引擎：`local`（BGE-M3 ONNX，~568MB）或 `remote`（DashScope API） |
+| `EMBED_ENGINE` | `local` | 嵌入引擎：详见下方 [嵌入引擎选择](#嵌入引擎选择) |
 | `AIBID_AGENT` | — | 设为 `1` 启用 Multi-Agent 模式 |
 | `AIBID_COORDINATOR` | — | 设为 `1` 启用 Coordinator 7 阶段管线 |
 | `AIBID_DATA_DIR` | `.` | 数据根目录，从 `backend-rust/` 运行时设为 `..` |
+
+#### 嵌入引擎选择
+
+| 模式 | 配置 | 优点 | 缺点 |
+|---|---|---|---|
+| **remote**（推荐） | `EMBED_ENGINE=remote` | 无需下载模型，开箱即用 | 需要网络，消耗 API 额度 |
+| local | `EMBED_ENGINE=local` | 本地推理，不消耗 API 额度 | 需下载 544MB ONNX 模型，占用 ~1.2GB 内存 |
+
+> **给同学的建议**：直接用 `EMBED_ENGINE=remote`，省去下载 544MB 模型的步骤，只要 `DASHSCOPE_API_KEY` 配置正确就能跑。
+>
+> 本地模式适合需要离线推理或大量调用不想消耗 API 额度的场景。首次启动时程序会自动从 HuggingFace 下载模型到 `backend-rust/models/`，模型文件已加入 `.gitignore`，不会提交到仓库。
 
 ### 4. 启动 Rust AI 引擎
 
