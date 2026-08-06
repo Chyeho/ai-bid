@@ -1,0 +1,90 @@
+# Tenant migration runbook
+
+This directory contains the T1 database-only migration for the tenant contract frozen
+in `docs/adr/tenant-model.md` and `docs/adr/tenant-isolation.md`.
+
+## Files and order
+
+1. `V5__expand_tenant_model.sql` creates `tenant`, `tenant_member`,
+   `tenant_invitation`, and `tenant_audit_log`. It adds nullable `tenant_id` columns
+   and tenant-leading indexes to every resource table present in V1:
+   `project`, `bid_document`, `audit_task`, `audit_issue`, `audit_report`,
+   `audit_task_event`, `knowledge_file`, `knowledge_chunk`, `chat_message`,
+   `document_parse_job`, and `rag_trigger_outbox`.
+2. `V6__backfill_tenant_data.sql` creates one stable personal tenant per `sys_user`,
+   adds the OWNER membership, then backfills resources in parent-first order.
+3. `tenant_migration_validation.sql` is a manual, read-only validation script. It is
+   intentionally not named as a Flyway migration.
+4. `tenant_migration_rollback.sql` is a manual rollback script for a disposable,
+   pre-backfill environment only. It is intentionally not named as a Flyway migration.
+
+The existing application configuration has Flyway disabled, so deployment must apply
+V1 through V6 using the team's normal Flyway runner or an explicit migration command.
+Do not enable Flyway in application code as part of T1.
+
+The separately initialized `trace_schema.sql` tables (`trace_sessions`, `trace_events`,
+and `trace_event_blocks`) are not present in the V1 baseline and are intentionally out
+of this V1-derived migration. If that schema is enabled in a deployed environment, the
+main integration must add a dedicated tenant migration for those tables before Contract.
+
+## Idempotency and ownership rules
+
+- V5 uses `CREATE TABLE IF NOT EXISTS`. Its temporary procedures check
+  `information_schema` before adding each column or index, then remove themselves.
+- V6 uses the unique `tenant_code` and `(tenant_id, user_id)` keys with `INSERT IGNORE`.
+  Resource updates target the source row's primary key and require `tenant_id IS NULL`.
+  Re-running V6 therefore does not duplicate tenants, members, or assignments and does
+  not overwrite an existing assignment.
+- `project.user_id` is the strongest V1 owner signal.
+- `bid_document.upload_user_id` wins when it agrees with the resolved project owner;
+  a missing uploader may inherit a resolved project owner. A conflict is left NULL.
+- `audit_task.audit_user_id` wins when it agrees with the resolved bid/project owner;
+  otherwise the resolved parent is used only when the explicit audit user is absent.
+  Conflicts and unresolved parents remain NULL.
+- `knowledge_file.upload_user_id` and `chat_message.user_id` map to the user's
+  personal tenant. `audit_issue`, `audit_report`, `audit_task_event`,
+  `knowledge_chunk`, `document_parse_job`, and `rag_trigger_outbox` inherit only from
+  resolved parents. No random or guessed tenant is assigned.
+- Every backfilled personal tenant and OWNER membership is ACTIVE so the tenant owner
+  invariant remains true. `sys_user.status` is still an independent authentication
+  gate; an inactive legacy user cannot establish an ordinary tenant context merely
+  because this membership row is ACTIVE.
+- `tenant_invitation` and `tenant_audit_log` are created empty. T1 does not fabricate
+  invitation or audit history.
+
+The logical idempotency key for every resource is `(source_table, source_id)`, where
+`source_id` is the V1 primary key (or `task_id` for `audit_task_event` parent lookup).
+The validation script is the migration isolation queue for rows that cannot be assigned
+with confidence; those rows must be resolved or explicitly accepted before Contract.
+
+## Validation
+
+Run the read-only script after V6 against the same database, for example:
+
+```text
+mysql --database=smart_tender_system < tenant_migration_validation.sql
+```
+
+Review all result sets. In particular, before Enforce/Contract:
+
+- all required columns and tenant-leading indexes exist;
+- active users have an ACTIVE membership and an OWNER invariant is satisfied;
+- null `tenant_id` rows are either zero or explicitly listed as unresolved;
+- parent/child tenant mismatch results are empty;
+- tenant-visible counts match the saved pre-migration evidence.
+
+## Rollback and application flags
+
+T1 does not implement application dual-write, tenant filtering, `NOT NULL`, Contract, or
+feature-flag wiring. The application owner must keep `tenant.enforce` and any tenant
+gray rollout disabled until V6 and validation pass. For an incident after backfill,
+disable those flags, pause async/Rust paths that could cross tenant boundaries, and keep
+the Expand schema and data in place while reads use the verified compatibility path.
+
+The SQL rollback file defaults to a deliberate failure. In the same client session, set
+`@tenant_expand_rollback_confirmed = 'YES'` only after a backup and proof that no tenant
+rows or non-NULL resource assignments exist; then source the file. It can drop the new
+columns, indexes, and empty tenant tables only in that pre-backfill state. It must never
+be used after dual-write, Enforce, or Contract has written tenant data. Contract rollback
+requires a database restore drill and an approved schema change; it is not a direct
+inverse of V5/V6.
