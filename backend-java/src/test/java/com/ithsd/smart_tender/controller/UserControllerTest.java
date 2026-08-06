@@ -1,5 +1,7 @@
 package com.ithsd.smart_tender.controller;
 
+import com.ithsd.smart_tender.common.GlobalExceptionHandler;
+import com.ithsd.smart_tender.common.TenantAuthException;
 import com.ithsd.smart_tender.model.dto.TenantSwitchDTO;
 import com.ithsd.smart_tender.model.vo.UserLoginVO;
 import com.ithsd.smart_tender.service.TenantAuthService;
@@ -23,6 +25,7 @@ class UserControllerTest {
     private final TenantAuthService tenantAuthService = mock(TenantAuthService.class);
     private final MockMvc mvc = MockMvcBuilders
             .standaloneSetup(new UserController(userService, tenantAuthService))
+            .setControllerAdvice(new GlobalExceptionHandler())
             .build();
 
     @Test
@@ -47,5 +50,22 @@ class UserControllerTest {
                 org.mockito.ArgumentMatchers.eq("Bearer old-token"),
                 any(TenantSwitchDTO.class),
                 org.mockito.ArgumentMatchers.eq("request-switch"));
+    }
+
+    @Test
+    void tenantAuthException_shouldSetHttpStatusAndStableErrorBody() throws Exception {
+        when(tenantAuthService.switchTenant(any(), any(TenantSwitchDTO.class), any()))
+                .thenThrow(new TenantAuthException(
+                        401, "TENANT_SESSION_STALE", "租户会话已失效", "request-stale"));
+
+        mvc.perform(post("/api/auth/switch-tenant")
+                        .header("Authorization", "Bearer stale-token")
+                        .header("X-Request-Id", "request-stale")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant_id\":20002}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value(401))
+                .andExpect(jsonPath("$.data.error_code").value("TENANT_SESSION_STALE"))
+                .andExpect(jsonPath("$.data.request_id").value("request-stale"));
     }
 }

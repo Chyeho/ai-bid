@@ -2,6 +2,7 @@ package com.ithsd.smart_tender.common;
 
 import com.ithsd.smart_tender.common.BizException;
 import com.ithsd.smart_tender.model.result.Result;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,7 +45,11 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler(TenantAuthException.class)
-    public Result<Map<String, Object>> handleTenantAuthException(TenantAuthException ex) {
+    public Result<Map<String, Object>> handleTenantAuthException(
+            TenantAuthException ex,
+            HttpServletResponse response
+    ) {
+        response.setStatus(ex.getStatus());
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("error_code", ex.getErrorCode());
         data.put("request_id", ex.getRequestId());
