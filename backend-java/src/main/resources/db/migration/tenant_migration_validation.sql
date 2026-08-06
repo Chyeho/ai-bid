@@ -130,7 +130,7 @@ SET @sql = IF(
   CONCAT(
     'SELECT t.`id` AS `tenant_id`, t.`tenant_code`, ',
     QUOTE('trace_sessions'),
-    ' AS `resource_type`, COUNT(r.`id`) AS `visible_count`, ',
+    ' AS `resource_type`, COUNT(r.`tenant_id`) AS `visible_count`, ',
     QUOTE('present'),
     ' AS `schema_status` FROM `tenant` AS t LEFT JOIN `trace_sessions` AS r ',
     'ON r.`tenant_id` = t.`id` GROUP BY t.`id`, t.`tenant_code`'
@@ -193,7 +193,7 @@ SET @sql = IF(
   CONCAT(
     'SELECT t.`id` AS `tenant_id`, t.`tenant_code`, ',
     QUOTE('trace_events'),
-    ' AS `resource_type`, COUNT(r.`id`) AS `visible_count`, ',
+    ' AS `resource_type`, COUNT(r.`tenant_id`) AS `visible_count`, ',
     QUOTE('present'),
     ' AS `schema_status` FROM `tenant` AS t LEFT JOIN `trace_events` AS r ',
     'ON r.`tenant_id` = t.`id` GROUP BY t.`id`, t.`tenant_code`'
@@ -256,7 +256,7 @@ SET @sql = IF(
   CONCAT(
     'SELECT t.`id` AS `tenant_id`, t.`tenant_code`, ',
     QUOTE('trace_event_blocks'),
-    ' AS `resource_type`, COUNT(r.`id`) AS `visible_count`, ',
+    ' AS `resource_type`, COUNT(r.`tenant_id`) AS `visible_count`, ',
     QUOTE('present'),
     ' AS `schema_status` FROM `tenant` AS t LEFT JOIN `trace_event_blocks` AS r ',
     'ON r.`tenant_id` = t.`id` GROUP BY t.`id`, t.`tenant_code`'
