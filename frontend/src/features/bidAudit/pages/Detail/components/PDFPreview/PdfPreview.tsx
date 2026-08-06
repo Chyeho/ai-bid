@@ -224,8 +224,6 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
 
    const [previewFailed, setPreviewFailed] = React.useState(false);
    const [highlightText, setHighlightText] = React.useState('');
-   const [highlightPage, setHighlightPage] = React.useState<number>(0);
-   const [highlightVersion, setHighlightVersion] = React.useState<number>(0);
    const [, setHighlightStatus] = React.useState<HighlightStatus>('idle');
    const [highlightBoxesByPage, setHighlightBoxesByPage] = React.useState<Record<number, HighlightBox[]>>({});
    const pdfDocRef = React.useRef<any | null>(null);
@@ -599,10 +597,7 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
 
       return Array.from(new Array(numPages), (_, index) => {
          const pageNum = index + 1;
-         const pageKey =
-            pageNum === highlightPage
-               ? `page_${pageNum}_${highlightVersion}`
-               : `page_${pageNum}`;
+         const pageKey = `page_${pageNum}`;
          return (
             <div
                key={pageKey}
@@ -693,7 +688,6 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
          }
          if (best && best !== highlightQueryRef.current) {
             setHighlightText(best);
-            setHighlightVersion((v) => v + 1);
             window.setTimeout(async () => {
                const ok = await applyPdfJsHighlights(page, best, fallbackTokensRef.current, {
                   silent: false,
@@ -750,8 +744,6 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
             setHighlightStatus('idle');
             setHighlightBoxesByPage({});
             setHighlightText(normalized);
-            setHighlightPage(page);
-            setHighlightVersion((v) => v + 1);
             jumpToPage(page);
             const marker = `${page}|${normalized}`;
             if (pendingSecondaryMatchRef.current !== marker) {
@@ -786,7 +778,6 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
                      }
                   }
                   if (locatedPage > 0) {
-                     setHighlightPage(locatedPage);
                      jumpToPage(locatedPage);
                      scrollFirstHitIntoView(locatedPage);
                      return;
@@ -827,8 +818,6 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
             // 1. 清旧高亮，跳到目标页
             setHighlightBoxesByPage({});
             setHighlightStatus('idle');
-            setHighlightPage(page);
-            setHighlightVersion((v) => v + 1);
             jumpToPage(page);
 
             // 2. 获取页面渲染后的实际尺寸，计算 PDF→DOM scale
@@ -902,6 +891,7 @@ const PdfPreview = React.forwardRef<PdfPreviewRef, PdfPreviewProps>(({
             <>
                <div className={styles.pdfScrollArea} ref={containerRef}>
                   <Document
+                     key={fileUrl}
                      file={documentFile}
                      onLoadSuccess={(pdf) => {
                         pdfDocRef.current = pdf;
