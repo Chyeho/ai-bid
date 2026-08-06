@@ -20,8 +20,10 @@ async-trait = "0.1"
 dotenv = "0.15"
 axum = { version = "0.7", features = ["multipart", "macros"] }
 tower-http = { version = "0.5", features = ["cors"] }
-tower = "0.4"
+tower = { version = "0.5", features = ["util"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures-core = "0.3"
 utoipa = { version = "4", features = ["axum_extras", "chrono"] }
+hmac = "0.12"
+sha2 = "0.10"

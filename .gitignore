@@ -36,6 +36,18 @@ tmp/
 logs/
 .pnpm-store/
 .runtime-data/
+env/downloads/
+env/tmp/
+env/jdk/
+env/node/
+env/cargo/
+env/rustup/
+env/maven/
+env/corepack/
+env/services/
+env/data/
+env/logs/
+env/application-local.yml
 data/
 
 # ── 日志文件 ──
@@ -55,3 +67,6 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+# env
+env
