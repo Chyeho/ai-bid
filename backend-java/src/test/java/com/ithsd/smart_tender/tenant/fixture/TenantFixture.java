@@ -328,7 +328,7 @@ public final class TenantFixture {
                     "\n",
                     "v1",
                     "POST",
-                    "/api/v1/review/" + tenant.id() + "/stream?mode=full",
+                    "/api/v1/review/document-01/stream?mode=full",
                     timestamp,
                     tenant.id(),
                     actorUserId,
@@ -344,7 +344,7 @@ public final class TenantFixture {
             );
             return new InternalRequest(
                     "POST",
-                    "/api/v1/review/" + tenant.id() + "/stream?mode=full",
+                    "/api/v1/review/document-01/stream?mode=full",
                     bodySha256,
                     timestamp,
                     tenant.id(),

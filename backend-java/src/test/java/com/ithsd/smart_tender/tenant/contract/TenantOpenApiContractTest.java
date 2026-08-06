@@ -86,17 +86,21 @@ class TenantOpenApiContractTest {
     @Test
     void t0OpenApi_protectedTenantOperationsRequireBearerAuth() throws IOException {
         JsonNode paths = openApi().path("paths");
-        Map<String, List<String>> protectedOperations = Map.of(
-                "/api/auth/refresh", List.of("post"),
-                "/api/tenants", List.of("get", "post"),
-                "/api/tenants/current", List.of("get"),
-                "/api/tenants/{tenantId}", List.of("patch", "delete"),
-                "/api/tenants/{tenantId}/members", List.of("get"),
-                "/api/tenants/{tenantId}/members/{userId}", List.of("patch", "delete"),
-                "/api/tenants/{tenantId}/invitations", List.of("get", "post"),
-                "/api/tenants/{tenantId}/invitations/{invitationId}", List.of("delete"),
-                "/api/tenant-invitations/{token}/accept", List.of("post"),
-                "/api/audit-tasks/{taskId}/stream", List.of("get")
+        Map<String, List<String>> protectedOperations = Map.ofEntries(
+                Map.entry("/api/auth/refresh", List.of("post")),
+                Map.entry("/api/tenants", List.of("get", "post")),
+                Map.entry("/api/tenants/current", List.of("get")),
+                Map.entry("/api/tenants/{tenantId}", List.of("patch", "delete")),
+                Map.entry("/api/tenants/{tenantId}/switch", List.of("post")),
+                Map.entry("/api/tenants/{tenantId}/transfer-owner", List.of("post")),
+                Map.entry("/api/tenants/{tenantId}/disable", List.of("post")),
+                Map.entry("/api/tenants/{tenantId}/restore", List.of("post")),
+                Map.entry("/api/tenants/{tenantId}/members", List.of("get")),
+                Map.entry("/api/tenants/{tenantId}/members/{userId}", List.of("patch", "delete")),
+                Map.entry("/api/tenants/{tenantId}/invitations", List.of("get", "post")),
+                Map.entry("/api/tenants/{tenantId}/invitations/{invitationId}", List.of("delete")),
+                Map.entry("/api/tenant-invitations/{token}/accept", List.of("post")),
+                Map.entry("/api/audit-tasks/{taskId}/stream", List.of("get"))
         );
 
         protectedOperations.forEach((path, methods) -> methods.forEach(method -> {
