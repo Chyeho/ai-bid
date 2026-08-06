@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::domain::chunk::Chunk;
 use super::AgentTool;
 
 /// 存储的标准模板。
@@ -502,6 +503,20 @@ pub struct CompareWithTemplateTool {
 pub trait ClauseTextProvider: Send + Sync {
     fn get_text(&self, chunk_id: &str) -> Option<String>;
     fn get_section_path(&self, chunk_id: &str) -> Option<Vec<String>>;
+}
+
+/// `ClauseTextProvider` 的真实实现 — 从 `Arc<HashMap<String, Chunk>>` 中提取文本。
+pub struct ChunkTextProvider {
+    pub chunks: Arc<HashMap<String, Chunk>>,
+}
+
+impl ClauseTextProvider for ChunkTextProvider {
+    fn get_text(&self, chunk_id: &str) -> Option<String> {
+        self.chunks.get(chunk_id).map(|c| c.text.clone())
+    }
+    fn get_section_path(&self, chunk_id: &str) -> Option<Vec<String>> {
+        self.chunks.get(chunk_id).map(|c| c.section_path.clone())
+    }
 }
 
 impl CompareWithTemplateTool {

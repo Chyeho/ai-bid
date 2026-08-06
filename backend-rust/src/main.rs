@@ -35,6 +35,9 @@ use ai_bid::agents::tools::calculate_timeline::CalculateTimelineTool;
 // 依赖 chunk 数据的工具
 use ai_bid::agents::tools::check_cross_reference::CheckCrossReferenceTool;
 use ai_bid::agents::tools::extract_obligations::ExtractObligationsTool;
+use ai_bid::agents::tools::compare_with_template::{CompareWithTemplateTool, ChunkTextProvider, TemplateStore};
+use ai_bid::agents::tools::validate_calculation::ValidateCalculationTool;
+use ai_bid::agents::tools::search_contradiction::SearchContradictionTool;
 // V3 采购程序合规审查
 use ai_bid::agents::tools::verify_procurement_method::VerifyProcurementMethodTool;
 use ai_bid::agents::tools::verify_bid_deposit::VerifyBidDepositTool;
@@ -899,6 +902,22 @@ async fn main() -> Result<()> {
             registry.register(Box::new(ExtractObligationsTool::new(
                 chunk_map.clone(),
                 chunk_order.clone(),
+            )));
+            // 模板比对（需要 ChunkTextProvider）
+            let template_text_provider = Arc::new(ChunkTextProvider {
+                chunks: chunk_map.clone(),
+            });
+            registry.register(Box::new(CompareWithTemplateTool::new(
+                Arc::new(TemplateStore::with_builtin_templates()),
+                template_text_provider,
+            )));
+            // 数值计算校验
+            registry.register(Box::new(ValidateCalculationTool));
+            // 矛盾检测
+            registry.register(Box::new(SearchContradictionTool::new(
+                chunk_map.clone(),
+                chunk_order.clone(),
+                None,
             )));
             eprintln!(
                 "[main] ── 工具集注册完成: 共 {} 个工具 ──",

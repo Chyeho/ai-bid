@@ -50,6 +50,9 @@ use crate::agents::tools::{
     // 依赖 chunk 数据的工具
     check_cross_reference::CheckCrossReferenceTool,
     extract_obligations::ExtractObligationsTool,
+    compare_with_template::{CompareWithTemplateTool, ChunkTextProvider, TemplateStore},
+    validate_calculation::ValidateCalculationTool,
+    search_contradiction::SearchContradictionTool,
 };
 use crate::agents::trace::TraceLog;
 use crate::agents::types::{
@@ -921,6 +924,22 @@ async fn run_review_pipeline(
         registry.register(Box::new(ExtractObligationsTool::new(
             chunk_map_for_tools.clone(),
             chunk_order_for_tools.clone(),
+        )));
+        // 模板比对（需要 ChunkTextProvider）
+        let template_text_provider = Arc::new(ChunkTextProvider {
+            chunks: chunk_map_for_tools.clone(),
+        });
+        registry.register(Box::new(CompareWithTemplateTool::new(
+            Arc::new(TemplateStore::with_builtin_templates()),
+            template_text_provider,
+        )));
+        // 数值计算校验
+        registry.register(Box::new(ValidateCalculationTool));
+        // 矛盾检测
+        registry.register(Box::new(SearchContradictionTool::new(
+            chunk_map_for_tools.clone(),
+            chunk_order_for_tools.clone(),
+            None,
         )));
         eprintln!(
             "[handlers] ── 工具集注册完成: 共 {} 个工具 ──",

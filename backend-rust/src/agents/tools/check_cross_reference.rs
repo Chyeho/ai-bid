@@ -67,6 +67,7 @@ struct CandidateRef {
     chunk_id: String,
     section_path: Vec<String>,
     match_reason: String,
+    match_score: u32,
     text_preview: String,
 }
 
@@ -117,29 +118,38 @@ impl CheckCrossReferenceTool {
         let mut keywords = Vec::new();
         keywords.push(expr.to_string());
 
-        // 生成数字变体
-        let has_num: String = expr.chars().filter(|c| c.is_ascii_digit()).collect();
-        if !has_num.is_empty() {
-            // 中文数字转阿拉伯数字
-            let cn_nums = [
-                ("一", "1"),
-                ("二", "2"),
-                ("三", "3"),
-                ("四", "4"),
-                ("五", "5"),
-                ("六", "6"),
-                ("七", "7"),
-                ("八", "8"),
-                ("九", "9"),
-                ("十", "10"),
-            ];
-            let mut variant = expr.to_string();
-            for (cn, ar) in &cn_nums {
-                variant = variant.replace(cn, ar);
-            }
-            if variant != *expr {
-                keywords.push(variant);
-            }
+        // 中文数字转阿拉伯数字（状态机解析，"十二"→"12"、"二十"→"20"、"十一"→"11"）
+        let cn_digits: Vec<char> = expr.chars().filter(|c| {
+            matches!(c, '一'..='九' | '十' | '百' | '零')
+        }).collect();
+        let mut cn_to_ar = String::new();
+        let mut last_digit = 0u32;
+        let mut acc = 0u32;
+        let mut in_num = false;
+        for &c in &cn_digits {
+            let val = match c {
+                '一' => 1, '二' => 2, '三' => 3, '四' => 4,
+                '五' => 5, '六' => 6, '七' => 7, '八' => 8, '九' => 9,
+                '十' => { last_digit = if last_digit == 0 { 1 } else { last_digit }; acc += last_digit * 10; last_digit = 0; in_num = true; continue; }
+                '百' => { last_digit = if last_digit == 0 { 1 } else { last_digit }; acc += last_digit * 100; last_digit = 0; in_num = true; continue; }
+                '零' => { in_num = true; continue; }
+                _ => continue,
+            };
+            last_digit = val;
+            in_num = true;
+        }
+        acc += last_digit;
+        if in_num {
+            cn_to_ar = acc.to_string();
+        }
+
+        let has_ar_num: String = expr.chars().filter(|c| c.is_ascii_digit()).collect();
+        if !has_ar_num.is_empty() && !cn_to_ar.is_empty() {
+            keywords.push(cn_to_ar);
+        } else if !has_ar_num.is_empty() && cn_to_ar.is_empty() {
+            // 只有阿拉伯数字无中文数字,不需要额外变体
+        } else if !cn_to_ar.is_empty() {
+            keywords.push(cn_to_ar);
         }
 
         (ref_type, keywords)
@@ -219,14 +229,19 @@ impl CheckCrossReferenceTool {
                         chunk_id: chunk_id.clone(),
                         section_path: chunk.section_path.clone(),
                         match_reason: best_match_reason,
+                        match_score: best_score,
                         text_preview: chunk.text.chars().take(200).collect(),
                     });
                 }
             }
         }
 
-        // 按匹配分数排序（CandidateRef 没有 score 字段，用 match_reason 的长度作为启发式）
-        candidates.sort_by(|a, b| b.match_reason.len().cmp(&a.match_reason.len()));
+        // 按匹配分数降序排列（文本精确匹配 > section_path 匹配）
+        candidates.sort_by(|a, b| {
+            b.match_score
+                .cmp(&a.match_score)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+        });
 
         candidates
     }

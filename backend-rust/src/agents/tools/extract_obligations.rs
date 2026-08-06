@@ -162,13 +162,11 @@ impl ExtractObligationsTool {
                 "质保金",
                 "支付",
                 "合同金额",
-                "报价",
             ],
             "售后" => vec![
                 "售后",
                 "保修",
                 "维护",
-                "服务",
                 "技术支持",
                 "培训",
                 "响应",
@@ -242,7 +240,7 @@ impl ExtractObligationsTool {
                     let sentences: Vec<&str> = text.split(['。', '；', '\n', '!']).collect();
 
                     for sent in &sentences {
-                        if sent.contains(kw) && sent.trim().len() > 10 {
+                        if sent.contains(kw) && sent.trim().len() > 6 {
                             let is_star = sent.contains('★')
                                 || sent.contains('*')
                                 || sent.contains("必须满足")
@@ -290,7 +288,7 @@ impl ExtractObligationsTool {
         if types.is_empty() || types.contains(&"其他".to_string()) {
             let mandatory_markers = ["必须", "须 ", "不得", "禁止", "强制性"];
             for sent in text.split(['。', '；', '\n']) {
-                if mandatory_markers.iter().any(|m| sent.contains(m)) && sent.trim().len() > 10 {
+                if mandatory_markers.iter().any(|m| sent.contains(m)) && sent.trim().len() > 6 {
                     // 检查是否已被其他类型覆盖
                     let already_covered = obligations
                         .iter()
@@ -336,14 +334,24 @@ impl ExtractObligationsTool {
             .map(|v| v.iter().map(|o| o.chunk_id.as_str()).collect())
             .unwrap_or_default();
 
-        let overlap: Vec<&&str> = qual_chunks
-            .iter()
-            .filter(|c| personnel_chunks.contains(c) && equipment_chunks.contains(c))
-            .collect();
-        if !overlap.is_empty() {
+        // 三合一排斥检测：资质+人员+设备三种类型均存在即触发
+        // 不要求同一 chunk——三种要求分散在不同章节同样构成排他性组合
+        let has_all_three = !qual_chunks.is_empty()
+            && !personnel_chunks.is_empty()
+            && !equipment_chunks.is_empty();
+        if has_all_three {
+            // 跨 chunk 检测: 三种类型分别分布在哪些 chunk 中
+            let total_clauses = by_type.values().flatten().count();
+            let three_type_clauses = qual_chunks.len() + personnel_chunks.len() + equipment_chunks.len();
             signals.push(format!(
-                "⚠️ 三合一排斥风险：{} 个条款同时要求特定资质+人员+设备，可能形成排他性组合",
-                overlap.len()
+                "⚠️ 三合一排斥风险：招标文件同时要求特定 资质（{}条）+ 人员（{}条）+ 设备（{}条），\
+                 共 {} 项义务，合计涉及 {} 个条款。这三种要求组合可能形成排他性条件，\
+                 建议评估是否有足够数量的潜在供应商满足全部要求。",
+                qual_chunks.len(),
+                personnel_chunks.len(),
+                equipment_chunks.len(),
+                three_type_clauses,
+                total_clauses
             ));
         }
 
