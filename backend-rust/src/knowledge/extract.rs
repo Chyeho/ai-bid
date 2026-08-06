@@ -96,6 +96,15 @@ pub fn parse_law_basis(text: &str) -> (String, Option<String>) {
 // --------------------------
 // 单元4：确定性 ID 生成
 // --------------------------
+/// 生成 risk_id：SHA256("risk:" + risk_type) 前8位 + risk_ 前缀
+pub fn gen_risk_id(risk_type: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"risk:");
+    hasher.update(risk_type.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    format!("risk_{}", &hash[..8])
+}
+
 /// 生成 law_id：SHA256(法律名) 前8位 + law_ 前缀
 pub fn gen_law_id(law_name: &str) -> String {
     let mut hasher = Sha256::new();
@@ -125,7 +134,7 @@ pub fn extract_and_dedup(
         .map(|cand| {
             // 构造风险实体
             let risk = RiskEntity {
-                id: cand.risk_id.clone(),
+                id: gen_risk_id(&cand.risk_type),
                 name: cand.risk_type.clone(),
                 severity: cand.severity.clone(),
             };
@@ -163,7 +172,7 @@ pub fn extract_and_dedup(
                 decision,
                 risk,
                 laws,
-                snippet: cand.legal_basis.join("；"),
+                snippet: cand.source_quote.clone(),
             }
         })
         .collect()
@@ -213,6 +222,15 @@ mod tests {
         let (name2, article2) = parse_law_basis(text2);
         assert_eq!(name2, "政府采购法");
         assert!(article2.is_none());
+    }
+
+    #[test]
+    fn test_risk_id_consistent() {
+        let id1 = gen_risk_id("品牌指定");
+        let id2 = gen_risk_id("品牌指定");
+        assert_eq!(id1, id2);
+        assert!(id1.starts_with("risk_"));
+        assert_ne!(gen_risk_id("品牌指定"), gen_risk_id("资格条件"));
     }
 
     #[test]

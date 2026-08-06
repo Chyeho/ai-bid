@@ -3,7 +3,7 @@
 //! 环境变量：
 //!   - `NEO4J_URI`       默认 `bolt://localhost:7687`
 //!   - `NEO4J_USER`      默认 `neo4j`
-//!   - `NEO4J_PASSWORD`  默认 `12345678`（演示环境）
+//!   - `NEO4J_PASSWORD`  默认 `b1234567`（演示环境）
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,7 +22,7 @@ impl Neo4jClient {
     pub async fn connect() -> Result<Self> {
         let uri = std::env::var("NEO4J_URI").unwrap_or_else(|_| "bolt://localhost:7687".into());
         let user = std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".into());
-        let password = std::env::var("NEO4J_PASSWORD").unwrap_or_else(|_| "12345678".into());
+        let password = std::env::var("NEO4J_PASSWORD").unwrap_or_else(|_| "b1234567".into());
         let graph = Graph::new(uri.as_str(), user.as_str(), password.as_str())
             .await
             .with_context(|| {
@@ -84,44 +84,40 @@ ON MATCH  SET r.candidate_ids = [x IN coalesce(r.candidate_ids, []) WHERE x <> $
         Ok(())
     }
 
-    /// upsert Law / Article 节点及关系（有条款号和无条款号两条路径）。
+    /// upsert Law 节点及关系：Risk 永远直接 cites Law；有条款号时 Law 再 has_article Article。
     async fn upsert_law(&self, d: &EntityDecision, law: &LawArticleEntity) -> Result<()> {
-        match &law.article_id {
-            Some(article_id) => {
-                let cql = r"
+        // 注意：节点分开 MERGE、关系单独 MERGE。
+        // 一次性路径 MERGE（(r)-[:cites]->(l)）在节点已存在时也会新建重复节点（已验证）。
+        let cql = r"
+MATCH (r:Risk {risk_id: $risk_id})
 MERGE (l:Law {law_id: $law_id})
 ON CREATE SET l.name = $law_name
+MERGE (r)-[:cites]->(l)";
+        self.graph
+            .run(
+                query(cql)
+                    .param("risk_id", d.risk.id.as_str())
+                    .param("law_id", law.law_id.as_str())
+                    .param("law_name", law.law_name.as_str()),
+            )
+            .await
+            .context("写入 Law 节点失败")?;
+
+        if let Some(article_id) = &law.article_id {
+            let cql = r"
+MATCH (l:Law {law_id: $law_id})
 MERGE (a:Article {article_id: $article_id})
 ON CREATE SET a.law_id = $law_id, a.article_no = $article_no
-MERGE (l)-[:has_article]->(a)
-MERGE (r:Risk {risk_id: $risk_id})-[:cites]->(a)";
-                self.graph
-                    .run(
-                        query(cql)
-                            .param("law_id", law.law_id.as_str())
-                            .param("law_name", law.law_name.as_str())
-                            .param("article_id", article_id.as_str())
-                            .param("article_no", law.article_no.as_deref().unwrap_or(""))
-                            .param("risk_id", d.risk.id.as_str()),
-                    )
-                    .await
-                    .context("写入 Law/Article 节点失败")?;
-            }
-            None => {
-                let cql = r"
-MERGE (l:Law {law_id: $law_id})
-ON CREATE SET l.name = $law_name
-MERGE (r:Risk {risk_id: $risk_id})-[:cites]->(l)";
-                self.graph
-                    .run(
-                        query(cql)
-                            .param("law_id", law.law_id.as_str())
-                            .param("law_name", law.law_name.as_str())
-                            .param("risk_id", d.risk.id.as_str()),
-                    )
-                    .await
-                    .context("写入 Law 节点失败")?;
-            }
+MERGE (l)-[:has_article]->(a)";
+            self.graph
+                .run(
+                    query(cql)
+                        .param("law_id", law.law_id.as_str())
+                        .param("article_id", article_id.as_str())
+                        .param("article_no", law.article_no.as_deref().unwrap_or("")),
+                )
+                .await
+                .context("写入 Article 节点失败")?;
         }
         Ok(())
     }

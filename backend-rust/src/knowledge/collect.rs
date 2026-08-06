@@ -1,6 +1,16 @@
 use crate::agents::types::{RiskFinding, RiskSeverity};
 use crate::knowledge::types::Candidate;
 
+/// RiskSeverity 的干净字符串值（不带 Display 的 emoji 前缀）。
+fn severity_str(s: RiskSeverity) -> String {
+    match s {
+        RiskSeverity::Info => "info".into(),
+        RiskSeverity::Low => "low".into(),
+        RiskSeverity::Medium => "medium".into(),
+        RiskSeverity::High => "high".into(),
+    }
+}
+
 /// 从审核结果中挑出值得收藏的精华。
 ///
 /// 规则：`severity == RiskSeverity::High` 或 `legal_basis` 非空，且排除 `no_risk`。
@@ -21,7 +31,7 @@ pub fn collect_candidates(findings: &[RiskFinding]) -> Vec<Candidate> {
             Candidate {
                 candidate_id: item.risk_id.clone(),
                 risk_id: item.risk_id.clone(),
-                severity: item.severity.to_string(), // 使用 .to_string() 转换成 String
+                severity: severity_str(item.severity),
                 risk_type: item.risk_type.clone(),
                 legal_basis: item.legal_basis.clone(),
                 case_refs: item.case_refs.clone(),

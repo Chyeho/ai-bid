@@ -9,6 +9,7 @@ use ai_bid::knowledge::graph::Neo4jClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenv::dotenv().ok();
     let query = std::env::args()
         .nth(1)
         .context("用法: cargo run --bin search_knowledge <关键词>")?;
