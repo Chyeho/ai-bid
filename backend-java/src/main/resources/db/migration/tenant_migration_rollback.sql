@@ -11,8 +11,8 @@ SET @tenant_expand_rollback_confirmed = COALESCE(@tenant_expand_rollback_confirm
 
 DELIMITER $$
 
-DROP PROCEDURE IF EXISTS `tenant_migration_rollback_optional_trace`$$
-CREATE PROCEDURE `tenant_migration_rollback_optional_trace`(
+DROP PROCEDURE IF EXISTS `tenant_migration_rollback_optional_trace_preflight`$$
+CREATE PROCEDURE `tenant_migration_rollback_optional_trace_preflight`(
   IN p_table_name VARCHAR(64),
   IN p_index_name VARCHAR(64)
 )
@@ -44,6 +44,28 @@ BEGIN
         SET MESSAGE_TEXT = 'Trace tenant data exists. Retain the optional Expand schema.';
     END IF;
 
+  END IF;
+END$$
+
+DROP PROCEDURE IF EXISTS `tenant_migration_rollback_optional_trace_drop`$$
+CREATE PROCEDURE `tenant_migration_rollback_optional_trace_drop`(
+  IN p_table_name VARCHAR(64),
+  IN p_index_name VARCHAR(64)
+)
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_name = p_table_name
+       AND table_type = 'BASE TABLE'
+  ) AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = p_table_name
+       AND column_name = 'tenant_id'
+  ) THEN
     IF EXISTS (
       SELECT 1
         FROM information_schema.statistics
@@ -100,13 +122,23 @@ BEGIN
       SET MESSAGE_TEXT = 'A resource has a tenant_id. Rollback is unsafe after backfill.';
   END IF;
 
-  CALL `tenant_migration_rollback_optional_trace`(
+  CALL `tenant_migration_rollback_optional_trace_preflight`(
     'trace_event_blocks', 'idx_trace_event_blocks_tenant_id_event_id_id'
   );
-  CALL `tenant_migration_rollback_optional_trace`(
+  CALL `tenant_migration_rollback_optional_trace_preflight`(
     'trace_events', 'idx_trace_events_tenant_id_session_id_id'
   );
-  CALL `tenant_migration_rollback_optional_trace`(
+  CALL `tenant_migration_rollback_optional_trace_preflight`(
+    'trace_sessions', 'idx_trace_sessions_tenant_id_task_id_id'
+  );
+
+  CALL `tenant_migration_rollback_optional_trace_drop`(
+    'trace_event_blocks', 'idx_trace_event_blocks_tenant_id_event_id_id'
+  );
+  CALL `tenant_migration_rollback_optional_trace_drop`(
+    'trace_events', 'idx_trace_events_tenant_id_session_id_id'
+  );
+  CALL `tenant_migration_rollback_optional_trace_drop`(
     'trace_sessions', 'idx_trace_sessions_tenant_id_task_id_id'
   );
 
@@ -152,6 +184,7 @@ END$$
 
 CALL `tenant_migration_rollback_expand`()$$
 DROP PROCEDURE IF EXISTS `tenant_migration_rollback_expand`$$
-DROP PROCEDURE IF EXISTS `tenant_migration_rollback_optional_trace`$$
+DROP PROCEDURE IF EXISTS `tenant_migration_rollback_optional_trace_drop`$$
+DROP PROCEDURE IF EXISTS `tenant_migration_rollback_optional_trace_preflight`$$
 
 DELIMITER ;

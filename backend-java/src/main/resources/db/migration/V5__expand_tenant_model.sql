@@ -166,37 +166,37 @@ CALL `tenant_migration_ensure_column`('document_parse_job')$$
 CALL `tenant_migration_ensure_column`('rag_trigger_outbox')$$
 
 CALL `tenant_migration_ensure_index`(
-  'project', 'idx_project_tenant_id_user_id', '`tenant_id`, `user_id`, `id'
+  'project', 'idx_project_tenant_id_user_id', '`tenant_id`, `user_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'bid_document', 'idx_bid_document_tenant_id_project_id', '`tenant_id`, `project_id`, `id'
+  'bid_document', 'idx_bid_document_tenant_id_project_id', '`tenant_id`, `project_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'audit_task', 'idx_audit_task_tenant_id_bid_id', '`tenant_id`, `bid_id`, `id'
+  'audit_task', 'idx_audit_task_tenant_id_bid_id', '`tenant_id`, `bid_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'audit_issue', 'idx_audit_issue_tenant_id_audit_id', '`tenant_id`, `audit_id`, `id'
+  'audit_issue', 'idx_audit_issue_tenant_id_audit_id', '`tenant_id`, `audit_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'audit_report', 'idx_audit_report_tenant_id_audit_id', '`tenant_id`, `audit_id`, `id'
+  'audit_report', 'idx_audit_report_tenant_id_audit_id', '`tenant_id`, `audit_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'audit_task_event', 'idx_audit_task_event_tenant_id_task_id_id', '`tenant_id`, `task_id`, `id'
+  'audit_task_event', 'idx_audit_task_event_tenant_id_task_id_id', '`tenant_id`, `task_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'knowledge_file', 'idx_knowledge_file_tenant_id_upload_time_id', '`tenant_id`, `upload_time`, `id'
+  'knowledge_file', 'idx_knowledge_file_tenant_id_upload_time_id', '`tenant_id`, `upload_time`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'knowledge_chunk', 'idx_knowledge_chunk_tenant_id_file_id_id', '`tenant_id`, `file_id`, `id'
+  'knowledge_chunk', 'idx_knowledge_chunk_tenant_id_file_id_id', '`tenant_id`, `file_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'chat_message', 'idx_chat_message_tenant_id_project_id_id', '`tenant_id`, `project_id`, `id'
+  'chat_message', 'idx_chat_message_tenant_id_project_id_id', '`tenant_id`, `project_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'document_parse_job', 'idx_document_parse_job_tenant_id_file_id_id', '`tenant_id`, `file_id`, `id'
+  'document_parse_job', 'idx_document_parse_job_tenant_id_file_id_id', '`tenant_id`, `file_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_index`(
-  'rag_trigger_outbox', 'idx_rag_trigger_outbox_tenant_id_file_id_id', '`tenant_id`, `file_id`, `id'
+  'rag_trigger_outbox', 'idx_rag_trigger_outbox_tenant_id_file_id_id', '`tenant_id`, `file_id`, `id`'
 )$$
 
 CALL `tenant_migration_ensure_optional_column`('trace_sessions')$$
@@ -204,13 +204,13 @@ CALL `tenant_migration_ensure_optional_column`('trace_events')$$
 CALL `tenant_migration_ensure_optional_column`('trace_event_blocks')$$
 
 CALL `tenant_migration_ensure_optional_index`(
-  'trace_sessions', 'idx_trace_sessions_tenant_id_task_id_id', '`tenant_id`, `task_id`, `id'
+  'trace_sessions', 'idx_trace_sessions_tenant_id_task_id_id', '`tenant_id`, `task_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_optional_index`(
-  'trace_events', 'idx_trace_events_tenant_id_session_id_id', '`tenant_id`, `session_id`, `id'
+  'trace_events', 'idx_trace_events_tenant_id_session_id_id', '`tenant_id`, `session_id`, `id`'
 )$$
 CALL `tenant_migration_ensure_optional_index`(
-  'trace_event_blocks', 'idx_trace_event_blocks_tenant_id_event_id_id', '`tenant_id`, `event_id`, `id'
+  'trace_event_blocks', 'idx_trace_event_blocks_tenant_id_event_id_id', '`tenant_id`, `event_id`, `id`'
 )$$
 
 DROP PROCEDURE IF EXISTS `tenant_migration_ensure_optional_index`$$
