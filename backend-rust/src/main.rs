@@ -850,6 +850,7 @@ async fn main() -> Result<()> {
         let ds_search = shared_dashscope_search.clone();
         let buffer = shared_search_buffer.clone();
         move || {
+            eprintln!("[main] ── 创建 Agent 工具集 ToolRegistry ──");
             let mut registry = ToolRegistry::new();
             registry.register(Box::new(SearchDocumentTool::new(
                 doc_index.clone(),
@@ -883,6 +884,10 @@ async fn main() -> Result<()> {
             registry.register(Box::new(CheckScoringCompletenessTool));
             registry.register(Box::new(CheckImportedProductsTool));
             registry.register(Box::new(VerifyConsortiumRulesTool));
+            eprintln!(
+                "[main] ── 工具集注册完成: 共 {} 个工具 ──",
+                registry.len()
+            );
             registry
         }
     };

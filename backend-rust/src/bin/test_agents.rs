@@ -154,6 +154,7 @@ fn make_tools_factory(
     chunk_order: Arc<Vec<String>>,
 ) -> Arc<dyn Fn() -> ToolRegistry + Send + Sync> {
     Arc::new(move || {
+        eprintln!("[test_agents] ── 创建测试工具集 ToolRegistry ──");
         let mut registry = ToolRegistry::new();
         if let Some(ref ds) = ds_search {
             registry.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
@@ -183,6 +184,10 @@ fn make_tools_factory(
         registry.register(Box::new(CheckScoringCompletenessTool));
         registry.register(Box::new(CheckImportedProductsTool));
         registry.register(Box::new(VerifyConsortiumRulesTool));
+        eprintln!(
+            "[test_agents] ── 测试工具集注册完成: 共 {} 个工具 ──",
+            registry.len()
+        );
         registry
     })
 }

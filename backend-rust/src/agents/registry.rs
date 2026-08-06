@@ -260,12 +260,37 @@ impl AgentRegistry {
             },
         );
 
+        // 打印全部 Agent 的工具职责分配（排查调用链路）
+        eprintln!("[AgentRegistry] ── Agent 工具职责分配总览 ──");
+        for (id, def) in definitions.iter() {
+            eprintln!(
+                "[AgentRegistry]   {} ({}) → {} 个工具: {:?}",
+                def.display_name,
+                id,
+                def.tool_names.len(),
+                def.tool_names
+            );
+        }
+        eprintln!("[AgentRegistry] ──────────────────────────────");
+
         Self { definitions }
     }
 
     /// 按 AgentId 查找定义。
     pub fn get(&self, id: AgentId) -> Option<&AgentDefinition> {
-        self.definitions.get(&id)
+        let def = self.definitions.get(&id);
+        if let Some(d) = def {
+            eprintln!(
+                "[AgentRegistry] get: {} ({}) → 工具 {} 个: {:?}",
+                d.display_name,
+                id,
+                d.tool_names.len(),
+                d.tool_names
+            );
+        } else {
+            eprintln!("[AgentRegistry] get: {} → 未注册!", id);
+        }
+        def
     }
 
     /// 按引用查找 Agent 定义（避免移动 ownership）。

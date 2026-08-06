@@ -116,17 +116,46 @@ impl ToolRegistry {
     /// 注册一个工具。
     pub fn register(&mut self, tool: Box<dyn AgentTool>) {
         let name = tool.name().to_string();
-        self.tools.insert(name, tool);
+        eprintln!("  [ToolRegistry] register: {} ", name);
+        let replaced = self.tools.insert(name.clone(), tool).is_some();
+        if replaced {
+            eprintln!("  [ToolRegistry] !! 覆盖已存在的工具: {}", name);
+        }
     }
 
     /// 获取所有工具的 definitions（发送给 LLM）。
     pub fn definitions(&self) -> Vec<serde_json::Value> {
-        self.tools.values().map(|t| t.definition()).collect()
+        let defs = self.tools.values().map(|t| t.definition()).collect();
+        eprintln!(
+            "  [ToolRegistry] definitions: 共 {} 个工具",
+            self.tools.len()
+        );
+        defs
     }
 
     /// 获取指定名称列表的 tools definitions（按 AgentDefinition.tool_names 过滤）。
     /// 未在 tool_names 中列出的工具不会暴露给 LLM。
     pub fn definitions_filtered(&self, tool_names: &[String]) -> Vec<serde_json::Value> {
+        let granted: Vec<&String> = tool_names
+            .iter()
+            .filter(|n| self.tools.contains_key(*n))
+            .collect();
+        let missing: Vec<&String> = tool_names
+            .iter()
+            .filter(|n| !self.tools.contains_key(*n))
+            .collect();
+        if !missing.is_empty() {
+            eprintln!(
+                "  [ToolRegistry] ⚠ Agent 申请的工具未注册: {:?}",
+                missing
+            );
+        }
+        eprintln!(
+            "  [ToolRegistry] definitions_filtered: Agent 申请 {} 个 → 实际下发 {} 个: {:?}",
+            tool_names.len(),
+            granted.len(),
+            granted
+        );
         self.tools
             .iter()
             .filter(|(name, _)| tool_names.contains(name))
@@ -136,12 +165,28 @@ impl ToolRegistry {
 
     /// 获取指定名称的工具引用。
     pub fn get(&self, name: &str) -> Option<&dyn AgentTool> {
-        self.tools.get(name).map(|t| t.as_ref())
+        let tool = self.tools.get(name).map(|t| t.as_ref());
+        if tool.is_some() {
+            eprintln!("  [ToolRegistry] get: {} → 命中", name);
+        } else {
+            eprintln!("  [ToolRegistry] get: {} → 未注册!", name);
+        }
+        tool
     }
 
     /// 检查工具是否存在。
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
+    }
+
+    /// 已注册工具数量。
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+
+    /// 是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
     }
 
     /// 只保留指定名称的工具，删除其余。

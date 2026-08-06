@@ -873,6 +873,7 @@ async fn run_review_pipeline(
     let ec_for_tools = embed_client_for_tools.clone();
 
     let tools_factory = Arc::new(move || {
+        eprintln!("[handlers] ── 创建 Agent 工具集 ToolRegistry ──");
         let mut registry = ToolRegistry::new();
         if let Some(ref ec) = ec_for_tools {
             registry.register(Box::new(SearchDocumentTool::new(
@@ -905,6 +906,10 @@ async fn run_review_pipeline(
         registry.register(Box::new(CheckScoringCompletenessTool));
         registry.register(Box::new(CheckImportedProductsTool));
         registry.register(Box::new(VerifyConsortiumRulesTool));
+        eprintln!(
+            "[handlers] ── 工具集注册完成: 共 {} 个工具 ──",
+            registry.len()
+        );
         registry
     });
 
@@ -1331,6 +1336,7 @@ pub async fn chat_with_document(
     };
 
     let mut chat_tools = ToolRegistry::new();
+    eprintln!("[handlers] ── 创建 ChatAgent 对话工具集 ──");
     if let Some(ref ec) = embed_client {
         chat_tools.register(Box::new(SearchDocumentTool::new(
             doc.doc_index.clone(),
@@ -1345,6 +1351,10 @@ pub async fn chat_with_document(
         chat_tools.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
     }
     chat_tools.register(Box::new(AnswerUserTool));
+    eprintln!(
+        "[handlers] ── ChatAgent 工具集注册完成: 共 {} 个工具 ──",
+        chat_tools.len()
+    );
 
     let chat_config = ChatAgentConfig::default();
     let chat_agent = ChatAgent::new(
@@ -1445,6 +1455,7 @@ pub async fn chat_with_document_stream(
         };
 
         let mut chat_tools = ToolRegistry::new();
+        eprintln!("[handlers] ── 创建 ChatAgent 对话工具集 (stream) ──");
         if let Some(ref ec) = embed_client {
             chat_tools.register(Box::new(SearchDocumentTool::new(
                 doc.doc_index.clone(),
@@ -1459,6 +1470,10 @@ pub async fn chat_with_document_stream(
             chat_tools.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
         }
         chat_tools.register(Box::new(AnswerUserTool));
+        eprintln!(
+            "[handlers] ── ChatAgent 工具集注册完成 (stream): 共 {} 个工具 ──",
+            chat_tools.len()
+        );
 
         let chat_config = ChatAgentConfig::default();
         let chat_agent = match ChatAgent::new(
