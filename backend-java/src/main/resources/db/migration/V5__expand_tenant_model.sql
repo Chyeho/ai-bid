@@ -117,6 +117,42 @@ BEGIN
   END IF;
 END$$
 
+-- Trace tables are created by the optional trace_schema.sql initializer. The
+-- required V1 resource calls below remain unguarded and must fail if missing.
+DROP PROCEDURE IF EXISTS `tenant_migration_ensure_optional_column`$$
+CREATE PROCEDURE `tenant_migration_ensure_optional_column`(IN p_table_name VARCHAR(64))
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_name = p_table_name
+       AND table_type = 'BASE TABLE'
+  ) THEN
+    CALL `tenant_migration_ensure_column`(p_table_name);
+  END IF;
+END$$
+
+DROP PROCEDURE IF EXISTS `tenant_migration_ensure_optional_index`$$
+CREATE PROCEDURE `tenant_migration_ensure_optional_index`(
+  IN p_table_name VARCHAR(64),
+  IN p_index_name VARCHAR(64),
+  IN p_index_columns VARCHAR(255)
+)
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_name = p_table_name
+       AND table_type = 'BASE TABLE'
+  ) THEN
+    CALL `tenant_migration_ensure_index`(
+      p_table_name, p_index_name, p_index_columns
+    );
+  END IF;
+END$$
+
 CALL `tenant_migration_ensure_column`('project')$$
 CALL `tenant_migration_ensure_column`('bid_document')$$
 CALL `tenant_migration_ensure_column`('audit_task')$$
@@ -163,6 +199,22 @@ CALL `tenant_migration_ensure_index`(
   'rag_trigger_outbox', 'idx_rag_trigger_outbox_tenant_id_file_id_id', '`tenant_id`, `file_id`, `id'
 )$$
 
+CALL `tenant_migration_ensure_optional_column`('trace_sessions')$$
+CALL `tenant_migration_ensure_optional_column`('trace_events')$$
+CALL `tenant_migration_ensure_optional_column`('trace_event_blocks')$$
+
+CALL `tenant_migration_ensure_optional_index`(
+  'trace_sessions', 'idx_trace_sessions_tenant_id_task_id_id', '`tenant_id`, `task_id`, `id'
+)$$
+CALL `tenant_migration_ensure_optional_index`(
+  'trace_events', 'idx_trace_events_tenant_id_session_id_id', '`tenant_id`, `session_id`, `id'
+)$$
+CALL `tenant_migration_ensure_optional_index`(
+  'trace_event_blocks', 'idx_trace_event_blocks_tenant_id_event_id_id', '`tenant_id`, `event_id`, `id'
+)$$
+
+DROP PROCEDURE IF EXISTS `tenant_migration_ensure_optional_index`$$
+DROP PROCEDURE IF EXISTS `tenant_migration_ensure_optional_column`$$
 DROP PROCEDURE IF EXISTS `tenant_migration_ensure_index`$$
 DROP PROCEDURE IF EXISTS `tenant_migration_ensure_column`$$
 

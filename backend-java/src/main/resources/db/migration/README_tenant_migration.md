@@ -11,6 +11,9 @@ in `docs/adr/tenant-model.md` and `docs/adr/tenant-isolation.md`.
    `project`, `bid_document`, `audit_task`, `audit_issue`, `audit_report`,
    `audit_task_event`, `knowledge_file`, `knowledge_chunk`, `chat_message`,
    `document_parse_job`, and `rag_trigger_outbox`.
+   When the optional trace schema exists, the same migration also adds nullable
+   `tenant_id` and tenant-leading indexes to `trace_sessions`, `trace_events`, and
+   `trace_event_blocks`.
 2. `V6__backfill_tenant_data.sql` creates one stable personal tenant per `sys_user`,
    adds the OWNER membership, then backfills resources in parent-first order.
 3. `tenant_migration_validation.sql` is a manual, read-only validation script. It is
@@ -22,10 +25,16 @@ The existing application configuration has Flyway disabled, so deployment must a
 V1 through V6 using the team's normal Flyway runner or an explicit migration command.
 Do not enable Flyway in application code as part of T1.
 
-The separately initialized `trace_schema.sql` tables (`trace_sessions`, `trace_events`,
-and `trace_event_blocks`) are not present in the V1 baseline and are intentionally out
-of this V1-derived migration. If that schema is enabled in a deployed environment, the
-main integration must add a dedicated tenant migration for those tables before Contract.
+The `trace_schema.sql` tables are optional because they are not part of the V1 baseline.
+V5 checks table existence before expanding them; V1's 11 required resource tables remain
+unguarded and fail fast if missing. V6 conditionally backfills Trace rows through
+`trace_sessions.task_id -> audit_task.task_id`, `trace_events.session_id ->
+trace_sessions.id`, and `trace_event_blocks.event_id -> trace_events.event_id`.
+Missing parents or unresolved parent tenants remain NULL. The validation script reports
+Trace table presence, columns, indexes, NULL rows, and parent mismatches without failing
+when the optional schema is absent. Provision `trace_schema.sql` before V5/V6 when it is
+enabled; if it is introduced later, rerun the idempotent V5/V6 SQL under change control
+before Contract.
 
 ## Idempotency and ownership rules
 

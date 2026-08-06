@@ -11,6 +11,64 @@ SET @tenant_expand_rollback_confirmed = COALESCE(@tenant_expand_rollback_confirm
 
 DELIMITER $$
 
+DROP PROCEDURE IF EXISTS `tenant_migration_rollback_optional_trace`$$
+CREATE PROCEDURE `tenant_migration_rollback_optional_trace`(
+  IN p_table_name VARCHAR(64),
+  IN p_index_name VARCHAR(64)
+)
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_name = p_table_name
+       AND table_type = 'BASE TABLE'
+  ) AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = p_table_name
+       AND column_name = 'tenant_id'
+  ) THEN
+    SET @tenant_migration_trace_non_null = 0;
+    SET @tenant_migration_ddl = CONCAT(
+      'SELECT COUNT(*) INTO @tenant_migration_trace_non_null FROM `',
+      p_table_name, '` WHERE `tenant_id` IS NOT NULL'
+    );
+    PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+    EXECUTE tenant_migration_stmt;
+    DEALLOCATE PREPARE tenant_migration_stmt;
+
+    IF @tenant_migration_trace_non_null > 0 THEN
+      SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Trace tenant data exists. Retain the optional Expand schema.';
+    END IF;
+
+    IF EXISTS (
+      SELECT 1
+        FROM information_schema.statistics
+       WHERE table_schema = DATABASE()
+         AND table_name = p_table_name
+         AND index_name = p_index_name
+    ) THEN
+      SET @tenant_migration_ddl = CONCAT(
+        'ALTER TABLE `', p_table_name,
+        '` DROP INDEX `', p_index_name, '`'
+      );
+      PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+      EXECUTE tenant_migration_stmt;
+      DEALLOCATE PREPARE tenant_migration_stmt;
+    END IF;
+
+    SET @tenant_migration_ddl = CONCAT(
+      'ALTER TABLE `', p_table_name, '` DROP COLUMN `tenant_id`'
+    );
+    PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+    EXECUTE tenant_migration_stmt;
+    DEALLOCATE PREPARE tenant_migration_stmt;
+  END IF;
+END$$
+
 DROP PROCEDURE IF EXISTS `tenant_migration_rollback_expand`$$
 CREATE PROCEDURE `tenant_migration_rollback_expand`()
 BEGIN
@@ -41,6 +99,16 @@ BEGIN
     SIGNAL SQLSTATE '45000'
       SET MESSAGE_TEXT = 'A resource has a tenant_id. Rollback is unsafe after backfill.';
   END IF;
+
+  CALL `tenant_migration_rollback_optional_trace`(
+    'trace_event_blocks', 'idx_trace_event_blocks_tenant_id_event_id_id'
+  );
+  CALL `tenant_migration_rollback_optional_trace`(
+    'trace_events', 'idx_trace_events_tenant_id_session_id_id'
+  );
+  CALL `tenant_migration_rollback_optional_trace`(
+    'trace_sessions', 'idx_trace_sessions_tenant_id_task_id_id'
+  );
 
   ALTER TABLE `rag_trigger_outbox`
     DROP INDEX `idx_rag_trigger_outbox_tenant_id_file_id_id`,
@@ -84,5 +152,6 @@ END$$
 
 CALL `tenant_migration_rollback_expand`()$$
 DROP PROCEDURE IF EXISTS `tenant_migration_rollback_expand`$$
+DROP PROCEDURE IF EXISTS `tenant_migration_rollback_optional_trace`$$
 
 DELIMITER ;

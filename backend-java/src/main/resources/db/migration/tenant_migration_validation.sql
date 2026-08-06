@@ -4,6 +4,14 @@
 
 -- 1. Schema shape: every V1 resource table must have a nullable tenant_id.
 SELECT
+  t.`table_name`,
+  t.`table_type`
+FROM information_schema.`tables` AS t
+WHERE t.`table_schema` = DATABASE()
+  AND t.`table_name` IN ('trace_sessions', 'trace_events', 'trace_event_blocks')
+ORDER BY t.`table_name`;
+
+SELECT
   c.`table_name`,
   c.`column_name`,
   c.`data_type`,
@@ -14,7 +22,8 @@ WHERE c.`table_schema` = DATABASE()
   AND c.`table_name` IN (
     'project', 'bid_document', 'audit_task', 'audit_issue', 'audit_report',
     'audit_task_event', 'knowledge_file', 'knowledge_chunk', 'chat_message',
-    'document_parse_job', 'rag_trigger_outbox'
+    'document_parse_job', 'rag_trigger_outbox',
+    'trace_sessions', 'trace_events', 'trace_event_blocks'
   )
 ORDER BY c.`table_name`;
 
@@ -37,7 +46,10 @@ WHERE s.`table_schema` = DATABASE()
     'idx_knowledge_chunk_tenant_id_file_id_id',
     'idx_chat_message_tenant_id_project_id_id',
     'idx_document_parse_job_tenant_id_file_id_id',
-    'idx_rag_trigger_outbox_tenant_id_file_id_id'
+    'idx_rag_trigger_outbox_tenant_id_file_id_id',
+    'idx_trace_sessions_tenant_id_task_id_id',
+    'idx_trace_events_tenant_id_session_id_id',
+    'idx_trace_event_blocks_tenant_id_event_id_id'
   )
 ORDER BY s.`table_name`, s.`index_name`, s.`seq_in_index`;
 
@@ -66,6 +78,67 @@ UNION ALL
 SELECT 'document_parse_job', COUNT(*), SUM(`tenant_id` IS NULL) FROM `document_parse_job`
 UNION ALL
 SELECT 'rag_trigger_outbox', COUNT(*), SUM(`tenant_id` IS NULL) FROM `rag_trigger_outbox`;
+
+-- Optional Trace NULL and visible-count checks. The procedure only constructs a
+-- query after both the table and tenant_id column exist, so absent Trace schema
+-- produces no error and no misleading zero row.
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS `tenant_migration_validate_optional_trace_counts`$$
+CREATE PROCEDURE `tenant_migration_validate_optional_trace_counts`(
+  IN p_table_name VARCHAR(64),
+  IN p_resource_type VARCHAR(64)
+)
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_name = p_table_name
+       AND table_type = 'BASE TABLE'
+  ) AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = p_table_name
+       AND column_name = 'tenant_id'
+  ) THEN
+    SET @tenant_migration_ddl = CONCAT(
+      'SELECT ', QUOTE(p_table_name),
+      ' AS `source_table`, COUNT(*) AS `total_rows`, ',
+      'COALESCE(SUM(`tenant_id` IS NULL), 0) AS `null_tenant_id` ',
+      'FROM `', p_table_name, '`'
+    );
+    PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+    EXECUTE tenant_migration_stmt;
+    DEALLOCATE PREPARE tenant_migration_stmt;
+
+    SET @tenant_migration_ddl = CONCAT(
+      'SELECT t.`id` AS `tenant_id`, t.`tenant_code`, ',
+      QUOTE(p_resource_type),
+      ' AS `resource_type`, COUNT(r.`id`) AS `visible_count` ',
+      'FROM `tenant` AS t LEFT JOIN `', p_table_name,
+      '` AS r ON r.`tenant_id` = t.`id` ',
+      'GROUP BY t.`id`, t.`tenant_code`'
+    );
+    PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+    EXECUTE tenant_migration_stmt;
+    DEALLOCATE PREPARE tenant_migration_stmt;
+  END IF;
+END$$
+
+CALL `tenant_migration_validate_optional_trace_counts`(
+  'trace_sessions', 'trace_sessions'
+)$$
+CALL `tenant_migration_validate_optional_trace_counts`(
+  'trace_events', 'trace_events'
+)$$
+CALL `tenant_migration_validate_optional_trace_counts`(
+  'trace_event_blocks', 'trace_event_blocks'
+)$$
+DROP PROCEDURE IF EXISTS `tenant_migration_validate_optional_trace_counts`$$
+
+DELIMITER ;
 
 -- 4. Every legacy user needs an ACTIVE membership in the backfilled personal
 -- tenant. sys_user.status remains a separate authentication gate.
@@ -297,6 +370,200 @@ WHERE o.`tenant_id` IS NULL
     )
   )
 ORDER BY `source_table`, `source_id`;
+
+-- Optional Trace unresolved rows and parent mismatches. Every query is built
+-- only after the referenced optional table/column is confirmed to exist.
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS `tenant_migration_validate_optional_trace_relationships`$$
+CREATE PROCEDURE `tenant_migration_validate_optional_trace_relationships`()
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_name = 'trace_sessions'
+       AND table_type = 'BASE TABLE'
+  ) AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = 'trace_sessions'
+       AND column_name = 'tenant_id'
+  ) THEN
+    SET @tenant_migration_ddl = CONCAT(
+      'SELECT ', QUOTE('trace_sessions'),
+      ' AS `source_table`, CAST(s.`id` AS CHAR) AS `source_id`, ',
+      's.`task_id` AS `candidate_owner`, CASE ',
+      'WHEN a.`id` IS NULL THEN ', QUOTE('parent audit_task is missing'),
+      ' WHEN a.`tenant_id` IS NULL THEN ', QUOTE('parent audit_task is unresolved'),
+      ' ELSE ', QUOTE('tenant_id remained NULL'),
+      ' END AS `reason` FROM `trace_sessions` AS s ',
+      'LEFT JOIN `audit_task` AS a ON a.`task_id` = s.`task_id` ',
+      'WHERE s.`tenant_id` IS NULL ',
+      'AND (a.`id` IS NULL OR a.`tenant_id` IS NULL)'
+    );
+    PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+    EXECUTE tenant_migration_stmt;
+    DEALLOCATE PREPARE tenant_migration_stmt;
+
+    SET @tenant_migration_ddl = CONCAT(
+      'SELECT ', QUOTE('trace_sessions/audit_task'),
+      ' AS `relationship`, CAST(s.`id` AS CHAR) AS `source_id`, ',
+      QUOTE('trace_sessions tenant differs from audit_task tenant'),
+      ' AS `reason` FROM `trace_sessions` AS s ',
+      'JOIN `audit_task` AS a ON a.`task_id` = s.`task_id` ',
+      'WHERE s.`tenant_id` IS NOT NULL AND a.`tenant_id` IS NOT NULL ',
+      'AND s.`tenant_id` <> a.`tenant_id`'
+    );
+    PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+    EXECUTE tenant_migration_stmt;
+    DEALLOCATE PREPARE tenant_migration_stmt;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_name = 'trace_events'
+       AND table_type = 'BASE TABLE'
+  ) AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = 'trace_events'
+       AND column_name = 'tenant_id'
+  ) THEN
+    IF EXISTS (
+      SELECT 1
+        FROM information_schema.tables
+       WHERE table_schema = DATABASE()
+         AND table_name = 'trace_sessions'
+         AND table_type = 'BASE TABLE'
+    ) AND EXISTS (
+      SELECT 1
+        FROM information_schema.columns
+       WHERE table_schema = DATABASE()
+         AND table_name = 'trace_sessions'
+         AND column_name = 'tenant_id'
+    ) THEN
+      SET @tenant_migration_ddl = CONCAT(
+        'SELECT ', QUOTE('trace_events'),
+        ' AS `source_table`, CAST(e.`id` AS CHAR) AS `source_id`, ',
+        'e.`session_id` AS `candidate_owner`, CASE ',
+        'WHEN s.`id` IS NULL THEN ', QUOTE('parent trace_sessions is missing'),
+        ' WHEN s.`tenant_id` IS NULL THEN ', QUOTE('parent trace_sessions is unresolved'),
+        ' ELSE ', QUOTE('tenant_id remained NULL'),
+        ' END AS `reason` FROM `trace_events` AS e ',
+        'LEFT JOIN `trace_sessions` AS s ON s.`id` = e.`session_id` ',
+        'WHERE e.`tenant_id` IS NULL ',
+        'AND (s.`id` IS NULL OR s.`tenant_id` IS NULL)'
+      );
+      PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+      EXECUTE tenant_migration_stmt;
+      DEALLOCATE PREPARE tenant_migration_stmt;
+
+      SET @tenant_migration_ddl = CONCAT(
+        'SELECT ', QUOTE('trace_events/trace_sessions'),
+        ' AS `relationship`, CAST(e.`id` AS CHAR) AS `source_id`, ',
+        QUOTE('trace_events tenant differs from trace_sessions tenant'),
+        ' AS `reason` FROM `trace_events` AS e ',
+        'JOIN `trace_sessions` AS s ON s.`id` = e.`session_id` ',
+        'WHERE e.`tenant_id` IS NOT NULL AND s.`tenant_id` IS NOT NULL ',
+        'AND e.`tenant_id` <> s.`tenant_id`'
+      );
+      PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+      EXECUTE tenant_migration_stmt;
+      DEALLOCATE PREPARE tenant_migration_stmt;
+    ELSE
+      SET @tenant_migration_ddl = CONCAT(
+        'SELECT ', QUOTE('trace_events'),
+        ' AS `source_table`, CAST(e.`id` AS CHAR) AS `source_id`, ',
+        'e.`session_id` AS `candidate_owner`, ',
+        QUOTE('trace_sessions table or tenant_id is missing'),
+        ' AS `reason` FROM `trace_events` AS e ',
+        'WHERE e.`tenant_id` IS NULL'
+      );
+      PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+      EXECUTE tenant_migration_stmt;
+      DEALLOCATE PREPARE tenant_migration_stmt;
+    END IF;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.tables
+     WHERE table_schema = DATABASE()
+       AND table_name = 'trace_event_blocks'
+       AND table_type = 'BASE TABLE'
+  ) AND EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = 'trace_event_blocks'
+       AND column_name = 'tenant_id'
+  ) THEN
+    IF EXISTS (
+      SELECT 1
+        FROM information_schema.tables
+       WHERE table_schema = DATABASE()
+         AND table_name = 'trace_events'
+         AND table_type = 'BASE TABLE'
+    ) AND EXISTS (
+      SELECT 1
+        FROM information_schema.columns
+       WHERE table_schema = DATABASE()
+         AND table_name = 'trace_events'
+         AND column_name = 'tenant_id'
+    ) THEN
+      SET @tenant_migration_ddl = CONCAT(
+        'SELECT ', QUOTE('trace_event_blocks'),
+        ' AS `source_table`, CAST(b.`id` AS CHAR) AS `source_id`, ',
+        'b.`event_id` AS `candidate_owner`, CASE ',
+        'WHEN e.`id` IS NULL THEN ', QUOTE('parent trace_events is missing'),
+        ' WHEN e.`tenant_id` IS NULL THEN ', QUOTE('parent trace_events is unresolved'),
+        ' ELSE ', QUOTE('tenant_id remained NULL'),
+        ' END AS `reason` FROM `trace_event_blocks` AS b ',
+        'LEFT JOIN `trace_events` AS e ON e.`event_id` = b.`event_id` ',
+        'WHERE b.`tenant_id` IS NULL ',
+        'AND (e.`id` IS NULL OR e.`tenant_id` IS NULL)'
+      );
+      PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+      EXECUTE tenant_migration_stmt;
+      DEALLOCATE PREPARE tenant_migration_stmt;
+
+      SET @tenant_migration_ddl = CONCAT(
+        'SELECT ', QUOTE('trace_event_blocks/trace_events'),
+        ' AS `relationship`, CAST(b.`id` AS CHAR) AS `source_id`, ',
+        QUOTE('trace_event_blocks tenant differs from trace_events tenant'),
+        ' AS `reason` FROM `trace_event_blocks` AS b ',
+        'JOIN `trace_events` AS e ON e.`event_id` = b.`event_id` ',
+        'WHERE b.`tenant_id` IS NOT NULL AND e.`tenant_id` IS NOT NULL ',
+        'AND b.`tenant_id` <> e.`tenant_id`'
+      );
+      PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+      EXECUTE tenant_migration_stmt;
+      DEALLOCATE PREPARE tenant_migration_stmt;
+    ELSE
+      SET @tenant_migration_ddl = CONCAT(
+        'SELECT ', QUOTE('trace_event_blocks'),
+        ' AS `source_table`, CAST(b.`id` AS CHAR) AS `source_id`, ',
+        'b.`event_id` AS `candidate_owner`, ',
+        QUOTE('trace_events table or tenant_id is missing'),
+        ' AS `reason` FROM `trace_event_blocks` AS b ',
+        'WHERE b.`tenant_id` IS NULL'
+      );
+      PREPARE tenant_migration_stmt FROM @tenant_migration_ddl;
+      EXECUTE tenant_migration_stmt;
+      DEALLOCATE PREPARE tenant_migration_stmt;
+    END IF;
+  END IF;
+END$$
+
+CALL `tenant_migration_validate_optional_trace_relationships`()$$
+DROP PROCEDURE IF EXISTS `tenant_migration_validate_optional_trace_relationships`$$
+
+DELIMITER ;
 
 -- 7. Parent/child tenant mismatches must be empty before Enforce.
 SELECT 'bid_document/project' AS `relationship`, CAST(b.`id` AS CHAR) AS `source_id`,
