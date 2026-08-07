@@ -3,7 +3,7 @@
 //! 环境变量：
 //!   - `NEO4J_URI`       默认 `bolt://localhost:7687`
 //!   - `NEO4J_USER`      默认 `neo4j`
-//!   - `NEO4J_PASSWORD`  默认 `b1234567`（演示环境）
+//!   - `NEO4J_PASSWORD`  无默认，必须通过环境变量或 `.env` 提供
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,7 +22,7 @@ impl Neo4jClient {
     pub async fn connect() -> Result<Self> {
         let uri = std::env::var("NEO4J_URI").unwrap_or_else(|_| "bolt://localhost:7687".into());
         let user = std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".into());
-        let password = std::env::var("NEO4J_PASSWORD").unwrap_or_else(|_| "b1234567".into());
+        let password = std::env::var("NEO4J_PASSWORD").unwrap_or_default();
         let graph = Graph::new(uri.as_str(), user.as_str(), password.as_str())
             .await
             .with_context(|| {
@@ -48,10 +48,15 @@ impl Neo4jClient {
         Ok(ids)
     }
 
-    /// 写入"新"实体（`decision == Exists` 跳过）。全部 MERGE，幂等，可重复执行。
+    /// 写入实体（`decision == Exists` 时跳过 Risk 重建，但补全 Law 元数据）。
+    /// 全部 MERGE，幂等，可重复执行。
     pub async fn write(&self, decisions: Vec<EntityDecision>) -> Result<()> {
         for d in decisions {
             if d.decision == Decision::Exists {
+                // 已存在：不重建 Risk，但补全 Law 的 level/文号等元数据（ON MATCH coalesce，幂等）
+                for law in &d.laws {
+                    self.upsert_law(&d, law).await?;
+                }
                 continue;
             }
             self.upsert_risk(&d).await?;
@@ -85,20 +90,32 @@ ON MATCH  SET r.candidate_ids = [x IN coalesce(r.candidate_ids, []) WHERE x <> $
     }
 
     /// upsert Law 节点及关系：Risk 永远直接 cites Law；有条款号时 Law 再 has_article Article。
+    /// 写入 Law 元数据属性（level / issuing_body / doc_number / year，来自文号解析）。
     async fn upsert_law(&self, d: &EntityDecision, law: &LawArticleEntity) -> Result<()> {
         // 注意：节点分开 MERGE、关系单独 MERGE。
         // 一次性路径 MERGE（(r)-[:cites]->(l)）在节点已存在时也会新建重复节点（已验证）。
         let cql = r"
 MATCH (r:Risk {risk_id: $risk_id})
 MERGE (l:Law {law_id: $law_id})
-ON CREATE SET l.name = $law_name
+ON CREATE SET l.name = $law_name,
+              l.level = $level, l.issuing_body = $issuing_body,
+              l.doc_number = $doc_number, l.year = $year
+ON MATCH  SET l.level = coalesce(l.level, $level),
+              l.issuing_body = coalesce(l.issuing_body, $issuing_body),
+              l.doc_number = coalesce(l.doc_number, $doc_number),
+              l.year = coalesce(l.year, $year)
 MERGE (r)-[:cites]->(l)";
+        let meta = law.meta.as_ref();
         self.graph
             .run(
                 query(cql)
                     .param("risk_id", d.risk.id.as_str())
                     .param("law_id", law.law_id.as_str())
-                    .param("law_name", law.law_name.as_str()),
+                    .param("law_name", law.law_name.as_str())
+                    .param("level", meta.map(|m| m.level.as_str()).unwrap_or(""))
+                    .param("issuing_body", meta.map(|m| m.issuing_body.as_str()).unwrap_or(""))
+                    .param("doc_number", meta.map(|m| m.doc_number.as_str()).unwrap_or(""))
+                    .param("year", meta.and_then(|m| m.year.as_deref()).unwrap_or("")),
             )
             .await
             .context("写入 Law 节点失败")?;
@@ -183,8 +200,10 @@ RETURN r.risk_id AS risk_id, r.name AS risk_name, r.severity AS severity,
                 law_name,
                 article_id: (!article_id.is_empty()).then_some(article_id),
                 article_no: (!article_no.is_empty()).then_some(article_no),
+                meta: None,
             });
         }
         Ok(hits)
     }
+
 }

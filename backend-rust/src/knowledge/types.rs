@@ -48,6 +48,19 @@ pub struct RiskEntity {
     pub severity: String,
 }
 
+/// 法规元数据（从原始法条引用的文号解析，或按名称推断）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LawMeta {
+    /// 效力层级：法律 / 行政法规 / 部门规章 / 规范性文件 / 未分类
+    pub level: String,
+    /// 发文机关（"财政部" / "国务院" / "国务院办公厅" …）
+    pub issuing_body: String,
+    /// 文号（"财政部令第94号" / "财库〔2019〕38号" …）；无文号时为空
+    pub doc_number: String,
+    /// 发布年份（从文号年份推断）；无则 None
+    pub year: Option<String>,
+}
+
 /// 法规 / 条款实体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LawArticleEntity {
@@ -59,6 +72,9 @@ pub struct LawArticleEntity {
     pub article_id: Option<String>,
     /// 归一化条款号（"第20条"）；无条款号时为 None
     pub article_no: Option<String>,
+    /// 法规元数据（效力层级 / 发文机关 / 文号 / 年份）
+    #[serde(default)]
+    pub meta: Option<LawMeta>,
 }
 
 

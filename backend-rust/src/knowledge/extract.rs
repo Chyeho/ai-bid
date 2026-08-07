@@ -52,45 +52,195 @@ fn chinese_num_to_u32(s: &str) -> Option<u32> {
 }
 
 // --------------------------
-// 单元2：条款号归一化
+// 单元2：全角转半角 + 条款号归一化
 // --------------------------
-/// 条款号归一化："第二十条" → "第20条"，"第22条"保持不变
+/// 全角字符转半角（数字、字母、空格、点、横线），其他字符原样保留。
+fn to_half_width(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '０'..='９' => (c as u32 - 0xFF10 + 0x30) as u8 as char,
+            'ａ'..='ｚ' => (c as u32 - 0xFF41 + 0x61) as u8 as char,
+            'Ａ'..='Ｚ' => (c as u32 - 0xFF21 + 0x41) as u8 as char,
+            '　' => ' ',
+            '．' => '.',
+            '－' => '-',
+            _ => c,
+        })
+        .collect()
+}
+
+/// 条款号归一化："第二十条" → "第20条"，"第22条"保持不变，
+/// "第３．２条" → "第3.2条"，"第三条之二" → "第3条之2"
 pub fn normalize_article_number(raw: &str) -> Option<String> {
-    let re = Regex::new(r"第([零一二三四五六七八九十百千0-9]+)条").ok()?;
-    let caps = re.captures(raw)?;
+    let s = to_half_width(raw);
+    let re = Regex::new(r"第\s*([零一二三四五六七八九十百千0-9.]+?)\s*条(之\s*([零一二三四五六七八九十0-9]+))?")
+        .ok()?;
+    let caps = re.captures(&s)?;
     let num_str = caps.get(1)?.as_str();
 
-    // 如果已经是纯数字，直接返回
-    if num_str.chars().all(|c| c.is_ascii_digit()) {
-        return Some(format!("第{}条", num_str));
-    }
+    // 纯阿拉伯数字（可含小数点）直接保留，否则中文数字转阿拉伯
+    let main = if num_str.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        num_str.to_string()
+    } else {
+        chinese_num_to_u32(num_str)?.to_string()
+    };
 
-    // 中文数字转阿拉伯数字
-    let num = chinese_num_to_u32(num_str)?;
-    Some(format!("第{}条", num))
+    let mut out = format!("第{}条", main);
+    if let Some(suffix) = caps.get(3) {
+        let sfx = suffix.as_str();
+        let n = if sfx.chars().all(|c| c.is_ascii_digit()) {
+            sfx.to_string()
+        } else {
+            chinese_num_to_u32(sfx)?.to_string()
+        };
+        out.push_str(&format!("之{}", n));
+    }
+    Some(out)
 }
 
 // --------------------------
 // 单元3：法律依据字符串解析
 // --------------------------
-/// 从 "《政府采购法实施条例》第二十条" 里拆出法律名和条款号
+/// 去掉 Markdown 链接外壳："[文本](url)" → "文本"；无链接则原样返回。
+fn strip_markdown(text: &str) -> String {
+    match Regex::new(r"\[([^\]]+)\]\([^)]*\)") {
+        Ok(re) => re.replace(text, "$1").to_string(),
+        Err(_) => text.to_string(),
+    }
+}
+
+/// 法律名规范化：同一部法律的不同书写格式收敛为同一名字。
+/// 处理：条款号粘连（"X法第20条"→"X法"）、括号版本/文号（"…(国务院令第658号)"→"…"）、
+/// "中华人民共和国"前缀（"中华人民共和国X法"→"X法"）、发文机关前缀（"国务院办公厅关于…"→"关于…"）。
+fn normalize_law_name(name: &str) -> String {
+    let mut s = name.trim().to_string();
+
+    // 剔除条款号及其后的内容
+    if let Ok(re) = Regex::new(r"第[零一二三四五六七八九十百千0-9.]+条.*") {
+        s = re.replace(&s, "").to_string();
+    }
+
+    // 剔除括号（版本/文号说明）
+    if let Ok(re) = Regex::new(r"[（(][^）)]*[）)]") {
+        s = re.replace(&s, "").to_string();
+    }
+
+    // 合并国名前缀变体："中华人民共和国政府采购法" → "政府采购法"
+    s = s.replace("中华人民共和国", "");
+
+    // 合并发文机关前缀变体："国务院办公厅关于…" → "关于…"
+    if let Some(idx) = s.find("关于") {
+        s = s[idx..].to_string();
+    }
+
+    s.trim().trim_matches('《').trim_matches('》').trim().to_string()
+}
+
+/// 从法律依据字符串拆出规范化法律名和条款号。
+/// 兼容 LLM 输出的多种格式：
+///   "《政府采购法实施条例》第二十条"
+///   "[中华人民共和国政府采购法实施条例第二十条](https://…)"
+///   "政府采购法实施条例第二十条"
+///   "中华人民共和国政府采购法实施条例(国务院令第658号)"
 pub fn parse_law_basis(text: &str) -> (String, Option<String>) {
-    // 匹配书名号里的法律名
+    // 先转半角、剥掉 Markdown 链接外壳
+    let raw = strip_markdown(&to_half_width(text));
+
+    // 匹配书名号里的法律名，无书名号则整段作为候选名
     let law_re = Regex::new(r"《([^》]+)》").unwrap();
     let law_name = law_re
-        .captures(text)
+        .captures(&raw)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string())
-        .unwrap_or_else(|| text.to_string());
+        .unwrap_or_else(|| raw.clone());
 
-    // 匹配后面的条款号
-    let article_re = Regex::new(r"第[零一二三四五六七八九十百千0-9]+条").unwrap();
+    // 匹配条款号（含之N/小数）
+    let article_re = Regex::new(r"第[零一二三四五六七八九十百千0-9.]+条(之[零一二三四五六七八九十0-9]+)?")
+        .unwrap();
     let article_no = article_re
-        .find(text)
+        .find(&raw)
         .map(|m| normalize_article_number(m.as_str()))
         .flatten();
 
+    // 法律名规范化
+    let law_name = normalize_law_name(&law_name);
+
     (law_name, article_no)
+}
+
+// --------------------------
+// 单元3.5：法律元数据解析（效力层级 / 发文机关 / 文号 / 年份）
+// --------------------------
+/// 文号前缀 → 发文机关。
+fn issuing_body_from_doc(prefix: &str) -> String {
+    match prefix {
+        "国发" | "国办发" => "国务院办公厅".to_string(),
+        "财库" | "财综" | "财预" | "财采" | "财办" => "财政部".to_string(),
+        "发改" | "发改价格" | "发改办" => "国家发展改革委".to_string(),
+        _ => prefix.to_string(),
+    }
+}
+
+/// 从原始法条引用解析法律元数据。
+///
+/// 优先解析文号（"财政部令第94号" / "国办发〔2016〕49号" / "财库〔2019〕38号"），
+/// 无文号时按法律名后缀推断效力层级。
+pub fn parse_law_meta(raw: &str, law_name: &str) -> Option<LawMeta> {
+    let text = to_half_width(raw);
+
+    // 文号 1：XX令第N号（财政部令第94号 / 国务院令第658号）
+    if let Some(caps) = Regex::new(r"([\u4e00-\u9fa5]{2,10}?)令第(\d+)号")
+        .ok()
+        .and_then(|re| re.captures(&text))
+    {
+        let body = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let num = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        let doc = format!("{}令第{}号", body, num);
+        let level = if body.contains("国务院") { "行政法规" } else { "部门规章" };
+        return Some(LawMeta {
+            level: level.into(),
+            issuing_body: body.into(),
+            doc_number: doc,
+            year: None,
+        });
+    }
+
+    // 文号 2：XX〔YYYY〕N号（国办发〔2016〕49号 / 财库〔2019〕38号 / 发改价格〔2018〕51号）
+    if let Some(caps) = Regex::new(r"([\u4e00-\u9fa5]{1,12}?)〔(\d{4})〕(\d+)号")
+        .ok()
+        .and_then(|re| re.captures(&text))
+    {
+        let prefix = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let year = caps.get(2).map(|m| m.as_str().to_string());
+        let num = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+        let doc = format!("{}〔{}〕{}号", prefix, year.as_deref().unwrap_or(""), num);
+        return Some(LawMeta {
+            level: "规范性文件".into(),
+            issuing_body: issuing_body_from_doc(prefix),
+            doc_number: doc,
+            year,
+        });
+    }
+
+    // 无文号：按名称后缀推断效力层级
+    // 注意判断顺序：先排除"办法/规定/规则/指南/通知/意见"，再判断"法"，避免"办法"误判为"法律"。
+    let level = if law_name.ends_with("条例") {
+        "行政法规"
+    } else if law_name.ends_with("办法") || law_name.ends_with("规定") || law_name.ends_with("规则") {
+        "部门规章"
+    } else if law_name.ends_with("指南") || law_name.ends_with("通知") || law_name.ends_with("意见") {
+        "规范性文件"
+    } else if law_name.ends_with("法") || law_name.ends_with("典") {
+        "法律"
+    } else {
+        "未分类"
+    };
+    Some(LawMeta {
+        level: level.into(),
+        issuing_body: String::new(),
+        doc_number: String::new(),
+        year: None,
+    })
 }
 
 // --------------------------
@@ -149,12 +299,14 @@ pub fn extract_and_dedup(
                     let article_id = article_no
                         .as_ref()
                         .map(|no| gen_article_id(&law_id, no));
+                    let meta = parse_law_meta(basis, &law_name);
 
                     LawArticleEntity {
                         law_id,
                         law_name,
                         article_id,
                         article_no,
+                        meta,
                     }
                 })
                 .collect();
@@ -208,6 +360,16 @@ mod tests {
             normalize_article_number("第5条"),
             Some("第5条".to_string())
         );
+        // 全角数字 + 小数点（文档任务 1 要求）
+        assert_eq!(
+            normalize_article_number("第３．２条"),
+            Some("第3.2条".to_string())
+        );
+        // 之N 子条款（文档任务 1 要求）
+        assert_eq!(
+            normalize_article_number("第三条之二"),
+            Some("第3条之2".to_string())
+        );
     }
 
     #[test]
@@ -222,6 +384,160 @@ mod tests {
         let (name2, article2) = parse_law_basis(text2);
         assert_eq!(name2, "政府采购法");
         assert!(article2.is_none());
+    }
+
+    #[test]
+    fn test_parse_dirty_formats_merge_to_same_id() {
+        // 真实库里出现过的脏格式，都应收敛到同一个 law_id
+        let dirty = [
+            "《中华人民共和国政府采购法实施条例》第二十条",
+            "[中华人民共和国政府采购法实施条例第二十条](https://xzfg.moj.gov.cn/front/law/detail?LawID=417)",
+            "政府采购法实施条例第二十条",
+            "政府采购法实施条例 第二十条",
+            "中华人民共和国政府采购法实施条例(国务院令第658号)",
+            "[《中华人民共和国政府采购法实施条例》](https://xzfg.moj.gov.cn/front/law/detail?LawID=417)",
+        ];
+        let ids: HashSet<String> = dirty
+            .iter()
+            .map(|t| {
+                let (name, _) = parse_law_basis(t);
+                gen_law_id(&name)
+            })
+            .collect();
+        assert_eq!(ids.len(), 1, "不同格式的同一法律必须映射到同一 law_id");
+
+        // 需求管理办法的脏格式同理
+        let dirty2 = [
+            "政府采购需求管理办法",
+            "中华人民共和国政府采购需求管理办法",
+            "[政府采购需求管理办法第九条](https://baike.baidu.com/item/政府采购需求管理办法/56971221)",
+            "政府采购需求管理办法第九条",
+        ];
+        let ids2: HashSet<String> = dirty2
+            .iter()
+            .map(|t| {
+                let (name, _) = parse_law_basis(t);
+                gen_law_id(&name)
+            })
+            .collect();
+        assert_eq!(ids2.len(), 1);
+
+        // 国名/发文机关前缀变体
+        let dirty3 = [
+            "政府采购法",
+            "中华人民共和国政府采购法",
+            "国务院办公厅关于促进政府采购公平竞争优化营商环境的通知",
+            "关于促进政府采购公平竞争优化营商环境的通知",
+        ];
+        let ids3: HashSet<String> = dirty3
+            .iter()
+            .map(|t| {
+                let (name, _) = parse_law_basis(t);
+                gen_law_id(&name)
+            })
+            .collect();
+        assert_eq!(ids3.len(), 2); // 政府采购法一组，通知一组
+    }
+
+    #[test]
+    fn test_parse_dirty_formats_article() {
+        // Markdown 链接里的条款号仍被正确抽取
+        let (name, article) =
+            parse_law_basis("[政府采购需求管理办法第九条](https://baike.baidu.com/item/x)");
+        assert_eq!(name, "政府采购需求管理办法");
+        assert_eq!(article, Some("第9条".to_string()));
+
+        // 无条款号时不产生 article
+        let (_, article2) = parse_law_basis("[政府采购信息公告管理办法](https://x.com)");
+        assert!(article2.is_none());
+    }
+
+    #[test]
+    fn test_parse_law_meta_decree() {
+        // 部门规章：财政部令第94号
+        let m = parse_law_meta("《政府采购质疑和投诉办法》（财政部令第94号）", "政府采购质疑和投诉办法")
+            .unwrap();
+        assert_eq!(m.level, "部门规章");
+        assert_eq!(m.issuing_body, "财政部");
+        assert_eq!(m.doc_number, "财政部令第94号");
+        assert!(m.year.is_none());
+
+        // 行政法规：国务院令
+        let m = parse_law_meta(
+            "《中华人民共和国政府采购法实施条例》（国务院令第658号）",
+            "政府采购法实施条例",
+        )
+        .unwrap();
+        assert_eq!(m.level, "行政法规");
+        assert_eq!(m.issuing_body, "国务院");
+        assert_eq!(m.doc_number, "国务院令第658号");
+    }
+
+    #[test]
+    fn test_parse_law_meta_doc_number() {
+        // 规范性文件：财库〔2019〕38号
+        let m = parse_law_meta(
+            "财政部《关于促进政府采购公平竞争优化营商环境的通知》（财库〔2019〕38号）",
+            "关于促进政府采购公平竞争优化营商环境的通知",
+        )
+        .unwrap();
+        assert_eq!(m.level, "规范性文件");
+        assert_eq!(m.issuing_body, "财政部");
+        assert_eq!(m.doc_number, "财库〔2019〕38号");
+        assert_eq!(m.year.as_deref(), Some("2019"));
+
+        // 国办发
+        let m = parse_law_meta(
+            "《国务院办公厅关于促进政府采购公平竞争优化营商环境的通知》（国办发〔2019〕51号）",
+            "关于促进政府采购公平竞争优化营商环境的通知",
+        )
+        .unwrap();
+        assert_eq!(m.issuing_body, "国务院办公厅");
+        assert_eq!(m.doc_number, "国办发〔2019〕51号");
+    }
+
+    #[test]
+    fn test_parse_law_meta_infer_level() {
+        // 无文号：按名称后缀推断
+        let m = parse_law_meta("《中华人民共和国政府采购法》第五十二条", "政府采购法").unwrap();
+        assert_eq!(m.level, "法律");
+        assert!(m.doc_number.is_empty());
+
+        let m = parse_law_meta("《政府采购需求管理办法》第九条", "政府采购需求管理办法").unwrap();
+        assert_eq!(m.level, "部门规章");
+
+        let m = parse_law_meta("《政府采购框架协议编制指南》", "政府采购框架协议编制指南").unwrap();
+        assert_eq!(m.level, "规范性文件");
+
+        let m = parse_law_meta("《中华人民共和国民法典》", "民法典").unwrap();
+        assert_eq!(m.level, "法律");
+    }
+
+    #[test]
+    fn test_law_meta_flow_into_entity() {
+        // 端到端：脏 basis → LawArticleEntity 携带 meta
+        let cand = Candidate {
+            candidate_id: "c1".to_string(),
+            risk_id: "risk_001".to_string(),
+            severity: "high".to_string(),
+            risk_type: "品牌指定".to_string(),
+            legal_basis: vec![
+                "《政府采购货物和服务招标投标管理办法》（财政部令第87号）第七十七条".to_string(),
+            ],
+            case_refs: vec![],
+            source_quote: "".to_string(),
+            reason: "".to_string(),
+            suggestion: "".to_string(),
+            confidence: 0.9,
+        };
+        let empty = HashSet::new();
+        let res = extract_and_dedup(vec![cand], &empty);
+        let law = &res[0].laws[0];
+        assert_eq!(law.law_name, "政府采购货物和服务招标投标管理办法");
+        let meta = law.meta.as_ref().unwrap();
+        assert_eq!(meta.level, "部门规章");
+        assert_eq!(meta.doc_number, "财政部令第87号");
+        assert_eq!(law.article_no.as_deref(), Some("第77条"));
     }
 
     #[test]
