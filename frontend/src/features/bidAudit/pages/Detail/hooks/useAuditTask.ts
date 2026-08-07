@@ -28,6 +28,17 @@ function upsertIssues(prev: AuditIssue[], mapped: AuditIssue): AuditIssue[] {
   return [...prev, mapped];
 }
 
+/**
+ * 后端 GET /result 返回的 IssueVO 漏设 anchorQuote（Java toIssueVO 从未 setAnchorQuote），
+ * 导致审核完成后点击高亮退化成整面。这里兜底：anchorQuote 缺失时回退到 sourceQuote / description。
+ */
+function withAnchorFallback(i: AuditIssue): AuditIssue {
+  return {
+    ...i,
+    anchorQuote: i.anchorQuote || i.sourceQuote || i.description,
+  };
+}
+
 type StoredAuditTaskState = {
    taskId?: string;
    startedAt?: number;
@@ -172,7 +183,7 @@ export const useAuditTask = (bidId?: number) => {
             if (completed) {
                const result = await getAuditResult(taskId, { page: 1, size: 200 });
                if (cancelled) return;
-               setIssues(result.issues || []);
+               setIssues((result.issues || []).map(withAnchorFallback));
                updateFinalElapsed();
                setProgress(100);
                setCurrentStage('审核完成');
@@ -335,7 +346,7 @@ export const useAuditTask = (bidId?: number) => {
                   if (completed) {
                      const result = await getAuditResult(taskId, { page: 1, size: 200 });
                      if (!isMounted) return;
-                     setIssues(result.issues || []);
+                     setIssues((result.issues || []).map(withAnchorFallback));
                      updateFinalElapsed();
                      setProgress(100);
                      setIsComplete(true);
@@ -391,7 +402,7 @@ export const useAuditTask = (bidId?: number) => {
             if (status.status === 'completed') {
                const result = await getAuditResult(taskId, { page: 1, size: 200 });
                if (stopped) return;
-               setIssues(result.issues || []);
+               setIssues((result.issues || []).map(withAnchorFallback));
                updateFinalElapsed();
                setIsComplete(true);
                setProgress(100);
@@ -412,7 +423,7 @@ export const useAuditTask = (bidId?: number) => {
                (fallbackResult.issues?.length || 0) > 0 ||
                (status.status === 'completed' && !!fallbackResult.auditResult);
             if (hasResult) {
-               setIssues(fallbackResult.issues || []);
+               setIssues((fallbackResult.issues || []).map(withAnchorFallback));
                updateFinalElapsed();
                setIsComplete(true);
                setProgress(100);

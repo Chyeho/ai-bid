@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useEffect } from 'react';
-import { Segmented, Typography, Tag, Space, Progress, Alert } from 'antd';
+import { Segmented, Typography, Tag, Space, Progress, Alert, Button } from 'antd';
 import { useStyles } from '../../style';
 import type { AuditIssue } from '../../types';
 import type { BBoxData } from '../../components/PDFPreview/PdfPreview';
@@ -605,11 +605,13 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
          return visibleIssues;
   }, [visibleIssues, currentTab]);
 
-  // 批次错峰入场：记录上一次渲染时的可见条数，新追加的发现卡据此计算逐条延迟
-  const prevFilteredLenRef = useRef(filteredIssues.length);
+  // 已播放入场动画的卡 key（跨渲染持久，避免切 tab 重播）
+  const animatedKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    prevFilteredLenRef.current = filteredIssues.length;
-  }, [filteredIssues.length]);
+    filteredIssues.forEach((i, idx) => {
+      animatedKeysRef.current.add(i.riskId || i.issueNo || `issue-${idx}`);
+    });
+  }, [filteredIssues]);
 
   const canonicalPageByAnchor = useMemo(() => {
          const pageVotes = new Map<string, Map<number, number>>();
@@ -651,12 +653,53 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
       );
 
       const renderedIssueCards = useMemo(() => {
-         return filteredIssues
-      .map((issue, issueIndex) => {
-        const parsed = parseIssueText(issue.description);
-        const base = prevFilteredLenRef.current;
-        const isNew = issueIndex >= base;
-        const stepDelay = isNew ? Math.min(issueIndex - base, 20) * 80 : 0;
+      let newSeq = 0;
+      // 统一的"定位"处理器：主卡与成员卡共用，优先 BBox、回落文本匹配
+      const createLocateHandler = (target: AuditIssue) => () => {
+        const page =
+          canonicalPageByAnchor.get(buildAnchorKey(target)) ??
+          parsePageNumber(target.anchorPage) ??
+          parsePageNumber(target.location?.pageNumber);
+        if (page == null) return;
+        const src = extractSourceInfo(target, currentFileName, currentFileId);
+        const normalizedPage = normalizeLocatePage(page, src.fileName);
+        const useBbox =
+          HIGHLIGHT_MODE !== 'text' &&
+          target.blockIds &&
+          target.blockIds.length > 0 &&
+          taskId &&
+          onLocateBboxes;
+        const fallback = () => {
+          const p = parseIssueText(target.description);
+          const hl = buildHighlightText(
+            target,
+            buildIssueExplanation(target, p?.rationale || sanitizeDisplayText(target.description)),
+            target.category || '审查问题'
+          );
+          const tokens = Array.isArray(target.anchorTokens)
+            ? target.anchorTokens.map((t) => String(t || '').trim()).filter(Boolean).slice(0, 5)
+            : [];
+          onLocateIssuePage(normalizedPage, hl, tokens);
+        };
+        if (useBbox) {
+          fetchBlockBboxes(taskId!, target.blockIds!)
+            .then((bboxes) => {
+              if (bboxes.length > 0) onLocateBboxes!(normalizedPage, bboxes);
+              else if (HIGHLIGHT_MODE === 'auto') fallback();
+            })
+            .catch(() => {
+              if (HIGHLIGHT_MODE === 'auto') fallback();
+            });
+          return;
+        }
+        fallback();
+      };
+      return filteredIssues
+  .map((issue, issueIndex) => {
+    const parsed = parseIssueText(issue.description);
+    const cardKey = issue.riskId || issue.issueNo || `issue-${issueIndex}`;
+    const isNew = !animatedKeysRef.current.has(cardKey);
+    const stepDelay = isNew ? Math.min(newSeq++, 20) * 200 : 0;
                const rawDescription = sanitizeDisplayText(issue.description);
                const title = issue.category || '审查问题';
                const rationaleBody = buildIssueExplanation(
@@ -679,54 +722,9 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
                const pageNo = rawPageNo != null
                   ? normalizeLocatePage(rawPageNo, sourceInfo.fileName)
                   : null;
-               const issueRenderKey = `${issue.issueNo || 'issue'}-${rawPageNo}-${issueIndex}`;
+               const issueRenderKey = cardKey;
 
-               const handleLocate = () => {
-                  const page =
-                     canonicalPage ??
-                     parsePageNumber(issue.anchorPage) ??
-                     parsePageNumber(issue.location?.pageNumber);
-                  if (page == null) return;
-                  const normalizedPage = normalizeLocatePage(page, sourceInfo.fileName);
-
-                  // ── BBox 优先路径 ──
-                  const useBbox =
-                     HIGHLIGHT_MODE !== 'text' &&
-                     issue.blockIds &&
-                     issue.blockIds.length > 0 &&
-                     taskId &&
-                     onLocateBboxes;
-                  if (useBbox) {
-                     fetchBlockBboxes(taskId!, issue.blockIds!)
-                        .then((bboxes) => {
-                           if (bboxes.length > 0) {
-                              onLocateBboxes!(normalizedPage, bboxes);
-                           } else if (HIGHLIGHT_MODE === 'auto') {
-                              fallbackToTextMatch();
-                           }
-                        })
-                        .catch(() => {
-                           if (HIGHLIGHT_MODE === 'auto') {
-                              fallbackToTextMatch();
-                           }
-                        });
-                     return;
-                  }
-
-                  // ── 文本匹配路径（fallback） ──
-                  fallbackToTextMatch();
-
-                  function fallbackToTextMatch() {
-                     const highlightText = buildHighlightText(issue, rationale, title);
-                     const fallbackTokens = Array.isArray(issue.anchorTokens)
-                        ? issue.anchorTokens
-                             .map((item) => String(item || '').trim())
-                             .filter(Boolean)
-                             .slice(0, 5)
-                        : [];
-                     onLocateIssuePage(normalizedPage, highlightText, fallbackTokens);
-                  }
-               };
+               const handleLocate = createLocateHandler(issue);
 
                return (
                   <div
@@ -740,7 +738,7 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
                     background: theme.colorBgContainer,
                     transition: 'box-shadow 0.2s',
                     ...(isNew
-                      ? { animation: 'issueCardIn 0.32s ease-out both', animationDelay: `${stepDelay}ms` }
+                      ? { animation: 'issueCardIn 0.42s ease-out both', animationDelay: `${stepDelay}ms` }
                       : {}),
                   }}
                      onMouseEnter={(e) => {
@@ -841,6 +839,7 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
                            {rationale}
                         </Paragraph>
                      )}
+                     {/* P2 回退：同源聚合成员展开块已移除，每条 finding 独立成卡 */}
                   </div>
                );
             })
@@ -857,7 +856,7 @@ export const AnalysisList: React.FC<AnalysisListProps> = React.memo(
         >
           <style>{`
             @keyframes issueCardIn {
-              from { opacity: 0; transform: translateY(10px); }
+              from { opacity: 0; transform: translateY(18px); }
               to { opacity: 1; transform: translateY(0); }
             }
           `}</style>
