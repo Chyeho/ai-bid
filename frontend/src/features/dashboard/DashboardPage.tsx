@@ -86,7 +86,11 @@ export const DashboardPage: React.FC = () => {
    }, [listData, statusFilter]);
 
    const handleFilterClick = (key: 'pending' | 'passed') => {
-      setQueryParams({ statusFilter: statusFilter === key ? 'all' : key });
+      // 切筛选时重置到第 1 页，避免当前页超出筛选后的总页数导致空列表
+      setQueryParams({
+         statusFilter: statusFilter === key ? 'all' : key,
+         page: 1,
+      });
    };
 
    // 新建项目的 Hook

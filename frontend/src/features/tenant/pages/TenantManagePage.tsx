@@ -39,24 +39,18 @@ export const TenantManagePage: React.FC = () => {
 
   // ── 创建租户 ──────────────────────────────────────────────────────
   const createMutation = useMutation({
-    mutationFn: (params: CreateTenantParams) => {
-      console.log('[TenantCreate] 开始创建，参数:', params);
-      return tenantApi.createTenant(params);
-    },
+    mutationFn: (params: CreateTenantParams) => tenantApi.createTenant(params),
     onSuccess: (resp) => {
-      console.log('[TenantCreate] 成功返回:', resp);
       if (resp.code === 200) {
         message.success('租户创建成功');
         setCreateModalOpen(false);
         createForm.resetFields();
         refetchTenants();
       } else {
-        console.warn('[TenantCreate] 业务码非200:', resp.code, resp.msg);
         message.error(resp.msg || '创建失败');
       }
     },
     onError: (error: any) => {
-      console.error('[TenantCreate] 异常:', error);
       message.error(error?.response?.data?.msg || '创建失败');
     },
   });

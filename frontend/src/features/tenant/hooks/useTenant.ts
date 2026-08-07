@@ -8,7 +8,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useDispatch, useSelector } from 'react-redux';
 import { App } from 'antd';
-import { tenantApi } from '../api/tenant';
+import { tenantApi, USE_MOCK } from '../api/tenant';
 import { switchTenant as switchTenantAction, setTenantList, setCurrentTenantId } from '@/store/slices/authSlice';
 import type { RootState } from '@/store';
 import type { SwitchTenantParams } from '../types';
@@ -42,9 +42,8 @@ export const useTenant = () => {
     onSuccess: (resp) => {
       if (resp.code === 200 && resp.data) {
         const session = resp.data;
-        const isMock = session.token.startsWith('mock-');
 
-        if (isMock) {
+        if (USE_MOCK) {
           // Mock 模式：只更新 currentTenantId，不动真实 token（避免覆盖登录态导致 401）
           dispatch(setCurrentTenantId(session.tenant_id));
           message.success(`已切换到租户（Mock 模式）`);
@@ -57,7 +56,8 @@ export const useTenant = () => {
               refreshToken: session.refresh_token,
               tenantId: session.tenant_id,
               userInfo: {
-                id: Number(session.user_id) || 0,
+                // 保留 user_id 原值，避免 UUID 经 Number() 变成 0
+                id: session.user_id,
                 username: session.username,
                 realName: session.real_name || session.username,
               },

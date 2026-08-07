@@ -16,7 +16,7 @@ import type {
 } from '../types';
 
 // ─── 是否启用 Mock（PR#6 合并前为 true，联调时改 false） ─────────────
-const USE_MOCK = true;
+export const USE_MOCK = true;
 
 export const tenantApi = {
   // ─── 认证相关 ──────────────────────────────────────────────────────
@@ -134,7 +134,6 @@ async function mockGetTenants(): Promise<BaseResponse<TenantListResponse>> {
 async function mockCreateTenant(
   data: CreateTenantParams
 ): Promise<BaseResponse<TenantSummary>> {
-  console.log('[mockCreateTenant] 被调用，参数:', data);
   await delay();
   const newTenant: import('../types').TenantSummary = {
     tenant_id: `t_${Date.now()}`,
@@ -143,7 +142,6 @@ async function mockCreateTenant(
     created_at: new Date().toISOString(),
   };
   mockTenants.push(newTenant);
-  console.log('[mockCreateTenant] 返回成功，新租户:', newTenant, '当前列表:', mockTenants);
   return { code: 200, msg: 'success', data: newTenant, timestamp: Date.now() };
 }
 

@@ -1,7 +1,8 @@
 import { createSlice } from '@reduxjs/toolkit';
 
 export interface UserInfo {
-   id: number;
+   /** 用户 ID（后端可能返回数字或字符串 UUID，统一保留原值） */
+   id: number | string;
    username: string;
    realName: string;
 }
