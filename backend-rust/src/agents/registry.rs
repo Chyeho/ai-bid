@@ -52,9 +52,11 @@ impl AgentRegistry {
                     "search_document",
                     "read_section",
                     "output_finding",
-                    // 交叉引用完整性检查
+                    // 交叉引用完整性检查 + 模板比对
                     "check_cross_reference",
                     "compare_with_template",
+                    // 数值/计算校验
+                    "validate_calculation",
                 ],
             },
         );
@@ -90,7 +92,6 @@ impl AgentRegistry {
                     // 零依赖计算工具
                     "calculate_timeline",
                 ],
-                    "compare_with_template",
             },
         );
 
@@ -112,7 +113,6 @@ impl AgentRegistry {
                     "extract_obligations",
                     "check_cross_reference",
                 ],
-                    "compare_with_template",
             },
         );
 
@@ -132,9 +132,10 @@ impl AgentRegistry {
                     "search_document",
                     "read_section",
                     "output_finding",
-                    "validate_calculation",
+                    // 义务提取识别排他性组合
+                    "extract_obligations",
+                    "check_cross_reference",
                 ],
-                    "compare_with_template",
             },
         );
 
@@ -180,7 +181,6 @@ impl AgentRegistry {
                     "check_scoring_completeness",
                     "verify_consortium_rules",
                 ],
-                    "compare_with_template",
             },
         );
 
@@ -203,7 +203,6 @@ impl AgentRegistry {
                     // V4 进口产品 + 联合体审查
                     "check_imported_products",
                 ],
-                    "compare_with_template",
             },
         );
 
@@ -223,7 +222,6 @@ impl AgentRegistry {
                     "output_finding",
                     "search_contradiction",
                 ],
-                    "compare_with_template",
             },
         );
 
@@ -255,7 +253,6 @@ impl AgentRegistry {
                     "read_section",
                     "output_finding",
                 ],
-                    "compare_with_template",
             },
         );
 
@@ -274,7 +271,6 @@ impl AgentRegistry {
                     "read_section",
                     "output_finding",
                 ],
-                    "compare_with_template",
             },
         );
 
@@ -344,7 +340,6 @@ impl AgentRegistry {
                 "read_section",
                 "output_finding",
             ],
-                "compare_with_template",
         };
         self.definitions.insert(agent_id, definition);
     }
