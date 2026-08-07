@@ -202,6 +202,8 @@ impl AgentRegistry {
                     "output_finding",
                     // V4 进口产品 + 联合体审查
                     "check_imported_products",
+                    // 技术参数矛盾检测
+                    "search_contradiction",
                 ],
             },
         );
