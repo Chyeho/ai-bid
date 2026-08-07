@@ -132,6 +132,14 @@ const authSlice = createSlice({
       ) => {
          state.tenantList = action.payload;
       },
+      /** 仅更新当前租户 ID（Mock 模式 / 不涉及 token 切换时使用） */
+      setCurrentTenantId: (
+         state,
+         action: { payload: string }
+      ) => {
+         state.currentTenantId = action.payload;
+         localStorage.setItem(STORAGE_KEYS.tenantId, action.payload);
+      },
       logout: (state) => {
          state.token = null;
          state.userInfo = null;
@@ -168,6 +176,7 @@ export const {
    setCredentials,
    switchTenant,
    setTenantList,
+   setCurrentTenantId,
    logout,
    restoreAuth,
 } = authSlice.actions;

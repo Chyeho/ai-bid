@@ -125,7 +125,7 @@ async function mockGetTenants(): Promise<BaseResponse<TenantListResponse>> {
     msg: 'success',
     data: {
       current_tenant_id: 't_001',
-      items: mockTenants,
+      items: [...mockTenants], // 返回新数组引用，确保 React Query 能感知变化
     },
     timestamp: Date.now(),
   };
@@ -134,6 +134,7 @@ async function mockGetTenants(): Promise<BaseResponse<TenantListResponse>> {
 async function mockCreateTenant(
   data: CreateTenantParams
 ): Promise<BaseResponse<TenantSummary>> {
+  console.log('[mockCreateTenant] 被调用，参数:', data);
   await delay();
   const newTenant: import('../types').TenantSummary = {
     tenant_id: `t_${Date.now()}`,
@@ -142,6 +143,7 @@ async function mockCreateTenant(
     created_at: new Date().toISOString(),
   };
   mockTenants.push(newTenant);
+  console.log('[mockCreateTenant] 返回成功，新租户:', newTenant, '当前列表:', mockTenants);
   return { code: 200, msg: 'success', data: newTenant, timestamp: Date.now() };
 }
 
