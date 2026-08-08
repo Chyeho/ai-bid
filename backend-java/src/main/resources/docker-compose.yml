@@ -136,7 +136,29 @@ services:
     networks:
       - qdrant-network
 
+  # Neo4j 图数据库（知识图谱存储）
+  neo4j:
+    container_name: my-neo4j
+    image: neo4j:5.21
+    environment:
+      NEO4J_AUTH: neo4j/b1234567
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ${ST_DATA_ROOT:-/opt/smart-tender/data}/neo4j/data:/data
+      - ${ST_DATA_ROOT:-/opt/smart-tender/data}/neo4j/logs:/logs
+      - ${ST_DATA_ROOT:-/opt/smart-tender/data}/neo4j/plugins:/plugins
+    networks:
+      - milvus-network
+
 networks:
   qdrant-network:
     name: qdrant-network
+    driver: bridge
+  milvus-network:
+    name: milvus-network
     driver: bridge
