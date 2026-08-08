@@ -47,6 +47,10 @@ __pycache__/
 env/
 data/
 
+# ── Python 缓存 ──
+__pycache__/
+*.pyc
+
 # ── 日志文件 ──
 *.log
 
