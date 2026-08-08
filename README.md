@@ -13,8 +13,8 @@
                       ┌─────┴─────┐        ┌─────┴─────┐
                       │ MySQL 3306│        │  Qdrant   │
                       │ Redis 6379│        │  6333     │
-                      │  Neo4j    │        │  Milvus   │
-                      │ 7474/7687 │        │  19530    │
+                      │  Neo4j    │
+                      │ 7474/7687 │
                       └───────────┘        └───────────┘
 ```
 
@@ -26,7 +26,7 @@
 | 数据库 | MySQL 8.0 | 3306 |
 | 缓存 | Redis 7.2 | 6379 |
 | 图数据库 | Neo4j 5.21 | 7474/7687 |
-| 向量库 | Qdrant 1.7 / Milvus 2.6 | 6333 / 19530 |
+| 向量库 | Qdrant 1.7 | 6333 |
 | 文档转换 | JODConverter + LibreOffice | 8088 |
 
 ## 目录结构
@@ -77,10 +77,6 @@ docker compose ps
 | smart-mysql | 3306 | MySQL 8.0（数据库 `smart_tender_system`） |
 | smart-redis | 6379 | Redis 7.2（缓存 / SSE / 任务队列） |
 | smart-qdrant | 6333/6334 | Qdrant 向量数据库（6333 REST + Dashboard，6334 gRPC） |
-| milvus-standalone | 19530 | Milvus 向量数据库 |
-| milvus-minio | 9000/9001 | Milvus 对象存储 |
-| milvus-etcd | 2379 | Milvus 配置中心 |
-| milvus-attu | 3002 | Milvus Web 管理界面 |
 | doc-converter | 8088 | DOCX → PDF 转换服务（默认注释，见下方说明） |
 | my-neo4j | 7474/7687 | Neo4j 5.21 图数据库（凭据 `neo4j/b1234567`，APOC 插件） |
 
@@ -212,7 +208,7 @@ pnpm dev
 ## 启动顺序总结
 
 ```
-1. Docker 基础设施  →  MySQL + Redis + Qdrant + Milvus + MinIO + etcd + Neo4j
+1. Docker 基础设施  →  MySQL + Redis + Qdrant + Neo4j
 2. .env 配置        →  填写 API 密钥和环境变量
 3. Rust 引擎 :3001  →  AI 审核 / 嵌入 / LLM 调用
 4. Java 网关 :3000  →  认证 / CRUD / SSE 推送
@@ -260,7 +256,7 @@ pnpm install && pnpm dev
 | LLM | DashScope (qwen-plus) 或 OpenAI 兼容接口 |
 | 嵌入 | BGE-M3 ONNX 本地推理 或 DashScope text-embedding-v4 |
 | 搜索 | DashScope 联网搜索 或 SearXNG 自托管 |
-| 数据库 | MySQL 8.0 + Redis 7.2 + Qdrant 1.7 + Milvus 2.6 + Neo4j 5.21 |
+| 数据库 | MySQL 8.0 + Redis 7.2 + Qdrant 1.7 + Neo4j 5.21 |
 | 文档转换 | JODConverter + LibreOffice |
 
 ## 前后端通信
