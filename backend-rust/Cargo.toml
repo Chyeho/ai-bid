@@ -23,13 +23,15 @@ async-trait = "0.1"
 dotenv = "0.15"
 axum = { version = "0.7", features = ["multipart", "macros"] }
 tower-http = { version = "0.5", features = ["cors"] }
-tower = "0.4"
+tower = { version = "0.5", features = ["util"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures-core = "0.3"
 utoipa = { version = "4", features = ["axum_extras", "chrono"] }
 # Qdrant 向量库客户端（gRPC）。版本用 1.x 最新，builder API 从 1.8 起可用
 qdrant-client = "1"
+hmac = "0.12"
+sha2 = "0.10"
 
 [build-dependencies]
 cc = "1"
