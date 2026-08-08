@@ -1,6 +1,6 @@
 # ── 生产环境配置覆盖 ──
 server:
-  port: 8086
+  port: 3000
 
 file:
   storage:
