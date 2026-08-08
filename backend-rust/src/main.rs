@@ -700,7 +700,7 @@ async fn main() -> Result<()> {
         let shared_search_buffer: Option<Arc<SearchBuffer>> = if search_backend == "searxng" {
             let url =
                 env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
-            Some(SearchBuffer::new(url))
+            Some(SearchBuffer::new(url, None))
         } else {
             None
         };
@@ -825,7 +825,7 @@ async fn main() -> Result<()> {
         let searxng_url =
             env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
         println!("  SearXNG 搜索后端: {} (SearchBuffer 已启用)", searxng_url);
-        Some(SearchBuffer::new(searxng_url))
+        Some(SearchBuffer::new(searxng_url, None))
     } else {
         None
     };
@@ -882,8 +882,14 @@ async fn main() -> Result<()> {
             }
             registry.register(Box::new(OutputFindingTool));
             // V2+ 工具
-            registry.register(Box::new(CompareVersionsTool));
-            registry.register(Box::new(DetectBoilerplateTool));
+            registry.register(Box::new(CompareVersionsTool::new(
+                chunk_map.clone(),
+                chunk_order.clone(),
+            )));
+            registry.register(Box::new(DetectBoilerplateTool::new(
+                chunk_map.clone(),
+                chunk_order.clone(),
+            )));
             // V3 采购程序合规审查
             registry.register(Box::new(VerifyProcurementMethodTool));
             registry.register(Box::new(VerifyBidDepositTool));

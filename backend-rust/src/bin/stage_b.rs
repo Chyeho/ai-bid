@@ -12,7 +12,7 @@ use std::fs;
 use anyhow::{Context, Result};
 
 use ai_bid::knowledge::extract::extract_and_dedup;
-use ai_bid::knowledge::types::{Candidate, EntityDecision};
+use ai_bid::knowledge::types::Candidate;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);

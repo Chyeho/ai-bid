@@ -19,6 +19,7 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use super::AgentTool;
 
