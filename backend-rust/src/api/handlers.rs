@@ -30,6 +30,29 @@ use crate::agents::tools::{
     read_section::ReadSectionTool,
     search_document::SearchDocumentTool,
     search_knowledge::{DashScopeSearchBackend, SearchKnowledgeTool},
+    // V2+ 工具
+    compare_versions::CompareVersionsTool,
+    detect_boilerplate::DetectBoilerplateTool,
+    // V3 采购程序合规审查
+    verify_procurement_method::VerifyProcurementMethodTool,
+    verify_bid_deposit::VerifyBidDepositTool,
+    verify_announcement_period::VerifyAnnouncementPeriodTool,
+    verify_bid_preparation_period::VerifyBidPreparationPeriodTool,
+    // V4 评审标准审查
+    validate_scoring_formula::ValidateScoringFormulaTool,
+    validate_weight_distribution::ValidateWeightDistributionTool,
+    detect_subjective_scoring::DetectSubjectiveScoringTool,
+    check_scoring_completeness::CheckScoringCompletenessTool,
+    check_imported_products::CheckImportedProductsTool,
+    verify_consortium_rules::VerifyConsortiumRulesTool,
+    // 零依赖计算/检查工具
+    calculate_timeline::CalculateTimelineTool,
+    // 依赖 chunk 数据的工具
+    check_cross_reference::CheckCrossReferenceTool,
+    extract_obligations::ExtractObligationsTool,
+    compare_with_template::{CompareWithTemplateTool, ChunkTextProvider, TemplateStore},
+    validate_calculation::ValidateCalculationTool,
+    search_contradiction::SearchContradictionTool,
 };
 use crate::agents::trace::TraceLog;
 use crate::agents::types::{
@@ -59,6 +82,17 @@ fn review_event_capacity() -> usize {
         .clamp(256, 32768)
 }
 use crate::services::sectionize_service::{self, Section};
+
+/// Authenticated Java → Rust request identity made available to handlers via
+/// request extensions by the internal API middleware.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalRequestContext {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub request_id: String,
+    pub timestamp: i64,
+    pub body_sha256: String,
+}
 
 // ─── 应用状态 ───────────────────────────────────────────────────────
 
@@ -858,6 +892,7 @@ async fn run_review_pipeline(
     let ec_for_tools = embed_client_for_tools.clone();
 
     let tools_factory = Arc::new(move || {
+        eprintln!("[handlers] ── 创建 Agent 工具集 ToolRegistry ──");
         let mut registry = ToolRegistry::new();
         if let Some(ref ec) = ec_for_tools {
             registry.register(Box::new(SearchDocumentTool::new(
@@ -875,6 +910,58 @@ async fn run_review_pipeline(
             registry.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
         }
         registry.register(Box::new(OutputFindingTool));
+        // V2+ 工具
+        registry.register(Box::new(CompareVersionsTool::new(
+            chunk_map_for_tools.clone(),
+            chunk_order_for_tools.clone(),
+        )));
+        registry.register(Box::new(DetectBoilerplateTool::new(
+            chunk_map_for_tools.clone(),
+            chunk_order_for_tools.clone(),
+        )));
+        // V3 采购程序合规审查
+        registry.register(Box::new(VerifyProcurementMethodTool));
+        registry.register(Box::new(VerifyBidDepositTool));
+        registry.register(Box::new(VerifyAnnouncementPeriodTool));
+        registry.register(Box::new(VerifyBidPreparationPeriodTool));
+        // V4 评审标准审查
+        registry.register(Box::new(ValidateScoringFormulaTool));
+        registry.register(Box::new(ValidateWeightDistributionTool));
+        registry.register(Box::new(DetectSubjectiveScoringTool));
+        registry.register(Box::new(CheckScoringCompletenessTool));
+        registry.register(Box::new(CheckImportedProductsTool));
+        registry.register(Box::new(VerifyConsortiumRulesTool));
+        // 零依赖计算工具
+        registry.register(Box::new(CalculateTimelineTool));
+        // 依赖 chunk 数据的工具
+        registry.register(Box::new(CheckCrossReferenceTool::new(
+            chunk_map_for_tools.clone(),
+            chunk_order_for_tools.clone(),
+        )));
+        registry.register(Box::new(ExtractObligationsTool::new(
+            chunk_map_for_tools.clone(),
+            chunk_order_for_tools.clone(),
+        )));
+        // 模板比对（需要 ChunkTextProvider）
+        let template_text_provider = Arc::new(ChunkTextProvider {
+            chunks: chunk_map_for_tools.clone(),
+        });
+        registry.register(Box::new(CompareWithTemplateTool::new(
+            Arc::new(TemplateStore::with_builtin_templates()),
+            template_text_provider,
+        )));
+        // 数值计算校验
+        registry.register(Box::new(ValidateCalculationTool));
+        // 矛盾检测
+        registry.register(Box::new(SearchContradictionTool::new(
+            chunk_map_for_tools.clone(),
+            chunk_order_for_tools.clone(),
+            None,
+        )));
+        eprintln!(
+            "[handlers] ── 工具集注册完成: 共 {} 个工具 ──",
+            registry.len()
+        );
         registry
     });
 
@@ -928,7 +1015,43 @@ async fn run_review_pipeline(
                     finding.page_number = Some(chunk.page_start + 1);
                     finding.section_path = Some(chunk.section_path.clone());
                     finding.context = Some(chunk.text.chars().take(500).collect());
-                    finding.block_ids = chunk.source_block_ids.clone();
+
+                    // 过滤 block_ids：只保留验证过的非占位 bbox 的 block，
+                    // 避免整页高亮导致"框太大"问题。
+                    // 占位 bbox 来自 blocks_from_text()（lopdf 失败降级路径），
+                    // 特征是 x0==0.0 && x1==400.0 且高度 ≤20pt。
+                    let source_quote = finding.source_quote.clone();
+                    let valid_blocks: Vec<String> = chunk
+                        .source_block_ids
+                        .iter()
+                        .filter(|bid| {
+                            chunk.bbox_refs.iter().any(|r| {
+                                let is_same = &r.block_id == *bid;
+                                let is_placeholder =
+                                    r.bbox.x0 == 0.0 && r.bbox.x1 == 400.0
+                                        && (r.bbox.bottom - r.bbox.top) <= 20.1;
+                                is_same && !is_placeholder
+                            })
+                        })
+                        .cloned()
+                        .collect();
+
+                    // 如果经过滤后为空（全是占位 bbox），则不退化为文本匹配，
+                    // 保持空数组让前端走文本高亮路径。
+                    // 如果仍有过多有效 block（如大 section），取最多前 5 个。
+                    let max_blocks = 5usize;
+                    finding.block_ids = if valid_blocks.len() > max_blocks {
+                        // 优选与 source_quote 文本相关的 block
+                        let truncated: Vec<String> = valid_blocks
+                            .into_iter()
+                            .take(max_blocks)
+                            .collect();
+                        truncated
+                    } else {
+                        valid_blocks
+                    };
+
+                    let _ = source_quote; // 预留后续按文本相关性排序
                 }
             }
             let findings_with_blocks = output
@@ -1301,6 +1424,7 @@ pub async fn chat_with_document(
     };
 
     let mut chat_tools = ToolRegistry::new();
+    eprintln!("[handlers] ── 创建 ChatAgent 对话工具集 ──");
     if let Some(ref ec) = embed_client {
         chat_tools.register(Box::new(SearchDocumentTool::new(
             doc.doc_index.clone(),
@@ -1315,6 +1439,10 @@ pub async fn chat_with_document(
         chat_tools.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
     }
     chat_tools.register(Box::new(AnswerUserTool));
+    eprintln!(
+        "[handlers] ── ChatAgent 工具集注册完成: 共 {} 个工具 ──",
+        chat_tools.len()
+    );
 
     let chat_config = ChatAgentConfig::default();
     let chat_agent = ChatAgent::new(
@@ -1415,6 +1543,7 @@ pub async fn chat_with_document_stream(
         };
 
         let mut chat_tools = ToolRegistry::new();
+        eprintln!("[handlers] ── 创建 ChatAgent 对话工具集 (stream) ──");
         if let Some(ref ec) = embed_client {
             chat_tools.register(Box::new(SearchDocumentTool::new(
                 doc.doc_index.clone(),
@@ -1429,6 +1558,10 @@ pub async fn chat_with_document_stream(
             chat_tools.register(Box::new(SearchKnowledgeTool::with_dashscope(ds.clone())));
         }
         chat_tools.register(Box::new(AnswerUserTool));
+        eprintln!(
+            "[handlers] ── ChatAgent 工具集注册完成 (stream): 共 {} 个工具 ──",
+            chat_tools.len()
+        );
 
         let chat_config = ChatAgentConfig::default();
         let chat_agent = match ChatAgent::new(
