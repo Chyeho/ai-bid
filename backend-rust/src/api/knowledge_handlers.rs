@@ -1,8 +1,9 @@
-//! 知识库（法规/标准库）导入接口
+//! 知识库（法规/标准库）导入 / 删除接口
 //!
-//! POST /api/v1/knowledge/ingest —— 供 Java 上传后异步触发，也支持 curl 手动导入。
+//! - POST   /api/v1/knowledge/ingest              —— 入库（供 Java 上传后异步触发，也支持 curl 手动导入）
+//! - DELETE /api/v1/knowledge/document/:document_id —— 按 document_id 删除某份文件的所有向量（供 Java 删除标准库文件时联动调用）
 
-use axum::extract::{Multipart, State};
+use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
@@ -17,6 +18,7 @@ use crate::paths::data_path_str;
 use crate::services::knowledge_ingest_service::{
     ingest_file, IngestResult, TempFileGuard,
 };
+use crate::services::qdrant_store::QdrantStore;
 
 /// 上传文件大小上限（100MB），超出返回 413 Payload Too Large
 const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
@@ -198,6 +200,22 @@ pub async fn ingest_knowledge(
     drop(upload_guard);
 
     Ok(Json(IngestResponse::from_result(&result)))
+}
+
+/// DELETE /api/v1/knowledge/document/:document_id
+/// 按 document_id 删除某份文件在 Qdrant 中的所有向量（Java 组删除标准库文件时联动调用）。
+pub async fn delete_knowledge_document(
+    Path(document_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let store = QdrantStore::from_env().map_err(|e| server_error("Qdrant 初始化失败", e))?;
+    store
+        .delete_by_document(&document_id)
+        .await
+        .map_err(|e| server_error("删除向量失败", e))?;
+    Ok(Json(serde_json::json!({
+        "deleted": true,
+        "document_id": document_id,
+    })))
 }
 
 #[cfg(test)]
