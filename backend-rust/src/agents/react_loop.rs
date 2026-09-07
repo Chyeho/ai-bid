@@ -12,14 +12,14 @@
 //! ## 条款级风险分级 (L1/L2/L3)
 //!
 //! 每条条款携带 Coordinator 预判的 tier，控制 max_turns：
-//! - L1: 6 turns（纯信息/格式条款）
-//! - L2: 10 turns（标准审查）
-//! - L3: 12 turns（深度审查）
+//! - L1: 5 turns（纯信息/格式条款）
+//! - L2: 8 turns（标准审查）
+//! - L3: 14 turns（深度审查）
 //!
 //! 审查过程中支持动态升降级（turn 2 检测）。
 
 use crate::agents::bus::{AgentBus, BusMessage};
-use crate::agents::review_event::{ReviewEvent, ReviewEventBus};
+use crate::agents::review_event::{FindingLifecycle, ReviewEvent, ReviewEventBus};
 use crate::agents::risk_taxonomy;
 use crate::agents::session_graph::SessionGraph;
 use crate::agents::trace::{TraceEventType, TraceLog};
@@ -426,6 +426,37 @@ fn canonical_category(value: &str) -> String {
     upper
 }
 
+/// 根据条款 tier 裁剪下发的工具清单。
+///
+/// L1（格式/信息类）提示词已禁止 read_section/web_search，这里同步停止为其
+/// 下发对应 schema——少发即少付费，且不改变审查行为；L2/L3 保持全量。
+/// 过滤保持原始顺序。
+fn tool_names_for_tier(all_tools: &[String], tier: RiskTier) -> Vec<String> {
+    match tier {
+        RiskTier::Low => all_tools
+            .iter()
+            .filter(|n| n.as_str() == "output_finding")
+            .cloned()
+            .collect(),
+        RiskTier::Medium | RiskTier::High => all_tools.to_vec(),
+    }
+}
+
+/// P2：「每轮全量重放冗长独白」是 token 膨胀的第二大来源（约 35%）。
+/// 压缩策略：独白里的推理链（事实→规则→结论）结论通常在尾部，因此截头保尾
+/// 比截尾保头更安全。阈值内原样返回；超过阈值只保留结论尾段，前缀加省略标记。
+fn compress_reasoning(content: &str, max_chars: usize) -> String {
+    let len = content.chars().count();
+    if len <= max_chars {
+        return content.to_string();
+    }
+    let tail: String = content.chars().skip(len - max_chars).collect();
+    format!("[前段推理已省略，仅保留结论尾段]\n{tail}")
+}
+
+/// P2 实验：独白压缩后保留的尾段字符数（约 500 中文字 ≈ 800 token）。
+const TRANSCRIPT_COMPRESS_TAIL: usize = 800;
+
 // ─── ReActLoop ─────────────────────────────────────────────────
 
 /// ReAct 循环引擎 — Agent 审查的运行时。
@@ -458,6 +489,8 @@ pub struct ReActLoop {
     pub review_events: Option<Arc<ReviewEventBus>>,
     /// 指标采集器（可选，启用时记录所有 LLM 调用明细）
     pub metrics: Option<Arc<Mutex<crate::metrics::MetricsCollector>>>,
+    /// P2 实验开关：压缩 assistant 冗长推理独白，只保留结论尾段重放（A/B 对比）。
+    pub compress_transcript: bool,
 }
 
 impl ReActLoop {
@@ -479,6 +512,7 @@ impl ReActLoop {
             print_lock: None,
             review_events: None,
             metrics: None,
+            compress_transcript: false,
         }
     }
 
@@ -526,6 +560,12 @@ impl ReActLoop {
         cache: Arc<Mutex<HashMap<(String, String), serde_json::Value>>>,
     ) -> Self {
         self.search_cache = cache;
+        self
+    }
+
+    /// 开/关 P2 transcript 压缩（A/B 实验用）。默认关闭。
+    pub fn with_transcript_compression(mut self, enabled: bool) -> Self {
+        self.compress_transcript = enabled;
         self
     }
 
@@ -663,6 +703,8 @@ impl ReActLoop {
         let mut seen_law_refs: std::collections::HashSet<String> = std::collections::HashSet::new(); // 已见过的法规引用（用于判断搜索是否带来新信息）
         // ★ 优化：法规证据充分后，下一轮强制锁定 output_finding，避免 Auto 模式下 LLM 继续调用工具空转
         let mut force_output_next = false;
+        // ★ 强化强制收尾（AIBID_STALL_FORCE_OUTPUT）：连续 N 轮仅请求探索类工具且未产出 finding → 下一轮强制 output_finding
+        let mut consecutive_stall: u32 = 0;
 
         // ── 条款头日志 ──
         let _print_lock = self.print_lock.as_ref().map(|l| l.lock().unwrap());
@@ -703,7 +745,11 @@ impl ReActLoop {
                     在调用 output_finding 前必须逐段复核，不得只挑最严重的一条。\
                     使用 findings 数组逐条输出；不同事实、不同风险类别或不同修改建议应拆成不同 finding。\
                     无风险返回 findings=[]；最多5条，仍有遗漏可能时 has_more=true。\
-                    每条必须填写稳定 category_code 和只支撑该问题的 source_quote。"
+                    每条必须填写稳定 category_code 和只支撑该问题的 source_quote。risk_type 用中文短语，category_code 用英文稳定码。\
+                    【工具使用规范】web_search 按条款等级设硬性上限(L1≤1/L2≤2/L3≤4)，连续2次空结果立即停止；\
+                    source_quote 必须逐字截取条款原文，禁止改写、禁止凭记忆拼凑；\
+                    search_document 用提炼关键词，勿粘贴整段原文；\
+                    read_section 当前条款原文已在任务消息中时无需调用，同一 chunk 读取≥2次即停止。"
                     .to_string(),
             },
             ChatMessage::User {
@@ -888,7 +934,9 @@ impl ReActLoop {
                 });
             }
 
-            let tool_defs = self.tools.definitions_filtered(&self.config.tool_names);
+            let tool_defs = self
+                .tools
+                .definitions_filtered(&tool_names_for_tier(&self.config.tool_names, tier));
             let api_start = std::time::Instant::now();
             let response = match self.llm.chat(&conversation, &tool_defs, &tool_choice).await {
                 Ok(r) => {
@@ -922,6 +970,42 @@ impl ReActLoop {
                             produced_finding: r.has_output_finding(),
                             finding_parsed_ok: false, // 由后续 output_finding 解析更新
                         });
+                    }
+
+                    // ★ 强化强制收尾（AIBID_STALL_FORCE_OUTPUT=N）：
+                    // 连续 N 轮 LLM 只请求探索类工具（read_section/search_*）且未产出 finding → 视为空转，
+                    // 下一轮强制锁定 output_finding，避免在多 agent 协作 / 复杂条款场景下无限探索。
+                    let stall_threshold: u32 = std::env::var("AIBID_STALL_FORCE_OUTPUT")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if stall_threshold > 0 {
+                        let produced = r.has_output_finding();
+                        let explore_only = !r.tool_calls.is_empty()
+                            && r.tool_calls.iter().all(|tc| {
+                                matches!(
+                                    tc.name.as_str(),
+                                    "read_section"
+                                        | "search_document"
+                                        | "search_knowledge"
+                                        | "web_search"
+                                )
+                            });
+                        if produced {
+                            consecutive_stall = 0;
+                        } else if explore_only {
+                            consecutive_stall += 1;
+                            if consecutive_stall >= stall_threshold {
+                                force_output_next = true;
+                                eprintln!(
+                                    "[STALL-FORCE] 条款 {} 连续 {} 轮仅探索未产出 → 强制 output_finding",
+                                    clause.chunk_id, consecutive_stall
+                                );
+                                consecutive_stall = 0;
+                            }
+                        } else {
+                            consecutive_stall = 0;
+                        }
                     }
 
                     // SSE: call_log — 每次 LLM 调用的统计信息
@@ -1012,6 +1096,7 @@ impl ReActLoop {
                         risk_id: risk_id.to_string(),
                         clause_ids: vec![clause.chunk_id.clone()],
                         block_ids: Vec::new(),
+                        highlight_rects: Vec::new(),
                         agent: agent_name.clone(),
                         no_risk: true,
                         severity: RiskSeverity::Info,
@@ -1028,7 +1113,8 @@ impl ReActLoop {
                         initial_tier,
                         final_tier: tier,
                         tier_escalated,
-                        truncated: false,
+                        // 基础设施错误必须进入条款失败统计，不能伪装成“无风险”。
+                        truncated: true,
                         suggested_agent: None,
                         citations: Vec::new(),
                         finding_role: FindingRole::default(),
@@ -1036,6 +1122,8 @@ impl ReActLoop {
                         verification_required: Vec::new(),
                         hypothesized_by: Vec::new(),
                         verified_by: Vec::new(),
+                        evidence_verdict: None,
+                        verifier_reason: None,
                         page_number: None,
                         section_path: None,
                         context: None,
@@ -1098,6 +1186,7 @@ impl ReActLoop {
                     risk_id: risk_id.to_string(),
                     clause_ids: vec![clause.chunk_id.clone()],
                     block_ids: Vec::new(),
+                    highlight_rects: Vec::new(),
                     agent: agent_name.clone(),
                     no_risk: false,
                     severity: RiskSeverity::Info,
@@ -1122,6 +1211,8 @@ impl ReActLoop {
                     verification_required: Vec::new(),
                     hypothesized_by: Vec::new(),
                     verified_by: Vec::new(),
+                        evidence_verdict: None,
+                        verifier_reason: None,
                     page_number: None,
                     section_path: None,
                     context: None,
@@ -1317,8 +1408,16 @@ impl ReActLoop {
             // ── Step 4: 执行工具调用 ──
             // 先追加 assistant 消息
             let assistant_tool_calls: Vec<ToolCall> = response.tool_calls.clone();
+            let assistant_content = if self.compress_transcript {
+                response
+                    .content
+                    .as_deref()
+                    .map(|c| compress_reasoning(c, TRANSCRIPT_COMPRESS_TAIL))
+            } else {
+                response.content
+            };
             conversation.push(ChatMessage::Assistant {
-                content: response.content,
+                content: assistant_content,
                 tool_calls: if assistant_tool_calls.is_empty() {
                     None
                 } else {
@@ -1389,7 +1488,7 @@ impl ReActLoop {
                 } else {
                     let available: Vec<String> = self
                         .tools
-                        .definitions_filtered(&self.config.tool_names)
+                        .definitions_filtered(&tool_names_for_tier(&self.config.tool_names, tier))
                         .iter()
                         .filter_map(|d| {
                             d.get("function")
@@ -1630,6 +1729,7 @@ impl ReActLoop {
                                     不要再搜索了。现在调用 output_finding。"
                                     .to_string(),
                             });
+                            force_output_next = true;
                             continue;
                         } else {
                             // L3: 连续 3+ 次空（Agent 无视了 L2 指令）→ 最后通牒
@@ -1644,6 +1744,7 @@ impl ReActLoop {
                                     立即输出 output_finding，no_risk 设为 true 亦可。"
                                         .to_string(),
                             });
+                            force_output_next = true;
                             // 不 continue——让正常流程追加 tool result（保持对话一致性）
                         }
                     } else {
@@ -1667,6 +1768,7 @@ impl ReActLoop {
                                             不要再搜索了。现在调用 output_finding。"
                                             .to_string(),
                                     });
+                                    force_output_next = true;
                                     continue;
                                 }
                             } else {
@@ -1688,10 +1790,8 @@ impl ReActLoop {
                             if !novel_refs.is_empty() {
                                 // 有新法规引用 → 重置确认搜索计数器
                                 seen_law_refs.extend(new_law_refs);
-                                if web_search_count >= 2 {
-                                    // 第 2 次及以后的搜索带来了新法规 → 标记"已找到可用的法规"
-                                    found_actionable_law = true;
-                                }
+                                // 搜索带来了新法规 → 标记"已找到可用的法规"
+                                found_actionable_law = true;
                                 post_law_search_count = 0;
                             } else if found_actionable_law {
                                 // 已找到法规，但本次搜索没有新法规引用 → 确认搜索
@@ -1712,7 +1812,9 @@ impl ReActLoop {
                                         下一轮将强制你输出结论。立即整理已有信息，调用 output_finding。"
                                         .to_string(),
                                 });
-                                force_output_next = true;
+                                if tier != RiskTier::High {
+                                    force_output_next = true;
+                                }
                                 continue;
                             }
 
@@ -1752,6 +1854,7 @@ impl ReActLoop {
                                         limit_msg
                                     ),
                                 });
+                                force_output_next = true;
                                 continue;
                             }
                         }
@@ -2051,7 +2154,7 @@ impl ReActLoop {
 
     /// 判断是否为搜索类工具（兼容新旧工具名）。
     fn is_search_tool(&self, name: &str) -> bool {
-        name == "web_search" || name == "search_knowledge"
+        name == "web_search" || name == "search_knowledge" || name == "search_knowledge_base"
     }
 
     /// 统计搜索结果条数，兼容多种后端格式。
@@ -2283,17 +2386,32 @@ impl ReActLoop {
 /// * `graph` — SessionGraph（用于生成全局唯一 risk_id，None 时回退到索引编号）
 /// * `review_events` — SSE 推送通道（None 时不推送）
 /// * `agent_name` — Agent 名称（用于日志和进度事件）
+#[derive(Debug)]
+pub struct ClauseReviewFailure {
+    pub clause_id: String,
+    pub message: String,
+}
+
+#[derive(Debug)]
+pub struct ClauseReviewReport {
+    pub findings: Vec<RiskFinding>,
+    pub successful_clauses: usize,
+    pub failed_clauses: Vec<ClauseReviewFailure>,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn review_clauses_parallel<F>(
+pub async fn review_clauses_parallel_report<F>(
     clauses: &[ReviewClause],
     make_agent: F,
-    llm_factory: &(dyn Fn() -> Box<dyn LlmClient> + Send + Sync),
-    tools_factory: &(dyn Fn() -> crate::agents::tools::ToolRegistry + Send + Sync),
+    llm_factory: Arc<dyn Fn() -> Box<dyn LlmClient> + Send + Sync>,
+    tools_factory: Arc<dyn Fn() -> crate::agents::tools::ToolRegistry + Send + Sync>,
     max_parallel: usize,
     graph: Option<Arc<SessionGraph>>,
     review_events: Option<Arc<ReviewEventBus>>,
     agent_name: &str,
-) -> Vec<RiskFinding>
+    execution_control: Option<Arc<crate::agents::execution_control::ReviewExecutionControl>>,
+    streamed_findings: Option<Arc<std::sync::Mutex<Vec<RiskFinding>>>>,
+) -> ClauseReviewReport
 where
     F: Fn(Box<dyn LlmClient>, crate::agents::tools::ToolRegistry) -> ReActLoop
         + Send
@@ -2301,34 +2419,74 @@ where
         + 'static,
 {
     if clauses.is_empty() {
-        return vec![];
+        return ClauseReviewReport {
+            findings: Vec::new(),
+            successful_clauses: 0,
+            failed_clauses: Vec::new(),
+        };
     }
 
     let sem = Arc::new(tokio::sync::Semaphore::new(max_parallel.max(1)));
     let total = clauses.len();
     let done = Arc::new(AtomicUsize::new(0));
     let raw_findings_total = Arc::new(AtomicUsize::new(0));
+    let make_agent = Arc::new(make_agent);
     let mut join_set = JoinSet::new();
 
     for (idx, clause) in clauses.iter().enumerate() {
-        let llm = llm_factory();
-        let tools = tools_factory();
-        let agent = make_agent(llm, tools);
         let clause = clause.clone();
         let sem = sem.clone();
+        let llm_factory = llm_factory.clone();
+        let tools_factory = tools_factory.clone();
+        let make_agent = make_agent.clone();
         let graph = graph.clone();
         let events = review_events.clone();
         let name = agent_name.to_string();
         let done = done.clone();
         let raw_findings_total = raw_findings_total.clone();
+        let execution_control = execution_control.clone();
 
         join_set.spawn(async move {
             let _permit = sem.acquire_owned().await;
+            let _global_permit = if let Some(ref control) = execution_control {
+                Some(control.acquire().await?)
+            } else {
+                None
+            };
+            let mut llm = llm_factory();
+            let mut tools = tools_factory();
+            if let Some(ref control) = execution_control {
+                llm = crate::agents::execution_control::ControlledLlmClient::wrap(
+                    llm,
+                    control.clone(),
+                );
+                tools = tools.into_controlled(control.clone());
+            }
+            let agent = make_agent(llm, tools);
             let risk_id = graph
                 .as_ref()
                 .map(|g| g.next_risk_id())
                 .unwrap_or_else(|| format!("R_{:03}", idx + 1));
-            let findings = agent.review_single(&clause, &risk_id).await;
+            let findings = if let Some(ref control) = execution_control {
+                match tokio::time::timeout(
+                    control.limits().clause_timeout,
+                    agent.review_single(&clause, &risk_id),
+                )
+                .await
+                {
+                    Ok(findings) => findings,
+                    Err(_) => vec![RiskFinding::truncated_finding(
+                        risk_id.clone(),
+                        clause.chunk_id.clone(),
+                        &name,
+                        clause.tier,
+                        clause.tier,
+                        "单条条款审查超过 180 秒",
+                    )],
+                }
+            } else {
+                agent.review_single(&clause, &risk_id).await
+            };
 
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
             let risk_count = findings.iter().filter(|f| !f.no_risk).count();
@@ -2350,16 +2508,59 @@ where
                 });
             }
 
-            (idx, findings)
+            Ok::<_, anyhow::Error>((idx, findings))
         });
     }
 
     // 收集结果，按原始顺序排列
+    let clause_blocks: HashMap<String, Vec<String>> = clauses
+        .iter()
+        .map(|c| (c.chunk_id.clone(), c.source_block_ids.clone()))
+        .collect();
     let mut findings: Vec<Option<Vec<RiskFinding>>> = (0..total).map(|_| None).collect();
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok((idx, clause_findings)) => {
+            Ok(Ok((idx, clause_findings))) => {
+                // 条款级流式落库 + 超时存活累积：一条条款一经完成立即：
+                // 1) 写入共享累积器，供 coordinator 在 Execute 超时 abort 后
+                //    仍能从 /result 带回已完成条款的发现；
+                // 2) 发射 FindingAdded（SSE 推向前端增量落库）。
+                for f in clause_findings.iter().filter(|f| !f.no_risk) {
+                    if let Some(ref acc) = streamed_findings {
+                        if let Ok(mut guard) = acc.lock() {
+                            guard.push(f.clone());
+                        }
+                    }
+                    if let Some(ref events) = review_events {
+                        let block_ids = collect_block_ids_for_clause_ids(
+                            &f.clause_ids,
+                            &clause_blocks,
+                            10,
+                        );
+                        events.emit(&ReviewEvent::FindingAdded {
+                            risk_id: f.risk_id.clone(),
+                            severity: f.severity.as_str().to_string(),
+                            is_critical: f.is_critical,
+                            critical_reason: f.critical_reason.clone(),
+                            risk_type: f.risk_type.clone(),
+                            agent: f.agent.clone(),
+                            confidence: f.confidence as f64,
+                            clause_ids: f.clause_ids.clone(),
+                            source_quote: f.source_quote.chars().take(500).collect(),
+                            legal_basis: f.legal_basis.clone(),
+                            reason: f.reason.chars().take(500).collect(),
+                            suggestion: f.suggestion.clone(),
+                            lifecycle: FindingLifecycle::Verified,
+                            page_number: f.page_number,
+                            section_path: f.section_path.clone(),
+                            block_ids,
+                        });
+                    }
+                }
                 findings[idx] = Some(clause_findings);
+            }
+            Ok(Err(e)) => {
+                eprintln!("[PARALLEL] 获取全局并发名额失败: {}", e);
             }
             Err(e) => {
                 // task panic — 为该 clause 生成占位 finding
@@ -2368,28 +2569,366 @@ where
         }
     }
 
-    // 补齐缺失的 finding（task panic 等情况）
-    findings
-        .into_iter()
-        .enumerate()
-        .flat_map(|(i, f)| {
-            f.unwrap_or_else(|| {
-                vec![RiskFinding::truncated_finding(
+    // 补齐缺失 finding，并显式记录条款级失败，避免占位结果被误判为成功。
+    let mut collected = Vec::new();
+    let mut successful_clauses = 0;
+    let mut failed_clauses = Vec::new();
+    for (i, result) in findings.into_iter().enumerate() {
+        match result {
+            Some(clause_findings) if clause_findings.iter().any(|finding| finding.truncated) => {
+                failed_clauses.push(ClauseReviewFailure {
+                    clause_id: clauses[i].chunk_id.clone(),
+                    message: "条款审查未完整结束".to_string(),
+                });
+                collected.extend(clause_findings);
+            }
+            Some(clause_findings) => {
+                successful_clauses += 1;
+                collected.extend(clause_findings);
+            }
+            None => {
+                failed_clauses.push(ClauseReviewFailure {
+                    clause_id: clauses[i].chunk_id.clone(),
+                    message: "并行审查 task 异常终止".to_string(),
+                });
+                collected.push(RiskFinding::truncated_finding(
                     format!("R_{:03}", i + 1),
                     clauses[i].chunk_id.clone(),
                     agent_name,
                     clauses[i].tier,
                     clauses[i].tier,
                     "并行审查 task 异常终止",
-                )]
-            })
-        })
-        .collect()
+                ));
+            }
+        }
+    }
+
+    ClauseReviewReport {
+        findings: collected,
+        successful_clauses,
+        failed_clauses,
+    }
+}
+
+/// 兼容单 Agent 调用方，仅返回 finding；Coordinator 应使用带完整性报告的版本。
+#[allow(clippy::too_many_arguments)]
+pub async fn review_clauses_parallel<F>(
+    clauses: &[ReviewClause],
+    make_agent: F,
+    llm_factory: Arc<dyn Fn() -> Box<dyn LlmClient> + Send + Sync>,
+    tools_factory: Arc<dyn Fn() -> crate::agents::tools::ToolRegistry + Send + Sync>,
+    max_parallel: usize,
+    graph: Option<Arc<SessionGraph>>,
+    review_events: Option<Arc<ReviewEventBus>>,
+    agent_name: &str,
+    execution_control: Option<Arc<crate::agents::execution_control::ReviewExecutionControl>>,
+) -> Vec<RiskFinding>
+where
+    F: Fn(Box<dyn LlmClient>, crate::agents::tools::ToolRegistry) -> ReActLoop
+        + Send
+        + Sync
+        + 'static,
+{
+    review_clauses_parallel_report(
+        clauses,
+        make_agent,
+        llm_factory,
+        tools_factory,
+        max_parallel,
+        graph,
+        review_events,
+        agent_name,
+        execution_control,
+        None,
+    )
+    .await
+    .findings
 }
 
 #[cfg(test)]
 mod multi_finding_tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use tokio::sync::Notify;
+
+    struct GatedNoRiskLlm {
+        started: Arc<Notify>,
+        released: Arc<AtomicBool>,
+        release_notify: Arc<Notify>,
+    }
+
+    struct ConditionalSlowLlm;
+
+    struct AlwaysFailLlm;
+
+    #[async_trait::async_trait]
+    impl LlmClient for AlwaysFailLlm {
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+            _tool_choice: &ToolChoice,
+        ) -> Result<LlmResponse> {
+            Err(anyhow::anyhow!("模拟 LLM 基础设施故障"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for ConditionalSlowLlm {
+        async fn chat(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+            _tool_choice: &ToolChoice,
+        ) -> Result<LlmResponse> {
+            let should_timeout = messages.iter().any(|message| match message {
+                ChatMessage::User { content } => content.contains("模拟超时"),
+                _ => false,
+            });
+            if should_timeout {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Ok(LlmResponse {
+                content: None,
+                thought: None,
+                tool_calls: vec![ToolCall {
+                    id: "test-output".to_string(),
+                    name: "output_finding".to_string(),
+                    arguments: serde_json::json!({
+                        "findings": [],
+                        "has_more": false,
+                        "coverage": [],
+                    }),
+                }],
+                usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_failure_is_reported_as_clause_failure() {
+        let clauses = vec![ReviewClause {
+            chunk_id: "ch_llm_error".to_string(),
+            section_path: vec!["测试".to_string()],
+            text: "格式要求".to_string(),
+            page_start: 0,
+            page_end: 0,
+            tier: RiskTier::Low,
+            tier_max_turns: 1,
+            source_block_ids: vec![],
+        }];
+
+        let report = review_clauses_parallel_report(
+            &clauses,
+            |llm, tools| {
+                ReActLoop::new(
+                    AgentConfig {
+                        name: "TestAgent".to_string(),
+                        system_prompt: "测试".to_string(),
+                        default_max_turns: 1,
+                        tool_names: vec!["output_finding".to_string()],
+                    },
+                    llm,
+                    tools,
+                )
+            },
+            Arc::new(|| Box::new(AlwaysFailLlm)),
+            Arc::new(crate::agents::tools::ToolRegistry::new),
+            1,
+            None,
+            None,
+            "TestAgent",
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(report.successful_clauses, 0);
+        assert_eq!(report.failed_clauses.len(), 1);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| { finding.category_code == "ENGINE_ERROR" && finding.truncated })
+        );
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for GatedNoRiskLlm {
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+            _tool_choice: &ToolChoice,
+        ) -> Result<LlmResponse> {
+            self.started.notify_one();
+            while !self.released.load(Ordering::SeqCst) {
+                self.release_notify.notified().await;
+            }
+            Ok(LlmResponse {
+                content: None,
+                thought: None,
+                tool_calls: vec![ToolCall {
+                    id: "test-output".to_string(),
+                    name: "output_finding".to_string(),
+                    arguments: serde_json::json!({
+                        "findings": [],
+                        "has_more": false,
+                        "coverage": [],
+                    }),
+                }],
+                usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_review_creates_clients_only_after_permit_is_acquired() {
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let released = Arc::new(AtomicBool::new(false));
+        let release_notify = Arc::new(Notify::new());
+        let clauses = vec![
+            ReviewClause {
+                chunk_id: "ch_001".to_string(),
+                section_path: vec!["测试".to_string()],
+                text: "格式要求一".to_string(),
+                page_start: 0,
+                page_end: 0,
+                tier: RiskTier::Low,
+                tier_max_turns: 1,
+                source_block_ids: vec![],
+            },
+            ReviewClause {
+                chunk_id: "ch_002".to_string(),
+                section_path: vec!["测试".to_string()],
+                text: "格式要求二".to_string(),
+                page_start: 0,
+                page_end: 0,
+                tier: RiskTier::Low,
+                tier_max_turns: 1,
+                source_block_ids: vec![],
+            },
+        ];
+        let factory = {
+            let factory_calls = factory_calls.clone();
+            let started = started.clone();
+            let released = released.clone();
+            let release_notify = release_notify.clone();
+            move || {
+                factory_calls.fetch_add(1, Ordering::SeqCst);
+                Box::new(GatedNoRiskLlm {
+                    started: started.clone(),
+                    released: released.clone(),
+                    release_notify: release_notify.clone(),
+                }) as Box<dyn LlmClient>
+            }
+        };
+
+        let task = tokio::spawn(async move {
+            review_clauses_parallel_report(
+                &clauses,
+                |llm, tools| {
+                    ReActLoop::new(
+                        AgentConfig {
+                            name: "TestAgent".to_string(),
+                            system_prompt: "测试".to_string(),
+                            default_max_turns: 1,
+                            tool_names: vec!["output_finding".to_string()],
+                        },
+                        llm,
+                        tools,
+                    )
+                },
+                Arc::new(factory),
+                Arc::new(crate::agents::tools::ToolRegistry::new),
+                1,
+                None,
+                None,
+                "TestAgent",
+                None,
+                None,
+            )
+            .await
+        });
+
+        started.notified().await;
+        assert_eq!(
+            factory_calls.load(Ordering::SeqCst),
+            1,
+            "等待并发名额的条款不得提前创建 LLM 客户端"
+        );
+        released.store(true, Ordering::SeqCst);
+        release_notify.notify_waiters();
+        let report = task.await.expect("并行审查任务应正常结束");
+        assert_eq!(report.successful_clauses, 2);
+    }
+
+    #[tokio::test]
+    async fn one_clause_timeout_preserves_other_clause_result() {
+        let clauses = vec![
+            ReviewClause {
+                chunk_id: "ch_ok".to_string(),
+                section_path: vec!["测试".to_string()],
+                text: "正常条款".to_string(),
+                page_start: 0,
+                page_end: 0,
+                tier: RiskTier::Low,
+                tier_max_turns: 1,
+                source_block_ids: vec![],
+            },
+            ReviewClause {
+                chunk_id: "ch_timeout".to_string(),
+                section_path: vec!["测试".to_string()],
+                text: "模拟超时".to_string(),
+                page_start: 0,
+                page_end: 0,
+                tier: RiskTier::Low,
+                tier_max_turns: 1,
+                source_block_ids: vec![],
+            },
+        ];
+        let limiter = Arc::new(
+            crate::agents::execution_control::GlobalExecutionLimiter::new(
+                crate::agents::execution_control::ExecutionLimits {
+                    global_concurrency: 2,
+                    document_concurrency: 2,
+                    clause_timeout: std::time::Duration::from_millis(20),
+                    ..crate::agents::execution_control::ExecutionLimits::default()
+                },
+            ),
+        );
+        let control = limiter.start_review(2, 2);
+
+        let report = review_clauses_parallel_report(
+            &clauses,
+            |llm, tools| {
+                ReActLoop::new(
+                    AgentConfig {
+                        name: "TestAgent".to_string(),
+                        system_prompt: "测试".to_string(),
+                        default_max_turns: 1,
+                        tool_names: vec!["output_finding".to_string()],
+                    },
+                    llm,
+                    tools,
+                )
+            },
+            Arc::new(|| Box::new(ConditionalSlowLlm)),
+            Arc::new(crate::agents::tools::ToolRegistry::new),
+            2,
+            None,
+            None,
+            "TestAgent",
+            Some(control),
+            None,
+        )
+        .await;
+
+        assert_eq!(report.successful_clauses, 1);
+        assert_eq!(report.failed_clauses.len(), 1);
+        assert_eq!(report.failed_clauses[0].clause_id, "ch_timeout");
+    }
 
     fn finding_json(category: &str, quote: &str) -> serde_json::Value {
         serde_json::json!({
@@ -2455,5 +2994,95 @@ mod multi_finding_tests {
     fn detects_numbered_multi_issue_chunk() {
         let text = "1.地域注册限制\n须本地注册\n2、保证金超限\n保证金5%\n3）单方变更";
         assert_eq!(numbered_item_count(text), 3);
+    }
+}
+
+#[cfg(test)]
+mod tool_gating_tests {
+    use super::*;
+
+    fn full_tools() -> Vec<String> {
+        vec![
+            "web_search".to_string(),
+            "search_document".to_string(),
+            "read_section".to_string(),
+            "output_finding".to_string(),
+            "search_contradiction".to_string(),
+        ]
+    }
+
+    /// L1（格式/信息类）只发终端工具：提示词已禁止 read_section/web_search，
+    /// schema 不应再被全量下发。
+    #[test]
+    fn low_tier_only_keeps_output_finding() {
+        let got = tool_names_for_tier(&full_tools(), RiskTier::Low);
+        assert_eq!(got, vec!["output_finding".to_string()]);
+    }
+
+    /// L2/L3 保持全量下发。
+    #[test]
+    fn medium_and_high_keep_all_tools() {
+        for tier in [RiskTier::Medium, RiskTier::High] {
+            let got = tool_names_for_tier(&full_tools(), tier);
+            assert_eq!(got, full_tools());
+        }
+    }
+
+    /// 边缘：如果工具集里没有 output_finding，L1 应得到空列表（不会 panic）。
+    #[test]
+    fn low_tier_without_output_finding_is_empty() {
+        let no_of = vec!["web_search".to_string(), "read_section".to_string()];
+        assert!(tool_names_for_tier(&no_of, RiskTier::Low).is_empty());
+    }
+
+    /// 保序：过滤不得改变原始顺序。
+    #[test]
+    fn filtering_preserves_order() {
+        let tools = vec![
+            "read_section".to_string(),
+            "output_finding".to_string(),
+            "web_search".to_string(),
+        ];
+        let got = tool_names_for_tier(&tools, RiskTier::Low);
+        assert_eq!(got, vec!["output_finding".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod transcript_compression_tests {
+    use super::*;
+
+    /// 阈值内原样返回，绝不改写短文本。
+    #[test]
+    fn short_content_is_untouched() {
+        let s = "结论：合规。";
+        assert_eq!(compress_reasoning(s, 800), s);
+    }
+
+    /// 超过阈值只保留结论尾段，前段换成省略标记；标记不含被截内容。
+    #[test]
+    fn long_content_keeps_tail_with_marker() {
+        let head = "事实".repeat(1000);
+        let tail = "结论：严重违约。";
+        let content = format!("{head}{tail}");
+        let compressed = compress_reasoning(&content, 20);
+        assert!(compressed.starts_with("[前段推理已省略"));
+        assert!(compressed.ends_with(tail));
+        assert!(!compressed.contains(head.as_str()), "冗长前段不应保留");
+        assert!(compressed.chars().count() < 200);
+    }
+
+    /// 尾段长度不超过 max_chars + 标记长度，且 UTF-8 边界安全（中文按字符计数）。
+    #[test]
+    fn tail_len_bounded_on_utf8() {
+        let content = "甲".repeat(3000);
+        let max = 500;
+        let compressed = compress_reasoning(&content, max);
+        let tail: String = compressed
+            .strip_prefix("[前段推理已省略，仅保留结论尾段]\n")
+            .unwrap()
+            .to_string();
+        assert_eq!(tail.chars().count(), max);
+        assert_eq!(tail, "甲".repeat(max));
     }
 }

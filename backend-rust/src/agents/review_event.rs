@@ -19,6 +19,7 @@
 //! - `finding_removed` — finding 被消除（去重合并）
 //! - `stats` — 阶段性统计快照
 //! - `done` — 审查完成
+//! - `partial_done` — 审查部分完成，携带失败 Agent/条款明细
 //! - `error` — 审查执行失败
 
 use serde::Serialize;
@@ -117,6 +118,10 @@ pub enum ReviewEvent {
         page_number: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         section_path: Option<Vec<String>>,
+        /// 关联的原始 block_id（框架从 clause.source_block_ids 聚合），
+        /// 供前端流式阶段直接查 bbox 画高亮框；空 Vec 表示无坐标可回退。
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        block_ids: Vec<String>,
     },
 
     /// Finding 被更新
@@ -156,6 +161,20 @@ pub enum ReviewEvent {
         high_risk: usize,
         session_id: String,
         duration_secs: f64,
+    },
+
+    /// 审查仅部分完成，保留成功结果并携带失败明细。
+    #[serde(rename = "partial_done")]
+    PartialDone {
+        total_findings: usize,
+        high_risk: usize,
+        session_id: String,
+        duration_secs: f64,
+        failed_agents: Vec<crate::agents::types::AgentExecutionFailure>,
+        failed_clauses: Vec<crate::agents::types::ClauseExecutionFailure>,
+        failed_stages: Vec<crate::agents::types::StageExecutionFailure>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        budget: Option<crate::agents::execution_control::BudgetUsage>,
     },
 
     /// 审查执行失败
@@ -255,6 +274,48 @@ mod tests {
     }
 
     #[test]
+    fn test_partial_done_event_contains_failure_details() {
+        let event = ReviewEvent::PartialDone {
+            total_findings: 2,
+            high_risk: 1,
+            session_id: "doc-partial".to_string(),
+            duration_secs: 1.5,
+            failed_agents: vec![crate::agents::types::AgentExecutionFailure {
+                agent_id: "missing-agent".to_string(),
+                message: "Agent 定义未找到".to_string(),
+            }],
+            failed_clauses: vec![crate::agents::types::ClauseExecutionFailure {
+                agent_id: "missing-agent".to_string(),
+                clause_id: "ch_001".to_string(),
+                message: "Agent 定义未找到".to_string(),
+            }],
+            failed_stages: vec![crate::agents::types::StageExecutionFailure {
+                stage: "batch_search".to_string(),
+                message: "BatchSearch 阶段超时".to_string(),
+            }],
+            budget: Some(crate::agents::execution_control::BudgetUsage {
+                limits: crate::agents::execution_control::BudgetLimits::for_workload(1, 1),
+                llm_calls: 2,
+                tool_calls: 3,
+                web_search_calls: 1,
+                total_tokens: 1_000,
+                exhausted: false,
+                exhausted_reason: None,
+            }),
+        };
+
+        let json = serde_json::to_value(event).expect("partial_done 应可序列化");
+        assert_eq!(json["event"], "partial_done");
+        assert_eq!(
+            json["data"]["failed_agents"][0]["agent_id"],
+            "missing-agent"
+        );
+        assert_eq!(json["data"]["failed_clauses"][0]["clause_id"], "ch_001");
+        assert_eq!(json["data"]["failed_stages"][0]["stage"], "batch_search");
+        assert_eq!(json["data"]["budget"]["limits"]["llm_calls"], 30);
+    }
+
+    #[test]
     fn test_trace_event() {
         let bus = ReviewEventBus::new(32);
         let mut rx = bus.subscribe();
@@ -294,12 +355,14 @@ mod tests {
             lifecycle: FindingLifecycle::Verified,
             page_number: Some(3),
             section_path: Some(vec!["技术要求".to_string()]),
+            block_ids: vec!["b_3_1".to_string(), "b_3_2".to_string()],
         });
 
         let msg = rx.try_recv().expect("应收到消息");
         assert!(msg.contains("finding_added"));
         assert!(msg.contains("R_001"));
         assert!(msg.contains("high"));
+        assert!(msg.contains("b_3_1"));
     }
 
     #[test]

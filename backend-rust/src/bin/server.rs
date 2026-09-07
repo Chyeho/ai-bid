@@ -17,11 +17,16 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 加载 .env
+    // 加载 .env：依次尝试当前目录 → data_dir → 上级目录（开发时 .env 在项目根）
     dotenv::dotenv().ok();
     let data_env = ai_bid::paths::data_dir().join(".env");
     if data_env.exists() {
-        dotenv::from_path(data_env).ok();
+        dotenv::from_path(&data_env).ok();
+    }
+    if let Some(parent) = std::env::current_dir().ok().and_then(|d| d.parent().map(|p| p.join(".env"))) {
+        if parent.exists() {
+            dotenv::from_path(&parent).ok();
+        }
     }
 
     println!("╔══════════════════════════════════════╗");
@@ -34,7 +39,8 @@ async fn main() -> anyhow::Result<()> {
     // 初始化共享状态（加载 BGE-M3 模型等）
     println!("  正在加载模型...");
     let state = ai_bid::api::handlers::AppState::init().await?;
-    println!("  模型加载完成");
+    let restored = state.reload_persisted_documents().await;
+    println!("  模型加载完成，从磁盘恢复 {} 个已处理文档", restored);
 
     let router = ai_bid::api::router::build(state);
     let bind_addr = std::env::var("AIBID_RUST_BIND")
