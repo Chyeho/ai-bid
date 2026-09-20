@@ -1,6 +1,5 @@
 package com.ithsd.smart_tender.service;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -10,13 +9,13 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Semaphore;
@@ -39,9 +38,6 @@ public class DocumentPreviewService {
 
     private static final Semaphore CONVERSION_LIMIT = new Semaphore(MAX_CONCURRENT_CONVERSIONS);
 
-    @Value("${preview.cache.path:}")
-    private String previewCachePath;
-
     public ResponseEntity<ByteArrayResource> convertDocxToPdf(Path sourcePath, String downloadFileName) throws IOException {
         Path pdfPath = ensurePdfPreviewFile(sourcePath);
         byte[] pdfBytes = Files.readAllBytes(pdfPath);
@@ -57,6 +53,17 @@ public class DocumentPreviewService {
                 .body(pdfResource);
     }
 
+    /**
+     * 确保 Word 文档存在<b>持久化的同目录 PDF 版本</b>（sibling：{@code <stem>.pdf}），返回其路径。
+     *
+     * <p><b>链路唯一转换点：</b>全系统只保留这一处 LibreOffice（Java 容器）。本方法产出的
+     * PDF 同时用于：① 前端预览/下载；② 上传 Rust 审查引擎（提取高亮坐标）；③ 知识库 ingest。
+     * 审查高亮坐标与预览 PDF 必须出自同一份文件——历史上 Java/Rust 各转一次 PDF，
+     * 两套 LibreOffice 版本不同导致分页/断行不一致，高亮整体错位。</p>
+     *
+     * <p>幂等：目标 PDF 已存在且不早于源文件 mtime 时直接复用；否则现场转换。
+     * 写入采用「同目录临时文件 + 原子改名」，避免并发读者读到半成品。</p>
+     */
     public Path ensurePdfPreviewFile(Path sourcePath) throws IOException {
         String name = sourcePath.getFileName().toString().toLowerCase();
         if (name.endsWith(".pdf")) {
@@ -65,13 +72,35 @@ public class DocumentPreviewService {
         if (!name.endsWith(".doc") && !name.endsWith(".docx")) {
             throw new IOException("仅支持Word文档转PDF: " + sourcePath);
         }
-        Path target = buildPreviewPdfPath(sourcePath);
+        Path target = siblingPdfPath(sourcePath);
         if (Files.exists(target) && Files.getLastModifiedTime(target).toMillis() >= Files.getLastModifiedTime(sourcePath).toMillis()) {
             return target;
         }
         byte[] pdfBytes = convertToPdfBytes(sourcePath);
-        Files.write(target, pdfBytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+        Path parent = target.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Path tmp = Files.createTempFile(parent, target.getFileName().toString() + ".", ".tmp");
+        try {
+            Files.write(tmp, pdfBytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+            try {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(tmp);
+        }
         return target;
+    }
+
+    /** 源文件同目录的 sibling PDF 路径：{@code <stem>.pdf}（同目录 → 天然属于同一租户空间）。 */
+    private Path siblingPdfPath(Path sourcePath) {
+        String name = sourcePath.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        String stem = dot > 0 ? name.substring(0, dot) : name;
+        return sourcePath.resolveSibling(stem + ".pdf");
     }
 
     /**
@@ -238,33 +267,6 @@ public class DocumentPreviewService {
                 }
             });
         } catch (IOException ignored) {
-        }
-    }
-
-    private Path buildPreviewPdfPath(Path sourcePath) throws IOException {
-        Path cacheRoot;
-        if (previewCachePath == null || previewCachePath.isBlank()) {
-            cacheRoot = sourcePath.getParent().resolve(".preview-cache");
-        } else {
-            cacheRoot = Paths.get(previewCachePath);
-        }
-        Files.createDirectories(cacheRoot);
-        String cacheKey = buildCacheKey(sourcePath);
-        return cacheRoot.resolve(cacheKey + ".preview.pdf");
-    }
-
-    private String buildCacheKey(Path sourcePath) throws IOException {
-        String seed = sourcePath.toAbsolutePath().normalize() + "|" + Files.getLastModifiedTime(sourcePath).toMillis();
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] bytes = digest.digest(seed.getBytes(StandardCharsets.UTF_8));
-            StringBuilder builder = new StringBuilder();
-            for (byte value : bytes) {
-                builder.append(String.format("%02x", value));
-            }
-            return builder.substring(0, 24);
-        } catch (NoSuchAlgorithmException ex) {
-            throw new IOException("预览缓存键生成失败", ex);
         }
     }
 }

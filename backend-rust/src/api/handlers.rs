@@ -69,7 +69,6 @@ use crate::services::chunking_service::chunk_sections;
 use crate::services::desensitize_service::{
     DesensitizationMode, DesensitizationSummary, RedactionVault,
 };
-use crate::services::docx_convert_service::convert_docx_to_pdf;
 use crate::services::embedding_service::EmbeddingClient;
 use crate::services::llm_client::create_llm_client;
 use crate::services::pdf_extract_service::{extract_pdf_to_raw_json, extract_with_python};
@@ -626,21 +625,20 @@ pub async fn process_document(
     let ext = std::path::Path::new(&filename)
         .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("pdf");
+        .unwrap_or("pdf")
+        .to_lowercase();
+
+    // 镜像已不再内置 LibreOffice：DOCX/DOC 必须由上游（Java 后端，全链路唯一转换点）
+    // 先转成 PDF 再上传，保证审查高亮坐标与前端预览引用同一份 PDF。
+    if ext == "docx" || ext == "doc" {
+        return Err(bad_request(
+            "Rust 引擎不再内置 DOCX→PDF 转换（镜像已移除 LibreOffice），请由 Java 后端先转换为 PDF 再上传",
+        ));
+    }
+
     let tmp_path = tmp_dir.join(format!("{}.{}", stem, ext));
     std::fs::write(&tmp_path, &file_data).map_err(|e| server_error("写入临时文件失败", e))?;
-
-    // DOCX → PDF 转换（对齐 CLI 行为）
-    let pdf_path = if ext == "docx" || ext == "doc" {
-        println!("[STAGE] DOCX → PDF 转换...");
-        convert_docx_to_pdf(
-            tmp_path.to_string_lossy().as_ref(),
-            tmp_dir.to_string_lossy().as_ref(),
-        )
-        .map_err(|e| server_error("DOCX 转 PDF 失败", e))?
-    } else {
-        tmp_path.clone()
-    };
+    let pdf_path = tmp_path.clone();
 
     // 阶段 1: PDF → RawDocument（Rust 主路径 + Python 兜底）
     println!("[STAGE] PDF 文本提取...");

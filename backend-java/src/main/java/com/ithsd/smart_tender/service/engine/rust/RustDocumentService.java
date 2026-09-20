@@ -4,6 +4,7 @@ import com.ithsd.smart_tender.common.BizException;
 import com.ithsd.smart_tender.mapper.TenderMapper;
 import com.ithsd.smart_tender.model.entity.Tender;
 import com.ithsd.smart_tender.model.dto.rust.RustProcessResponse;
+import com.ithsd.smart_tender.service.DocumentPreviewService;
 import com.ithsd.smart_tender.service.StoragePathService;
 import com.ithsd.smart_tender.service.impl.TenantScope;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
@@ -12,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
@@ -34,15 +36,18 @@ public class RustDocumentService {
     private final RustApiClient rustApiClient;
     private final StoragePathService storagePathService;
     private final TenderMapper tenderMapper;
+    private final DocumentPreviewService documentPreviewService;
 
     public RustDocumentService(
             RustApiClient rustApiClient,
             StoragePathService storagePathService,
-            TenderMapper tenderMapper
+            TenderMapper tenderMapper,
+            DocumentPreviewService documentPreviewService
     ) {
         this.rustApiClient = rustApiClient;
         this.storagePathService = storagePathService;
         this.tenderMapper = tenderMapper;
+        this.documentPreviewService = documentPreviewService;
     }
 
     /**
@@ -138,10 +143,27 @@ public class RustDocumentService {
                 ? tender.getFileName()
                 : filePath.getFileName().toString();
 
-        log.info("Uploading to Rust: bidId={}, path={}, filename={}", bidId, filePath, filename);
+        // ── 链路唯一转换点：Word 文档先由 Java 侧 LibreOffice 转成 PDF（同目录持久化 sibling），
+        // Rust 引擎只接收 PDF。审查高亮坐标与前端预览因此引用同一份 PDF 文件。
+        // （历史上 Rust 容器用另一套 LibreOffice 自行转换，版本不同导致分页/断行不一致、高亮整体错位。）
+        Path uploadPath = filePath;
+        String uploadFilename = filename;
+        String lowerName = filename.toLowerCase();
+        if (lowerName.endsWith(".doc") || lowerName.endsWith(".docx")) {
+            try {
+                uploadPath = documentPreviewService.ensurePdfPreviewFile(filePath);
+            } catch (IOException e) {
+                throw new BizException(5703, "DOCX 转 PDF 失败: " + e.getMessage());
+            }
+            int dot = filename.lastIndexOf('.');
+            uploadFilename = (dot > 0 ? filename.substring(0, dot) : filename) + ".pdf";
+            log.info("Word 文档已转为 PDF 上传（唯一转换点）: bidId={}, pdf={}", bidId, uploadPath);
+        }
+
+        log.info("Uploading to Rust: bidId={}, path={}, filename={}", bidId, uploadPath, uploadFilename);
 
         // 2. 上传到 Rust
-        RustProcessResponse result = rustApiClient.uploadDocument(filePath, filename);
+        RustProcessResponse result = rustApiClient.uploadDocument(uploadPath, uploadFilename);
 
         // 3. 回写缓存
         tender.setRustDocumentId(result.getDocumentId());

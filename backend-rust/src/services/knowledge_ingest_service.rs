@@ -8,7 +8,6 @@ use crate::domain::raw_document::RawDocument;
 use crate::domain::vector_index::DocumentVectorIndex;
 use crate::paths::data_path_str;
 use crate::services::chunking_service::{chunk_sections, populate_bbox_refs};
-use crate::services::docx_convert_service::convert_docx_to_pdf;
 use crate::services::pdf_extract_service::{extract_pdf_to_raw_json, extract_with_python};
 use crate::services::qdrant_store::{KnowledgePayload, QdrantStore, KB_COLLECTION, KB_VECTOR_DIM};
 use crate::services::sectionize_service::{self, Section};
@@ -130,19 +129,34 @@ fn prepare_ingest_blocking(
     let stem = Uuid::new_v4().to_string();
     let document_id = stem.clone();
     let tmp_path_str = upload_path.to_string_lossy().to_string();
-    let ext = Path::new(filename)
+    // 扩展名以【实际上传文件】为准：`filename` 可能是 document_name 展示名
+    // （Java 侧保留原始 .docx 显示名，仅用于 Qdrant payload），而真实字节已由
+    // Java（全链路唯一 LibreOffice 转换点）转成 PDF、multipart 文件名为 <stem>.pdf。
+    let ext = Path::new(&upload_path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("pdf")
         .to_lowercase();
 
-    // ── 1. DOCX → PDF（可选）；转换产物用 guard 清理 ──
-    let pdf_path = if ext == "docx" || ext == "doc" {
-        convert_docx_to_pdf(&tmp_path_str, &tmp_dir).context("DOCX 转 PDF 失败")?
-    } else {
-        upload_path.clone()
-    };
-    let _pdf_guard = (pdf_path != upload_path).then(|| TempFileGuard::new(pdf_path.clone()));
+    // ── 1. 只接受 PDF：DOCX/DOC 必须由上游（Java 后端）转好再入库 ──
+    if ext == "docx" || ext == "doc" {
+        anyhow::bail!(
+            "Rust 引擎不再内置 DOCX→PDF 转换（镜像已移除 LibreOffice），请由 Java 侧先转换为 PDF 再入库"
+        );
+    }
+    // 魔数校验：真实字节必须是 PDF，防止仅改扩展名的误传
+    {
+        use std::io::Read;
+        let mut head = [0u8; 5];
+        let mut f = fs::File::open(&upload_path).context("打开上传文件失败")?;
+        let n = f.read(&mut head).context("读取上传文件头失败")?;
+        if n < 5 || head != *b"%PDF-" {
+            anyhow::bail!(
+                "知识库入库仅接受 PDF 字节（文件头非 %PDF-）；DOCX/DOC 请先由 Java 侧转换为 PDF"
+            );
+        }
+    }
+    let pdf_path = upload_path.clone();
     let pdf_path_str = pdf_path.to_str().unwrap_or(&tmp_path_str).to_string();
 
     // ── 2. PDF → RawDocument（Rust 主 + Python 兜底；fallback JSON 用 guard 清理）──

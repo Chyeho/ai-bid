@@ -1,13 +1,20 @@
-//! DOCX → PDF 转换服务
+//! DOCX → PDF 转换服务（仅供本地 CLI / 调试）
 //!
 //! 通过调用 LibreOffice headless 模式将 .docx 文件转换为 PDF，
 //! 转换后的 PDF 可直接输入现有的 PDF 提取管线。
 //!
+//! ## 重要：线上链路不再使用本模块
+//!
+//! server 运行镜像已移除 LibreOffice——线上 DOCX/DOC 一律由 Java 后端
+//! （全链路唯一转换点）先转成 PDF 再上传/入库，保证审查高亮坐标与前端
+//! 预览引用同一份 PDF。HTTP API（documents 上传、knowledge ingest）收到
+//! DOCX 会直接报错拒绝。本模块仅保留给本地 CLI（`src/main.rs`）与开发调试，
+//! 依赖开发机自行安装 LibreOffice。
+//!
 //! ## 依赖
 //!
 //! 需要系统已安装 LibreOffice（Windows / Linux / macOS 均支持）。
-//! Linux 下以专用非 root 系统用户 `soffice` 运行（见 Dockerfile），
-//! 降低处理不可信文档时的权限。
+//! Linux 下若存在专用非 root 系统用户 `soffice` 则以其身份运行（安全加固）。
 //! 默认搜索路径：
 //!   - Windows: `C:\Program Files\LibreOffice\program\soffice.exe`
 //!   - Linux/macOS: `soffice` (PATH 中)
