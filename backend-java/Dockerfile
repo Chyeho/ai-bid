@@ -1,5 +1,8 @@
 # ── Java 后端多阶段构建：Maven 构建 → JRE 运行 ──
-FROM maven:3.9-eclipse-temurin-17 AS build
+# 基础镜像钉在 noble（Ubuntu 24.04 LTS）：浮动 tag 会随时间带上不同大版本的
+# LibreOffice（曾拉到 26.x，与 Rust 侧 7.4 排版不一致导致审查高亮整体错位）。
+# 现在全链路只有本镜像内置 LibreOffice 这一个 DOCX→PDF 转换点，钉住 LTS 防止再次漂移。
+FROM maven:3.9-eclipse-temurin-17-noble AS build
 
 # 构建期内存上限：宿主机 7.7G 无 swap，限制 Maven/JVM 避免构建 OOM
 ENV MAVEN_OPTS="-Xmx1024m -XX:MaxMetaspaceSize=512m"
@@ -15,14 +18,16 @@ COPY src ./src
 RUN mvn -B clean package -DskipTests
 
 # ── 运行阶段 ──
-FROM eclipse-temurin:17-jre
+FROM eclipse-temurin:17-jre-noble
 
 WORKDIR /app
 
 # 拷贝可执行 fat jar（名称 = artifactId-version.jar）
 COPY --from=build /app/target/smart_tender-0.0.1-SNAPSHOT.jar app.jar
 
-# LibreOffice 用于 DOCX → PDF 转换（含中文字体，否则中文标书转 PDF 乱码）
+# LibreOffice 用于 DOCX → PDF 转换（含中文字体，否则中文标书转 PDF 乱码）。
+# 注意：这是全链路唯一的 DOCX→PDF 转换点——预览、审查引擎（Rust）、知识库入库
+# 都消费这里产出的同一份 PDF（Rust 镜像已移除 LibreOffice），保证高亮坐标与预览一致。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-core libreoffice-writer fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*

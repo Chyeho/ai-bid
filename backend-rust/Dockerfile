@@ -49,17 +49,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim
 
 # 运行时依赖：ca-certificates（HTTPS）+ libssl3 + libgomp1（ONNX 动态库的 OpenMP）
-# LibreOffice 用于 DOCX/DOC → PDF 转换（fonts-noto-cjk 避免中文标书转 PDF 乱码/豆腐块）
 # python3 + pdfplumber 用于 lopdf 失败时的真实坐标兜底提取
+#
+# 注意：本镜像【不再内置 LibreOffice】。DOCX/DOC 一律由 Java 后端（全链路唯一的
+# LibreOffice 转换点）先转成 PDF 再上传/入库——历史上 Java 与 Rust 各转一次 PDF，
+# 两套 LibreOffice 版本不同导致分页/断行不一致，审查高亮与前端预览整体错位。
+# 直接上传 DOCX 会被 API 明确拒绝（400）。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 libgomp1 \
-    libreoffice-core libreoffice-writer fonts-noto-cjk \
     python3 python3-pip \
     && pip3 install --break-system-packages --no-cache-dir pdfplumber \
     && rm -rf /var/lib/apt/lists/*
-
-# 专用非 root 系统用户：供 docx_convert_service 以非 root 身份运行 soffice（安全加固）
-RUN useradd -r -s /usr/sbin/nologin -m -d /home/soffice soffice
 
 WORKDIR /app
 

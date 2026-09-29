@@ -9,6 +9,7 @@ import com.ithsd.smart_tender.mapper.KnowledgeFileMapper;
 import com.ithsd.smart_tender.model.dto.rust.RustKnowledgeIngestResponse;
 import com.ithsd.smart_tender.model.entity.KnowledgeFile;
 import com.ithsd.smart_tender.model.result.PageResult;
+import com.ithsd.smart_tender.service.DocumentPreviewService;
 import com.ithsd.smart_tender.service.KnowledgeFileService;
 import com.ithsd.smart_tender.service.TenantAuthorizationService;
 import com.ithsd.smart_tender.service.engine.rust.RustApiClient;
@@ -58,6 +59,9 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
 
     @Autowired
     private RustApiClient rustApiClient;
+
+    @Autowired
+    private DocumentPreviewService documentPreviewService;
 
     @Autowired
     @Qualifier("auditTaskExecutor")
@@ -469,8 +473,18 @@ public class KnowledgeFileServiceImpl extends ServiceImpl<KnowledgeFileMapper, K
     private void asyncIngestAndPersist(Long fileId, Path filePath, String filename,
                                        String category, String applicableScope, String documentName) {
         try {
+            // Rust 引擎镜像已移除 LibreOffice：Word 文件统一在 Java 侧转成 PDF（同目录持久化 sibling）再入库
+            Path ingestPath = filePath;
+            String ingestName = filename;
+            String lowerName = filename == null ? "" : filename.toLowerCase();
+            if (lowerName.endsWith(".doc") || lowerName.endsWith(".docx")) {
+                ingestPath = documentPreviewService.ensurePdfPreviewFile(filePath);
+                int dot = ingestName.lastIndexOf('.');
+                ingestName = (dot > 0 ? ingestName.substring(0, dot) : ingestName) + ".pdf";
+                log.info("知识库 Word 文件已转为 PDF 入库（唯一转换点）: fileId={}, pdf={}", fileId, ingestPath);
+            }
             RustKnowledgeIngestResponse resp = rustApiClient.ingestKnowledge(
-                    filePath, filename, category, applicableScope, documentName);
+                    ingestPath, ingestName, category, applicableScope, documentName);
             KnowledgeFile update = new KnowledgeFile();
             update.setId(fileId);
             update.setChunkCount(resp.getChunkCount());
